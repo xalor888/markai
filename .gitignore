@@ -30,3 +30,6 @@ preview-*.png
 *.njsproj
 *.sln
 *.sw?
+
+# 内部会话/计划文件（不上传）
+.zcode/

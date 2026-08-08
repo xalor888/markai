@@ -109,4 +109,4 @@ src/
 ## 测试
 
 - 运行：`npx tsx tests/agent.test.ts`（共 **93 项**，覆盖 SSE 流式解析、工具循环与死循环检测、网络错误自动重连、URL 分类、批量创建、多会话墓碑/清空/远端合并、配置解析边界、任务端到端链路、大库工具（check_urls_bulk / auto_categorize / cleanup_sweep）、删除提议终态保护）
-- 质量门禁：`npm run compile`（tsc 严格模式）→ `npm test` → `npm run build`，全程绿色
+- 本地验证：`npm run compile`（tsc）→ `npm test` → `npm run build`

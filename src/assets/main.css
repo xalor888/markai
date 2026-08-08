@@ -1,0 +1,290 @@
+@import 'tailwindcss';
+
+/* 深色模式使用 class 策略（html.dark） */
+@custom-variant dark (&:is(.dark *));
+
+@theme {
+  /* ── 色彩系统：Slate 石板灰主色，零紫色、零品红 ── */
+  --color-background: #f8fafc;
+  --color-foreground: #0f172a;
+  --color-card: #ffffff;
+  --color-card-foreground: #0f172a;
+  --color-muted: #f1f5f9;
+  --color-muted-foreground: #64748b;
+  --color-border: #e2e8f0;
+  --color-input: #cbd5e1;
+  --color-ring: #6366f1;
+
+  /* 强调色：Indigo 靛蓝（低饱和点缀） */
+  --color-accent: #4f46e5;
+  --color-accent-foreground: #ffffff;
+  --color-accent-muted: #eef2ff;
+
+  /* 语义色：红色仅用于危险操作，绿色仅用于成功反馈 */
+  --color-destructive: #b91c1c;
+  --color-success: #15803d;
+
+  /* ── 圆角铁律：容器上限 8px（rounded-lg），按钮/输入框 4px（rounded-sm）── */
+  --radius-sm: 0.25rem;
+  --radius-md: 0.375rem;
+  --radius-lg: 0.5rem;
+
+  /* ── 阴影铁律：全部禁用，层级靠 1px 实线边框 ── */
+  --shadow-xs: none;
+  --shadow-sm: none;
+  --shadow: none;
+  --shadow-md: none;
+  --shadow-lg: none;
+  --shadow-xl: none;
+  --shadow-2xl: none;
+
+  /* 字体：系统字体栈 */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
+    'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+/* ── 深色模式 token（极深灰，略带冷色倾向，非纯黑）── */
+.dark {
+  --color-background: #0f0911;
+  --color-foreground: #e2e8f0;
+  --color-card: #16111c;
+  --color-card-foreground: #e2e8f0;
+  --color-muted: #1d1628;
+  --color-muted-foreground: #94a3b8;
+  --color-border: #2a2333;
+  --color-input: #3d3546;
+  --color-ring: #818cf8;
+  --color-accent: #6366f1;
+  --color-accent-foreground: #ffffff;
+  --color-accent-muted: #262044;
+  --color-destructive: #f87171;
+  --color-success: #4ade80;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-background font-sans text-foreground antialiased;
+    font-size: 14px;
+    line-height: 1.5;
+    /* 禁止选中 UI 文本，避免拖拽感（输入框不受影响） */
+    user-select: none;
+  }
+
+  input,
+  textarea {
+    user-select: text;
+  }
+
+  /* ── 原生键盘焦点环（按钮/菜单项等组件自带 focus-visible:ring 的不受影响） ── */
+  :focus-visible:not(input):not(textarea):not(select) {
+    outline: 2px solid var(--color-ring);
+    outline-offset: 1px;
+  }
+
+  /* 鼠标点击时不显示焦点环（仅键盘可见） */
+  button:focus:not(:focus-visible) {
+    outline: none;
+  }
+
+  /* 文本选区：Indigo 低饱和 */
+  ::selection {
+    background-color: color-mix(in srgb, var(--color-accent) 18%, transparent);
+  }
+
+  /* 输入光标用强调色，贴近浏览器原生 */
+  input,
+  textarea {
+    caret-color: var(--color-accent);
+  }
+
+  /* 去除移动端点击高亮 */
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* 细滚动条（Slate 系，贴合整体气质） */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: #cbd5e1 transparent;
+  }
+  .dark * {
+    scrollbar-color: #3d3546 transparent;
+  }
+}
+
+/* ── 轻量出现动画（150ms，克制原生节奏） ── */
+@keyframes markai-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes markai-scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+.animate-fade-in {
+  animation: markai-fade-in 150ms ease-out;
+}
+.animate-scale-in {
+  animation: markai-scale-in 150ms ease-out;
+}
+
+/* 流式输出光标（克制闪烁） */
+@keyframes markai-blink {
+  0%,
+  45% {
+    opacity: 1;
+  }
+  55%,
+  100% {
+    opacity: 0;
+  }
+}
+.stream-cursor {
+  animation: markai-blink 1s step-end infinite;
+}
+
+/* 细滚动条（浅/深主题自适应，浏览器原生观感） */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted-foreground);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ── AI 回复 Markdown 渲染（react-markdown + remark-gfm）──
+   规范：无紫/品红、圆角≤8px、字重 400/500、1px 边框分层 */
+.markdown {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.markdown > :first-child {
+  margin-top: 0;
+}
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+.markdown p {
+  margin: 4px 0;
+}
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4,
+.markdown h5 {
+  margin: 10px 0 4px;
+  font-size: 13px;
+  font-weight: 500;
+  border-left: 2px solid color-mix(in srgb, var(--color-accent) 40%, transparent);
+  padding-left: 6px;
+}
+.markdown h1 {
+  font-size: 14px;
+}
+.markdown ul,
+.markdown ol {
+  margin: 4px 0;
+  padding-left: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.markdown ul {
+  list-style: disc;
+}
+.markdown ol {
+  list-style: decimal;
+}
+.markdown li {
+  margin: 1px 0;
+}
+.markdown li::marker {
+  color: var(--color-muted-foreground);
+}
+.markdown li > p {
+  margin: 0;
+}
+.markdown blockquote {
+  margin: 4px 0;
+  border-left: 2px solid var(--color-border);
+  padding-left: 8px;
+  color: var(--color-muted-foreground);
+}
+.markdown code {
+  background: var(--color-muted);
+  border-radius: 4px;
+  padding: 1px 4px;
+  font-size: 11px;
+  font-weight: 400;
+}
+.markdown pre {
+  margin: 6px 0;
+  overflow-x: auto;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-muted);
+  padding: 8px;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: pre;
+}
+.markdown pre code {
+  background: transparent;
+  padding: 0;
+  border-radius: 0;
+  font-size: 11px;
+}
+.markdown table {
+  margin: 6px 0;
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.markdown th,
+.markdown td {
+  border: 1px solid var(--color-border);
+  padding: 4px 8px;
+  text-align: left;
+}
+.markdown th {
+  background: var(--color-muted);
+  font-weight: 500;
+}
+.markdown hr {
+  margin: 8px 0;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+}
+.markdown input[type='checkbox'] {
+  accent-color: var(--color-accent);
+  margin-right: 4px;
+  vertical-align: -1px;
+}

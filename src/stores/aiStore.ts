@@ -13,6 +13,8 @@ import type {
   OneShotOutbound,
   ToolCallRecord,
 } from '@/lib/ai/types';
+import type { UndoPoint } from '@/lib/undo/types';
+import { undoReadiness } from '@/lib/undo/journal';
 import { useBookmarkStore } from './bookmarkStore';
 
 /** storage key（popup 通过该 key 只读展示待删数） */
@@ -55,6 +57,8 @@ interface AIState {
   /** 本窗口清空过的会话 id（墓碑：防其他窗口旧快照复活） */
   clearedIds: string[];
   pendingDeletions: DeletionProposal[];
+  /** 最新在前的撤销点（操作日志：一轮 Agent = 一个撤销点） */
+  undoPoints: UndoPoint[];
   streaming: boolean;
   streamingMessageId: string | null;
   port: chrome.runtime.Port | null;
@@ -86,6 +90,10 @@ interface AIState {
   confirmDeletions: (proposalIds: string[]) => Promise<void>;
   /** 全部放弃待删清单 */
   declineAllDeletions: () => Promise<void>;
+  /** 操作日志：拉取最近的撤销点（每轮 Agent 结束后刷新） */
+  refreshUndo: () => Promise<void>;
+  /** 操作日志：撤销最近（或指定）的写操作轮次，并把书签树刷新回 UI */
+  undoLast: (id?: string) => Promise<void>;
   /** 持久化；force=true 时跳过远端合并（清空等用户明确意图的操作） */
   _persist: (force?: boolean) => Promise<void>;
 }
@@ -198,6 +206,7 @@ export const useAIStore = create<AIState>((set, get) => ({
   deletedIds: [],
   clearedIds: [],
   pendingDeletions: [],
+  undoPoints: [],
   streaming: false,
   streamingMessageId: null,
   port: null,
@@ -257,6 +266,8 @@ export const useAIStore = create<AIState>((set, get) => ({
       // 存储异常时回退空会话
       set({ messages: [], conversations: [], activeId: null, deletedIds: [], clearedIds: [], pendingDeletions: [] });
     }
+    // 新开的窗口也要看到已有撤销点（撤销点存在 background 侧，不在会话存储里）
+    void get().refreshUndo();
   },
 
   async send(text, opts) {
@@ -516,6 +527,8 @@ export const useAIStore = create<AIState>((set, get) => ({
         }
         set({ streaming: false, streamingMessageId: null });
         void get()._persist();
+        // 一轮结束 = 一个撤销点已落盘，刷新「撤销本次操作」按钮的可用状态
+        void get().refreshUndo();
         break;
       }
 
@@ -644,6 +657,48 @@ export const useAIStore = create<AIState>((set, get) => ({
   async declineAllDeletions() {
     const pending = get().pendingDeletions.filter((p) => p.status === 'pending');
     get().resolveDeletions(pending.map((p) => [p.id, 'declined']));
+  },
+
+  async refreshUndo() {
+    try {
+      const res = (await chrome.runtime.sendMessage({ type: 'undo:list' })) as OneShotOutbound | undefined;
+      set({ undoPoints: res?.type === 'undo:list:result' ? res.points : [] });
+    } catch {
+      // SW 已回收等情况：当作没有撤销点，不打扰用户
+      set({ undoPoints: [] });
+    }
+  },
+
+  async undoLast(id?: string) {
+    try {
+      const res = (await chrome.runtime.sendMessage({
+        type: 'undo:apply',
+        ...(id ? { id } : {}),
+      })) as OneShotOutbound | undefined;
+      if (res?.type !== 'undo:apply:result') {
+        pushToast('撤销未返回结果，请重试', { variant: 'destructive' });
+        return;
+      }
+      const r = res.result;
+      if (!r.ok && r.restored === 0) {
+        // 明确拒绝（含删除的轮次、已撤销过等）：如实说明原因，不假装成功
+        pushToast('无法撤销', { description: r.reason ?? '没有可撤销的操作', variant: 'destructive' });
+      } else if (r.failures.length > 0) {
+        pushToast(`已还原 ${r.restored} 项，${r.failures.length} 项失败`, {
+          description: r.failures.map((f) => `${f.title}：${f.error}`).join('；'),
+          variant: 'destructive',
+        });
+      } else {
+        pushToast(`已撤销本次操作（还原 ${r.restored} 项）`, { variant: 'success' });
+      }
+      await get().refreshUndo();
+      void useBookmarkStore.getState().loadTree();
+    } catch (e) {
+      pushToast('撤销失败', {
+        description: e instanceof Error ? e.message : String(e),
+        variant: 'destructive',
+      });
+    }
   },
 
   async _persist(force = false) {

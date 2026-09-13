@@ -1,5 +1,7 @@
 /** ── Agent 消息模型（UI 与 background 共享） ── */
 
+import type { UndoApplyResult, UndoPoint } from '@/lib/undo/types';
+
 /** 工具执行状态 */
 export type ToolStatus = 'running' | 'done' | 'error';
 
@@ -98,6 +100,9 @@ export type OneShotInbound =
   | { type: 'deletions:execute'; items: { proposalId: string; bookmarkId: string }[] }
   | { type: 'sidepanel:open'; windowId: number }
   | { type: 'seed:consume' }
+  // 操作日志：列出 / 撤销最近的写操作（一个 Agent 轮次 = 一个撤销点）
+  | { type: 'undo:list' }
+  | { type: 'undo:apply'; id?: string }
   // 查询当前是否有 Agent 任务在跑（SW 活着才有准确状态；SW 已回收 = 任务已中断）
   | { type: 'task:status' };
 
@@ -108,6 +113,8 @@ export type OneShotOutbound =
   | { type: 'deletions:result'; count: number; failed: { proposalId: string; error: string }[] }
   | { type: 'sidepanel:opened'; ok: boolean }
   | { type: 'seed:value'; text?: string; folderId?: string; notice?: string }
+  | { type: 'undo:list:result'; points: UndoPoint[] }
+  | { type: 'undo:apply:result'; result: UndoApplyResult }
   | { type: 'task:status:result'; running: boolean };
 
 /** contextMenus 种子指令（存储中转，侧边栏挂载时消费） */

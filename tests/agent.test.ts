@@ -76,6 +76,22 @@ function insertSiblingAt(node: FNode, index: number) {
   store.splice(store.findIndex((n) => n.id === anchor.id) + (before ? 0 : 1), 0, node);
 }
 
+/**
+ * 书签树的稳定快照（含 id、标题、URL 与**顺序**）。
+ * 用途：撤销的验收标准是「整棵树与操作前逐节点一致」，必须能比较顺序，
+ * 只比集合会漏掉"顺序错了"这类最典型的撤销 bug。
+ */
+async function snapshotTree(): Promise<string> {
+  const tree = await mockBookmarks.getTree();
+  const norm = (n: chrome.bookmarks.BookmarkTreeNode): unknown => ({
+    id: n.id,
+    title: n.title,
+    url: n.url ?? null,
+    children: (n.children ?? []).map(norm),
+  });
+  return JSON.stringify((tree[0]?.children ?? []).map(norm));
+}
+
 const mockBookmarks = {
   getTree: async () => [toApi({ id: '0', title: '', dateAdded: 0 })],
   getSubTree: async (id: string) => {
@@ -182,8 +198,13 @@ const mockBookmarks = {
       onMessage: { addListener: () => {} },
       onDisconnect: { addListener: () => {} },
     }),
+    // 一次性消息：由各测试用例注入响应（默认无响应，等价于"没人处理"）
+    sendMessage: async (msg: unknown) => sendMessageMock(msg),
   },
 };
+
+/** 注入 chrome.runtime.sendMessage 的响应；测试按需覆盖 */
+let sendMessageMock: (msg: unknown) => unknown = () => undefined;
 
 /** 内存 storage（多会话墓碑/清空/合并测试用） */
 const storageMap = new Map<string, unknown>();
@@ -1677,6 +1698,327 @@ function ok(name: string, fn: () => void) {
     // 复位，避免影响后续（本区块为最后一段，仍保持一致状态）
     useAIStore.setState({ port: null, streaming: false });
     await mockBookmarks.removeTree(F).catch(() => {});
+  }
+
+  /* ── T23: 操作日志与撤销（DIRECTION P1） ── */
+  console.log('\n[T23] 操作日志与撤销');
+  {
+    const { summarizeOps, undoReadiness, undoableOps, reverseOps } = await import('../src/lib/undo/journal');
+    const {
+      UNDO_STORAGE_KEY,
+      beginUndoTransaction,
+      endUndoTransaction,
+      readUndoPoints,
+      resetUndoTransactionForTest,
+    } = await import('../src/lib/undo/recorder');
+    const { applyUndo } = await import('../src/lib/undo/apply');
+    const { jMove, jRemove } = await import('../src/lib/undo/mutations');
+    type UndoOp = import('../src/lib/undo/types').UndoOp;
+
+    const opMove = (id: string, fromIndex: number): UndoOp => ({
+      kind: 'move',
+      id,
+      title: id,
+      fromParentId: 'p',
+      fromIndex,
+    });
+    const opCreate = (id: string): UndoOp => ({ kind: 'create', id, title: id, isFolder: false });
+    const opDelete = (id: string): UndoOp => ({ kind: 'delete', id, title: id });
+
+    // ── A. 纯逻辑 ──
+    ok('summarizeOps 按类型汇总', () => {
+      const ops: UndoOp[] = [opMove('a', 0), opMove('b', 1), opCreate('c'), opDelete('d')];
+      assert.equal(summarizeOps(ops), '移动 2 项、新建 1 项、删除 1 项');
+      assert.equal(summarizeOps([]), '无写操作');
+    });
+    ok('undoableOps 排除删除（删除没有快照）', () => {
+      const ops: UndoOp[] = [opMove('a', 0), opDelete('d')];
+      assert.deepEqual(
+        undoableOps(ops).map((o) => o.kind),
+        ['move'],
+      );
+    });
+    ok('reverseOps 严格逆序（先做的后撤）', () => {
+      const ops: UndoOp[] = [opMove('a', 0), opCreate('b'), opCreate('c')];
+      assert.deepEqual(
+        reverseOps(ops).map((o) => o.id),
+        ['c', 'b', 'a'],
+      );
+    });
+    ok('undoReadiness：无点/空点/已撤销都不可撤', () => {
+      assert.equal(undoReadiness(null).undoable, false);
+      assert.equal(
+        undoReadiness({ id: '1', runId: 'r', createdAt: 0, ops: [], containsDelete: false }).undoable,
+        false,
+      );
+      assert.equal(
+        undoReadiness({ id: '1', runId: 'r', createdAt: 0, ops: [opMove('a', 0)], containsDelete: false, appliedAt: 1 })
+          .undoable,
+        false,
+      );
+    });
+    ok('undoReadiness：含删除的轮次明确拒绝并给出原因', () => {
+      const r = undoReadiness({
+        id: '1',
+        runId: 'r',
+        createdAt: 0,
+        ops: [opMove('a', 0), opDelete('d')],
+        containsDelete: true,
+      });
+      assert.equal(r.undoable, false);
+      assert.match(r.reason ?? '', /包含删除/);
+      assert.equal(r.count, 1, 'count 只算真正可还原的操作');
+    });
+
+    // ── B. 端到端：一轮整理 → 撤销 → 整棵树逐节点（含顺序）与操作前一致 ──
+    // 夹具：base > [sub1(delta,alpha,charlie,bravo), sub2(空)]
+    const base = (await mockBookmarks.create({ parentId: '2', title: 'T23-BASE' })).id;
+    const sub1 = (await mockBookmarks.create({ parentId: base, title: 'T23-SUB1' })).id;
+    const sub2 = (await mockBookmarks.create({ parentId: base, title: 'T23-SUB2' })).id;
+    const mkBm = async (t: string) =>
+      (await mockBookmarks.create({ parentId: sub1, title: t, url: `https://t23.example/${t}` })).id;
+    const bDelta = await mkBm('delta');
+    const bAlpha = await mkBm('alpha');
+    const bCharlie = await mkBm('charlie');
+    const bBravo = await mkBm('bravo');
+
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    const before = await snapshotTree();
+
+    await beginUndoTransaction('run-t23');
+    await executeTool('create_folder', JSON.stringify({ parentId: sub2, title: 'T23-NEW' }));
+    await executeTool(
+      'create_bookmarks',
+      JSON.stringify({
+        parentId: base,
+        items: [
+          { title: 'n1', url: 'https://t23.example/n1' },
+          { title: 'n2', url: 'https://t23.example/n2' },
+        ],
+      }),
+    );
+    await executeTool('move_bookmarks', JSON.stringify({ ids: [bDelta, bAlpha], parentId: sub2, index: 0 }));
+    await executeTool('rename_bookmark', JSON.stringify({ bookmarkId: bCharlie, title: 'charlie-改名' }));
+    await executeTool(
+      'update_bookmark_url',
+      JSON.stringify({ bookmarkId: bBravo, url: 'https://t23.example/bravo-new' }),
+    );
+    await executeTool('sort_folder', JSON.stringify({ parentId: sub1, by: 'title' }));
+    await executeTool('copy_bookmark', JSON.stringify({ bookmarkId: bCharlie, parentId: sub2 }));
+    const point = await endUndoTransaction();
+
+    const afterTools = await snapshotTree();
+    ok('一轮整理确实改动了书签库（用例非空转）', () => assert.notEqual(afterTools, before));
+    ok('撤销点记录了全部可逆操作', () => {
+      assert.ok(point, '应产生撤销点');
+      const kinds = point!.ops.map((o) => o.kind);
+      assert.ok(kinds.filter((k) => k === 'move').length >= 4, `应有多次移动，实际 ${JSON.stringify(kinds)}`);
+      assert.ok(kinds.includes('create'), '新建/复制应被记录');
+      assert.ok(kinds.includes('update'), '重命名/改 URL 应被记录');
+      assert.equal(point!.containsDelete, false);
+    });
+
+    const undoResult = await applyUndo();
+    const afterUndo = await snapshotTree();
+    ok('撤销后整棵树（含顺序）与操作前逐节点一致', () => {
+      assert.ok(undoResult.ok, `撤销应成功，实际 ${JSON.stringify(undoResult)}`);
+      assert.equal(undoResult.failures.length, 0);
+      assert.equal(afterUndo, before, '撤销后书签树必须与操作前完全一致');
+    });
+    const again = await applyUndo();
+    ok('撤销点被消费，不能重复撤销', () => {
+      assert.equal(again.ok, false);
+      assert.equal(again.restored, 0);
+    });
+
+    // ── C. 白盒：move 的 fromIndex 必须是移动「前」的下标 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    await beginUndoTransaction('run-t23-order');
+    await jMove(bCharlie, { parentId: sub2, index: 0 });
+    const orderPoint = await endUndoTransaction();
+    const moveOp = orderPoint?.ops.find((o) => o.kind === 'move' && o.id === bCharlie) as
+      | Extract<UndoOp, { kind: 'move' }>
+      | undefined;
+    ok('jMove 记录的是移动前的父目录与下标', () => {
+      assert.ok(moveOp, '应记录一条 move');
+      assert.equal(moveOp!.fromParentId, sub1, 'fromParentId 应是移动前的父目录');
+      assert.equal(moveOp!.fromIndex, 2, 'fromIndex 应是移动前在 sub1 中的下标（charlie 第 3 位）');
+    });
+    await applyUndo();
+    const restoredKids = (await mockBookmarks.getChildren(sub1)).map((n) => n.title);
+    ok('同父目录重排撤销后顺序完全还原', () =>
+      assert.deepEqual(restoredKids, ['delta', 'alpha', 'charlie', 'bravo']),
+    );
+
+    // ── D. 含删除的轮次：明确拒绝，且不产生半撤销 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    const doomed = (await mockBookmarks.create({ parentId: sub2, title: 'T23-DOOMED', url: 'https://t23.example/doomed' })).id;
+    await beginUndoTransaction('run-t23-del');
+    await jMove(bBravo, { parentId: sub2, index: 0 });
+    await jRemove(doomed);
+    const delPoint = await endUndoTransaction();
+    const beforeRefuse = await snapshotTree();
+    const refused = await applyUndo();
+    const afterRefuse = await snapshotTree();
+    ok('含删除的轮次拒绝撤销并说明原因', () => {
+      assert.ok(delPoint?.containsDelete, '应标记含删除');
+      assert.equal(refused.ok, false);
+      assert.match(refused.reason ?? '', /包含删除/);
+      assert.equal(refused.restored, 0);
+    });
+    ok('拒绝撤销时不得改动书签库（不做半撤销）', () => assert.equal(afterRefuse, beforeRefuse));
+
+    // ── E. 没有写操作的轮次不产生撤销点（避免「撤销 0 项」的空按钮） ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    await beginUndoTransaction('run-t23-noop');
+    await executeTool('stats', '{}');
+    const noPoint = await endUndoTransaction();
+    const pointsAfterNoop = await readUndoPoints();
+    ok('只读轮次不产生撤销点', () => assert.equal(noPoint, null));
+    ok('未落盘的只读轮次不会写进存储', () => assert.deepEqual(pointsAfterNoop, []));
+
+    // ── F. 生产路径：runAgentTurn 自己开关事务（UI 从不直接调用 begin/end） ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    const agentFolderTitle = 'T23-AGENT';
+    sseQueue = [
+      sseResponse([
+        sseEvent(
+          JSON.stringify({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 't23-c1',
+                      function: {
+                        name: 'create_folder',
+                        arguments: JSON.stringify({ title: agentFolderTitle, parentId: base }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+        ),
+        sseEvent('[DONE]'),
+      ]),
+      sseResponse([sseEvent(JSON.stringify({ choices: [{ delta: { content: '已创建。' } }] })), sseEvent('[DONE]')]),
+    ];
+    const turnEvents: ChatOutbound[] = [];
+    await runTurn('建个文件夹', turnEvents);
+    const agentPoints = await readUndoPoints();
+    ok('Agent 轮次自动产生撤销点（生产路径）', () => {
+      assert.equal(agentPoints.length, 1, '一轮对话应落盘一个撤销点');
+      assert.ok(
+        agentPoints[0]!.ops.some((o) => o.kind === 'create'),
+        `应记录 create，实际 ${JSON.stringify(agentPoints[0]!.ops)}`,
+      );
+    });
+    await applyUndo();
+    const stillThere = (await mockBookmarks.getChildren(base)).some((n) => n.title === agentFolderTitle);
+    ok('撤销 Agent 轮次后新建的文件夹被移除', () => assert.equal(stillThere, false));
+
+    resetUndoTransactionForTest();
+    storageMap.delete(UNDO_STORAGE_KEY);
+  }
+
+  /* ── T24: 撤销的 UI/Store 契约（拒绝不假装成功、成功才提示） ── */
+  console.log('\n[T24] 撤销的 Store 契约');
+  {
+    const { useAIStore } = await import('../src/stores/aiStore');
+    const { undoReadiness } = await import('../src/lib/undo/journal');
+    const { useToastStore } = await import('../src/lib/toast');
+    type UndoPointT = import('../src/lib/undo/types').UndoPoint;
+
+    const refusalPoint: UndoPointT = {
+      id: 'u-refuse',
+      runId: 'r1',
+      createdAt: 1,
+      ops: [{ kind: 'move', id: 'x', title: 'x', fromParentId: 'p', fromIndex: 0 }],
+      containsDelete: true,
+    };
+    const successPoint: UndoPointT = {
+      id: 'u-ok',
+      runId: 'r2',
+      createdAt: 2,
+      ops: [
+        { kind: 'move', id: 'x', title: 'x', fromParentId: 'p', fromIndex: 0 },
+        { kind: 'create', id: 'y', title: 'y', isFolder: false },
+      ],
+      containsDelete: false,
+    };
+
+    useToastStore.setState({ toasts: [] });
+    let points: UndoPointT[] = [];
+    let applyResult: unknown = undefined;
+    sendMessageMock = (msg) => {
+      const m = msg as { type?: string };
+      if (m.type === 'undo:list') return { type: 'undo:list:result', points };
+      if (m.type === 'undo:apply') return { type: 'undo:apply:result', result: applyResult };
+      return undefined;
+    };
+
+    points = [];
+    await useAIStore.getState().refreshUndo();
+    ok('refreshUndo 同步撤销点列表到 store', () => assert.deepEqual(useAIStore.getState().undoPoints, []));
+
+    points = [refusalPoint];
+    await useAIStore.getState().refreshUndo();
+    const stored = useAIStore.getState().undoPoints;
+    ok('store 里的含删除撤销点被判定为不可撤销', () => {
+      assert.equal(stored.length, 1);
+      assert.equal(undoReadiness(stored[0]).undoable, false);
+      assert.match(undoReadiness(stored[0]).reason ?? '', /包含删除/);
+    });
+
+    applyResult = { ok: false, reason: '本次操作包含删除，无法完整撤销', restored: 0, failures: [] };
+    await useAIStore.getState().undoLast();
+    const refusalToasts = useToastStore.getState().toasts;
+    ok('撤销被拒时如实提示原因，不得谎报成功', () => {
+      assert.ok(
+        refusalToasts.some((t) => t.title === '无法撤销' && /包含删除/.test(t.description ?? '')),
+        `应有拒绝提示，实际 ${JSON.stringify(refusalToasts)}`,
+      );
+      assert.ok(!refusalToasts.some((t) => t.title.includes('已撤销')), '不得出现成功提示');
+    });
+
+    // 成功路径：提示还原项数 + 重新拉取列表（消费掉的点不再出现）
+    useToastStore.setState({ toasts: [] });
+    points = [successPoint];
+    applyResult = { ok: true, restored: 2, failures: [] };
+    await useAIStore.getState().undoLast();
+    points = [];
+    const successToasts = useToastStore.getState().toasts;
+    ok('撤销成功时提示还原项数并刷新列表', () => {
+      assert.ok(
+        successToasts.some((t) => t.variant === 'success' && /还原 2 项/.test(t.title)),
+        `应有成功提示，实际 ${JSON.stringify(successToasts)}`,
+      );
+    });
+
+    // 部分失败：必须上报失败明细而不是全绿
+    useToastStore.setState({ toasts: [] });
+    points = [successPoint];
+    applyResult = { ok: false, restored: 1, failures: [{ op: 'move', title: 'x', error: '节点已不存在' }] };
+    await useAIStore.getState().undoLast();
+    points = [];
+    const partialToasts = useToastStore.getState().toasts;
+    ok('部分失败时上报明细，不谎报全部成功', () => {
+      assert.ok(
+        partialToasts.some((t) => /已还原 1 项，1 项失败/.test(t.title) && /节点已不存在/.test(t.description ?? '')),
+        `应上报失败明细，实际 ${JSON.stringify(partialToasts)}`,
+      );
+    });
+
+    sendMessageMock = () => undefined;
+    useToastStore.setState({ toasts: [] });
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

@@ -3,6 +3,7 @@
 import { chatCompletion, ChatError, type ApiMessage, type ApiToolCall } from './client';
 import { SYSTEM_PROMPT, TOOL_DEFINITIONS } from './prompts';
 import { executeTool, type ToolOutput } from './tools';
+import { beginUndoTransaction, endUndoTransaction } from '@/lib/undo/recorder';
 import type { AIConfig, ChatMessage, ChatOutbound, ToolCallRecord } from './types';
 
 /** 单轮对话中工具调用轮数无上限（由死循环检测与连续失败保护兜底，不限制正常任务） */
@@ -154,8 +155,20 @@ function selectHistory(
 /**
  * 运行一轮 Agent 对话：
  * 流式输出 → 解析工具调用 → 执行并回填 → 继续，直到模型给出最终回答。
+ *
+ * 一轮 = 一个撤销点：期间所有写操作都被记进操作日志（src/lib/undo），
+ * 结束后落盘；正常返回、抛错、被取消都走同一个 finally，不会漏记。
  */
 export async function runAgentTurn(params: AgentTurnParams): Promise<void> {
+  await beginUndoTransaction(params.messageId);
+  try {
+    await runAgentTurnInner(params);
+  } finally {
+    await endUndoTransaction();
+  }
+}
+
+async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
   const { config, messageId, history, text, signal, onEvent } = params;
 
   // 上下文预算 = 用户填写的模型上下文长度 × 压缩阈值，再扣除系统提示与工具定义的固定开销

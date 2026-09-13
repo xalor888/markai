@@ -14,6 +14,7 @@ import {
   Square,
   Trash2,
   TrendingUp,
+  Undo2,
   X,
 } from 'lucide-react';
 import { useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
@@ -21,6 +22,7 @@ import { useAIStore } from '@/stores/aiStore';
 import { useBookmarkStore, findNode, resolveTitlePath } from '@/stores/bookmarkStore';
 import { useConfigStore } from '@/stores/configStore';
 import { formatRelativeTime } from '@/lib/format';
+import { summarizeOps, undoReadiness } from '@/lib/undo/journal';
 import { resolveConfig, PROVIDERS } from '@/lib/providers';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -75,6 +77,16 @@ export function ChatPanel({
   const switchConversation = useAIStore((s) => s.switchConversation);
   const renameConversation = useAIStore((s) => s.renameConversation);
   const deleteConversation = useAIStore((s) => s.deleteConversation);
+  const undoPoints = useAIStore((s) => s.undoPoints);
+  const undoLast = useAIStore((s) => s.undoLast);
+  // 撤销：最新一轮的写操作。含删除的轮次会返回不可撤销 + 原因（不假装成功）
+  const undoPoint = undoPoints[0];
+  const undoReady = undoReadiness(undoPoint);
+  const undoTitle = !undoPoint
+    ? '暂无可撤销的操作'
+    : undoReady.undoable
+      ? `撤销本次操作（${summarizeOps(undoPoint.ops)}）`
+      : `无法撤销：${undoReady.reason}`;
   const roots = useBookmarkStore((s) => s.roots);
   const selectedFolderId = useBookmarkStore((s) => s.selectedFolderId);
   const config = useConfigStore((s) => s.config);
@@ -276,6 +288,22 @@ export function ChatPanel({
           </button>
         )}
         <div className="ml-auto flex shrink-0 items-center gap-0.5">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="relative"
+            title={undoTitle}
+            aria-label={undoTitle}
+            disabled={!undoReady.undoable || streaming}
+            onClick={() => void undoLast()}
+          >
+            <Undo2 className="h-3.5 w-3.5" />
+            {undoReady.undoable && (
+              <span className="absolute -top-0.5 -right-0.5 rounded-full bg-primary px-1 text-[9px] leading-[14px] text-primary-foreground">
+                {undoReady.count}
+              </span>
+            )}
+          </Button>
           <Button
             variant="ghost"
             size="icon"

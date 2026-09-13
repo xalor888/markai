@@ -11,6 +11,8 @@ import { ChatError, testConnection } from '@/lib/ai/client';
 import { ensureRoots } from '@/lib/ai/tools';
 import { normalizeBaseUrl, resolveConfig } from '@/lib/providers';
 import { CONFIG_STORAGE_KEY } from '@/stores/configStore';
+import { applyUndo } from '@/lib/undo/apply';
+import { readUndoPoints } from '@/lib/undo/recorder';
 import type {
   AIConfig,
   ChatInbound,
@@ -85,6 +87,19 @@ export default defineBackground(() => {
           }
           if (msg.type === 'ai:models') {
             sendResponse({ type: 'ai:models:result', ok: false, models: [], message: errMsg } satisfies OneShotOutbound);
+            return;
+          }
+          if (msg.type === 'undo:list') {
+            // 读不到就当作没有撤销点，UI 显示按钮为不可用即可
+            sendResponse({ type: 'undo:list:result', points: [] } satisfies OneShotOutbound);
+            return;
+          }
+          if (msg.type === 'undo:apply') {
+            // 撤销抛错必须如实上报，不能假装成功
+            sendResponse({
+              type: 'undo:apply:result',
+              result: { ok: false, reason: errMsg, restored: 0, failures: [] },
+            } satisfies OneShotOutbound);
             return;
           }
           // 其余类型（sidepanel:open / seed:consume / task:status）极少抛错；回一个无害的
@@ -293,6 +308,16 @@ async function handleOneShot(msg: OneShotInbound): Promise<OneShotOutbound> {
       lastConsumedSeed = sig;
       await chrome.storage.local.remove('markai.seed').catch(() => {});
       return { type: 'seed:value', text: seed.text || undefined, folderId: seed.folderId, notice: seed.notice };
+    }
+
+    case 'undo:list': {
+      return { type: 'undo:list:result', points: await readUndoPoints() };
+    }
+
+    case 'undo:apply': {
+      // 撤销本身不记入操作日志（apply.ts 走裸 API），失败与拒绝都如实回传
+      const result = await applyUndo(msg.id);
+      return { type: 'undo:apply:result', result };
     }
 
     case 'task:status': {

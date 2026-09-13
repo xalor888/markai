@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { uid } from '../format';
 import type { DeletionProposal } from './types';
 import { CONFIG_STORAGE_KEY } from '@/stores/configStore';
+import { jCreate, jMove, jRemove, jUpdate } from '@/lib/undo/mutations';
 
 /** 工具执行结果 */
 export interface ToolOutput {
@@ -234,7 +235,7 @@ const createFolderSchema = z.object({ title: z.string().min(1).max(100), parentI
 async function createFolder(args: unknown): Promise<ToolOutput> {
   const { title, parentId } = createFolderSchema.parse(args);
   const pid = await assertFolder(parentId);
-  const node = await chrome.bookmarks.create({ parentId: pid, title });
+  const node = await jCreate({ parentId: pid, title });
   return { result: JSON.stringify({ created: serializeBookmark(node), path: await resolvePath(node.id) }) };
 }
 
@@ -254,7 +255,7 @@ async function createBookmark(args: unknown): Promise<ToolOutput> {
     throw new Error(`URL 格式无效：${url}`);
   }
   const pid = await assertFolder(parentId);
-  const node = await chrome.bookmarks.create({ parentId: pid, title, url: finalUrl });
+  const node = await jCreate({ parentId: pid, title, url: finalUrl });
   return { result: JSON.stringify({ created: serializeBookmark(node), path: await resolvePath(node.id) }) };
 }
 
@@ -279,7 +280,7 @@ async function createBookmarks(args: unknown): Promise<ToolOutput> {
   for (const it of items) {
     try {
       new URL(it.url); // 逐条校验：非法 URL 只记失败，不影响其他项
-      const node = await chrome.bookmarks.create({ parentId: pid, title: it.title, url: it.url });
+      const node = await jCreate({ parentId: pid, title: it.title, url: it.url });
       created.push({ title: node.title, url: node.url ?? '', id: node.id });
     } catch (e) {
       failures.push({ title: it.title, error: e instanceof Error ? e.message : String(e) });
@@ -311,7 +312,7 @@ async function moveBookmark(args: unknown): Promise<ToolOutput> {
   await assertNoCycle(bookmarkId, pid);
   // 移动前先解析来源路径：move 之后 bookmarkId 已在新位置，resolvePath 会返回新路径
   const fromPath = await resolvePath(bookmarkId);
-  const node = await chrome.bookmarks.move(bookmarkId, { parentId: pid, ...(index !== undefined ? { index } : {}) });
+  const node = await jMove(bookmarkId, { parentId: pid, ...(index !== undefined ? { index } : {}) });
   return {
     result: JSON.stringify({
       moved: serializeBookmark(node),
@@ -329,7 +330,7 @@ async function renameBookmark(args: unknown): Promise<ToolOutput> {
   if (isRoot(bookmarkId)) throw new Error('浏览器根文件夹不可重命名');
   const nodes = await chrome.bookmarks.get(bookmarkId).catch(() => []);
   if (!nodes[0]) throw new Error(`书签不存在（id: ${bookmarkId}）`);
-  const node = await chrome.bookmarks.update(bookmarkId, { title });
+  const node = await jUpdate(bookmarkId, { title });
   return { result: JSON.stringify({ renamed: serializeBookmark(node), path: await resolvePath(node.id) }) };
 }
 
@@ -341,7 +342,7 @@ async function updateBookmarkUrl(args: unknown): Promise<ToolOutput> {
   const node = nodes[0];
   if (!node) throw new Error(`书签不存在（id: ${bookmarkId}）`);
   if (!node.url) throw new Error('文件夹没有 URL，无法修改');
-  const updated = await chrome.bookmarks.update(bookmarkId, { url });
+  const updated = await jUpdate(bookmarkId, { url });
   return { result: JSON.stringify({ updated: serializeBookmark(updated) }) };
 }
 
@@ -634,7 +635,7 @@ async function autoCategorize(
       const workers = Array.from({ length: Math.min(10, ids.length) }, async () => {
         while (cursor < ids.length) {
           const id = ids[cursor++]!;
-          await chrome.bookmarks.move(id, { parentId: folderId });
+          await jMove(id, { parentId: folderId });
           moved++;
         }
       });
@@ -642,13 +643,13 @@ async function autoCategorize(
     };
     for (let i = 0; i < picked.length; i++) {
       const g = picked[i]!;
-      const folder = await chrome.bookmarks.create({ parentId: pid, title: g.domain });
+      const folder = await jCreate({ parentId: pid, title: g.domain });
       created++;
       await moveGroup(folder.id, g.ids);
       onProgress?.(`正在归类 ${i + 1}/${picked.length}：${g.domain}（${g.ids.length} 条）`);
     }
     if (overflowIds.length > 0) {
-      const folder = await chrome.bookmarks.create({ parentId: pid, title: '其他' });
+      const folder = await jCreate({ parentId: pid, title: '其他' });
       created++;
       await moveGroup(folder.id, overflowIds);
       onProgress?.(`已把 ${overflow.length} 个小众分类并入「其他」文件夹`);
@@ -826,11 +827,11 @@ async function cleanupSweep(
     // 「无需确认」模式：直接删除（并发池 10，失败重试一次），生成 executed 卡片供回显
     const retryDelete = async (id: string) => {
       try {
-        await chrome.bookmarks.remove(id);
+        await jRemove(id);
         return true;
       } catch {
         try {
-          await chrome.bookmarks.remove(id);
+          await jRemove(id);
           return true;
         } catch {
           return false;
@@ -1078,7 +1079,7 @@ async function sortFolder(args: unknown): Promise<ToolOutput> {
   });
   for (let i = 0; i < sorted.length; i++) {
     const item = sorted[i]!;
-    await chrome.bookmarks.move(item.id, { parentId: pid, index: i });
+    await jMove(item.id, { parentId: pid, index: i });
   }
   return {
     result: JSON.stringify({ folder: pid, by, sorted: sorted.length, note: '已按' + by + '排序并写入真实顺序。' }),
@@ -1175,7 +1176,7 @@ async function moveBookmarks(args: unknown): Promise<ToolOutput> {
       // 文件夹批量移动同样校验循环嵌套（与 move_bookmark 一致，给出中文错误而非 Chrome 英文报错）
       const node = (await chrome.bookmarks.get(id).catch(() => []))[0];
       if (node && !node.url) await assertNoCycle(id, pid);
-      await chrome.bookmarks.move(id, { parentId: pid, ...(index !== undefined ? { index } : {}) });
+      await jMove(id, { parentId: pid, ...(index !== undefined ? { index } : {}) });
     } catch (e) {
       failures.push({ id, error: e instanceof Error ? e.message : String(e) });
     }
@@ -1208,7 +1209,7 @@ async function copyBookmark(args: unknown): Promise<ToolOutput> {
   if (!node) throw new Error(`书签不存在（id: ${bookmarkId}）`);
   const created = await copyNodeDeep(node, pid);
   if (title && node.url) {
-    await chrome.bookmarks.update(created, { title }).catch(() => {});
+    await jUpdate(created, { title }).catch(() => {});
   }
   return { result: JSON.stringify({ copied: created, title: title || node.title || '(未命名)' }) };
 }
@@ -1459,7 +1460,7 @@ async function mergeFolders(args: unknown): Promise<ToolOutput> {
   for (const child of children) {
     // 逐个追加到 target 末尾，保持相对顺序
     try {
-      await chrome.bookmarks.move(child.id, { parentId: targetId });
+      await jMove(child.id, { parentId: targetId });
       moved++;
     } catch {
       // 单条移动失败不阻断整体，但要如实计数（原先吞错后仍 moved++ 会虚报成功数）
@@ -1502,10 +1503,10 @@ async function copyNodeDeep(
   index?: number,
 ): Promise<string> {
   if (node.url) {
-    const created = await chrome.bookmarks.create({ parentId, title: node.title, url: node.url, index });
+    const created = await jCreate({ parentId, title: node.title, url: node.url, index });
     return created.id;
   }
-  const folder = await chrome.bookmarks.create({ parentId, title: node.title, index });
+  const folder = await jCreate({ parentId, title: node.title, index });
   for (const child of node.children ?? []) {
     await copyNodeDeep(child, folder.id);
   }
@@ -1544,8 +1545,8 @@ async function proposeDeletions(args: unknown): Promise<ToolOutput> {
     if (mode === 'auto') {
       // 无需确认模式：直接执行删除
       try {
-        if (node.url) await chrome.bookmarks.remove(node.id);
-        else await chrome.bookmarks.removeTree(node.id);
+        if (node.url) await jRemove(node.id);
+        else await jRemove(node.id, { tree: true });
         executed++;
         deletions.push({
           id: uid(),
@@ -1611,8 +1612,8 @@ async function deleteAllBookmarks(args: unknown): Promise<ToolOutput> {
     let fail = 0;
     for (const t of targets) {
       try {
-        if (t.url) await chrome.bookmarks.remove(t.id);
-        else await chrome.bookmarks.removeTree(t.id);
+        if (t.url) await jRemove(t.id);
+        else await jRemove(t.id, { tree: true });
         ok++;
       } catch {
         fail++;

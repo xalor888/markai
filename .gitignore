@@ -33,3 +33,5 @@ preview-*.png
 
 # 内部会话/计划文件（不上传）
 .zcode/
+# keepgoal 的内部状态（台账、访问记录），不该进版本库
+.keepgoal/

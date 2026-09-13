@@ -69,8 +69,26 @@ export function estimateTokens(text: string): number {
 }
 
 /** 固定开销估算：系统提示词 + 工具定义 schema（不在历史预算内，需从窗口预算中扣除） */
-function fixedOverheadTokens(): number {
+export function fixedOverheadTokens(): number {
   return estimateTokens(SYSTEM_PROMPT) + estimateTokens(JSON.stringify(TOOL_DEFINITIONS)) + 100;
+}
+
+/**
+ * 估算一组 API 消息实际发送给模型的 token 用量（含工具定义）。
+ *
+ * 系统提示词本身就在 `apiMessages[0]` 里，所以这里**不能**再叠加 `fixedOverheadTokens()`：
+ * 那会把系统提示词重复计入（曾把预算高估数千 token，导致工具循环过早触发上下文护栏）。
+ * 工具定义不在 messages 内，因此单独计入。
+ */
+export function estimateRequestTokens(apiMessages: ApiMessage[]): number {
+  return (
+    estimateTokens(JSON.stringify(TOOL_DEFINITIONS)) +
+    apiMessages.reduce((acc, m) => {
+      let n = estimateTokens(m.content ?? '') + PER_MESSAGE_OVERHEAD;
+      if (m.tool_calls) n += estimateTokens(JSON.stringify(m.tool_calls));
+      return acc + n;
+    }, 0)
+  );
 }
 
 /**
@@ -155,14 +173,8 @@ export async function runAgentTurn(params: AgentTurnParams): Promise<void> {
   }
   apiMessages.push({ role: 'user', content: text.slice(0, 8000) });
 
-  /** 估算当前全部消息的 token 用量（含工具定义） */
-  const usedTokens = () =>
-    fixedOverheadTokens() +
-    apiMessages.reduce((acc, m) => {
-      let n = estimateTokens(m.content ?? '') + PER_MESSAGE_OVERHEAD;
-      if (m.tool_calls) n += estimateTokens(JSON.stringify(m.tool_calls));
-      return acc + n;
-    }, 0);
+  /** 估算当前全部发送给模型的 token 用量（系统提示已含在 apiMessages 内，不重复计入固定开销） */
+  const usedTokens = () => estimateRequestTokens(apiMessages);
 
   /**
    * 上下文护栏：工具回填导致超预算时，把最老的中间消息压缩为一条摘要。

@@ -5,6 +5,7 @@ import { useBookmarkStore, copyNodeDeep, findNode, resolveTitlePath, type TreeCo
 import { useUIStore } from '@/stores/uiStore';
 import { copyText } from '@/lib/clipboard';
 import { formatRelativeTime, getHost } from '@/lib/format';
+import { isSelfOrDescendant, resolveDropIndex } from '@/lib/bookmark-dnd';
 import { pushToast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -208,8 +209,9 @@ export function BookmarkList({ className, compact = false }: { className?: strin
         const next = Math.min(Math.max(activeIndex + delta, 0), count - 1);
         if (e.shiftKey) {
           // Shift+方向键：范围选择（首按以当前高亮为锚点）
-          if (anchorIndex === null) setAnchorIndex(activeIndex >= 0 ? activeIndex : 0);
-          toggleRange(next, true);
+          const anchor = anchorIndex ?? (activeIndex >= 0 ? activeIndex : 0);
+          if (anchorIndex === null) setAnchorIndex(anchor);
+          toggleRange(next, true, anchor);
         }
         setActiveIndex(next);
         break;
@@ -217,16 +219,18 @@ export function BookmarkList({ className, compact = false }: { className?: strin
       case 'Home':
         e.preventDefault();
         if (e.shiftKey) {
-          if (anchorIndex === null) setAnchorIndex(activeIndex >= 0 ? activeIndex : 0);
-          toggleRange(0, true);
+          const anchor = anchorIndex ?? (activeIndex >= 0 ? activeIndex : 0);
+          if (anchorIndex === null) setAnchorIndex(anchor);
+          toggleRange(0, true, anchor);
         }
         setActiveIndex(0);
         break;
       case 'End':
         e.preventDefault();
         if (e.shiftKey) {
-          if (anchorIndex === null) setAnchorIndex(activeIndex >= 0 ? activeIndex : 0);
-          toggleRange(count - 1, true);
+          const anchor = anchorIndex ?? (activeIndex >= 0 ? activeIndex : 0);
+          if (anchorIndex === null) setAnchorIndex(anchor);
+          toggleRange(count - 1, true, anchor);
         }
         setActiveIndex(count - 1);
         break;
@@ -376,14 +380,16 @@ export function BookmarkList({ className, compact = false }: { className?: strin
     void copyText(urls.join('\n'), `已复制 ${urls.length} 个网址`);
   };
 
-  /** 选择/取消（支持 Shift 范围多选：从锚点到当前行的区间；锚点保持最初位置，反向移动可收缩） */
+  /** 选择/取消（支持 Shift 范围多选：从锚点到当前行的区间；锚点保持最初位置，反向移动可收缩）。
+   *  anchorOverride：键盘首按 Shift 时，setAnchorIndex 尚未生效（闭包读到旧值），
+   *  由调用方显式传入本次锚点，避免误锚到 0（列表首行）。 */
   const toggleRange = useCallback(
-    (index: number, shiftKey: boolean) => {
+    (index: number, shiftKey: boolean, anchorOverride?: number) => {
       if (!items) return;
       const node = items[index];
       if (!node) return;
       if (shiftKey) {
-        const anchor = anchorIndex ?? 0;
+        const anchor = anchorOverride ?? anchorIndex ?? 0;
         // 重置为「仅区间内」的选择：整体替换，保证反向移动可收缩
         const [from, to] = anchor < index ? [anchor, index] : [index, anchor];
         const rangeIds = items.slice(from, to + 1).filter((n) => n.url).map((n) => n.id);
@@ -424,7 +430,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
   const copySelectedMarkdown = () => {
     const lines = selectedNodes
       .filter((n): n is BNode & { url: string } => !!n.url)
-      .map((n) => `- [${(n.title || n.url).replace(/[[\]]/g, '')}](${n.url})`);
+      .map((n) => `- [${(n.title || n.url).replace(/[[\]]/g, '')}](<${n.url}>)`);
     if (lines.length === 0) return;
     void copyText(lines.join('\n'), `已复制 ${lines.length} 条 Markdown`);
   };
@@ -438,12 +444,12 @@ export function BookmarkList({ className, compact = false }: { className?: strin
   };
 
   /** 打开统一右键菜单（书签树与列表共用同一状态，天然互斥） */
-  const openContextMenu = (e: MouseEvent, bookmarkId: string) => {
+  const openContextMenu = useCallback((e: MouseEvent, bookmarkId: string) => {
     e.preventDefault();
     e.stopPropagation();
     const menu: TreeContextMenu = { x: e.clientX, y: e.clientY, bookmarkId };
     setContextMenu(menu);
-  };
+  }, [setContextMenu]);
 
   // 稳定包装：BookmarkRow memo 需要引用不变（openContextMenu 定义之后）
   const handleContextMenuRow = useCallback((e: MouseEvent, id: string) => openContextMenu(e, id), [openContextMenu]);
@@ -457,20 +463,23 @@ export function BookmarkList({ className, compact = false }: { className?: strin
     const dragIds = raw.split(',').filter(Boolean);
     if (dragIds.length === 0) return;
     const isCopy = e.ctrlKey || e.dataTransfer.dropEffect === 'copy';
-    // 空白处 drop：按鼠标纵向位置就近计算插入点（同文件夹微调排序时避免"跳到末尾"）
+    // 空白处 drop：仅「原始顺序」下按鼠标纵向位置就近计算插入点（同文件夹微调排序时避免"跳到末尾"）。
+    // 排序模式下 data-index 是排序后的序号，与 Chrome move 的 manual index 不一致，直接追加到末尾
     let dropIndex: number | undefined;
-    const listEl = listRef.current;
-    if (listEl) {
-      const rows = listEl.querySelectorAll<HTMLElement>('[data-index]');
-      let lastAbove = -1;
-      for (const row of rows) {
-        const r = row.getBoundingClientRect();
-        if (e.clientY > r.top + r.height / 2) {
-          const idx = Number(row.dataset.index);
-          if (Number.isFinite(idx) && idx > lastAbove) lastAbove = idx;
+    if (sortBy === 'manual') {
+      const listEl = listRef.current;
+      if (listEl) {
+        const rows = listEl.querySelectorAll<HTMLElement>('[data-index]');
+        let lastAbove = -1;
+        for (const row of rows) {
+          const r = row.getBoundingClientRect();
+          if (e.clientY > r.top + r.height / 2) {
+            const idx = Number(row.dataset.index);
+            if (Number.isFinite(idx) && idx > lastAbove) lastAbove = idx;
+          }
         }
+        if (lastAbove >= 0) dropIndex = lastAbove + 1;
       }
-      if (lastAbove >= 0) dropIndex = lastAbove + 1;
     }
     // 外部拖入：内容是一个 URL（从地址栏/网页链接拖进来）→ 直接收藏到当前文件夹（独立处理，不经过移动流程）
     if (dragIds.length === 1 && /^https?:\/\//i.test(dragIds[0]!)) {
@@ -495,8 +504,8 @@ export function BookmarkList({ className, compact = false }: { className?: strin
       for (const id of dragIds) {
         const dragNode = findNode(useBookmarkStore.getState().roots, id);
         if (!dragNode) continue;
-        // 防护：文件夹不能移入/复制到自身或子文件夹
-        if (!dragNode.url && findNode(dragNode.children ?? [], selectedFolderId)) continue;
+        // 防护：文件夹不能移入/复制到自身或子文件夹（含「自身」，由 isSelfOrDescendant 判定）
+        if (isSelfOrDescendant(dragNode, selectedFolderId)) continue;
         if (isCopy) {
           await copyNodeDeep(dragNode, selectedFolderId, idx);
           ok++;
@@ -528,29 +537,32 @@ export function BookmarkList({ className, compact = false }: { className?: strin
   const [dropTarget, setDropTarget] = useState<{ index: number; position: 'above' | 'below' } | null>(null);
 
   /** 拖放边缘自动滚动：靠近容器顶部/底部时滚动（行内 stopPropagation 不影响此处） */
-  const autoScrollDrag = (clientY: number) => {
+  const autoScrollDrag = useCallback((clientY: number) => {
     const el = listRef.current;
     if (!el) return;
     const rect = el.getBoundingClientRect();
     const margin = 28;
     if (clientY < rect.top + margin) el.scrollTop -= 40;
     else if (clientY > rect.bottom - margin) el.scrollTop += 40;
-  };
+  }, []);
 
-  const handleRowDragOver = (index: number, e: DragEvent<HTMLDivElement>) => {
-    if (!canReorder) return;
-    e.preventDefault();
-    e.stopPropagation();
-    e.dataTransfer.dropEffect = e.ctrlKey ? 'copy' : 'move';
-    autoScrollDrag(e.clientY);
-    const rect = e.currentTarget.getBoundingClientRect();
-    const position: 'above' | 'below' = e.clientY < rect.top + rect.height / 2 ? 'above' : 'below';
-    setDropTarget((prev) =>
-      prev && prev.index === index && prev.position === position ? prev : { index, position },
-    );
-  };
+  const handleRowDragOver = useCallback(
+    (index: number, e: DragEvent<HTMLDivElement>) => {
+      if (!canReorder) return;
+      e.preventDefault();
+      e.stopPropagation();
+      e.dataTransfer.dropEffect = e.ctrlKey ? 'copy' : 'move';
+      autoScrollDrag(e.clientY);
+      const rect = e.currentTarget.getBoundingClientRect();
+      const position: 'above' | 'below' = e.clientY < rect.top + rect.height / 2 ? 'above' : 'below';
+      setDropTarget((prev) =>
+        prev && prev.index === index && prev.position === position ? prev : { index, position },
+      );
+    },
+    [canReorder, autoScrollDrag],
+  );
 
-  const handleRowDragLeave = () => setDropTarget(null);
+  const handleRowDragLeave = useCallback(() => setDropTarget(null), []);
 
   // 拖拽取消（Esc/拖出窗口）时兜底清理指示线：目标行收不到 dragend
   useEffect(() => {
@@ -560,56 +572,51 @@ export function BookmarkList({ className, compact = false }: { className?: strin
   }, []);
 
   /** 行间放置：移动或 Ctrl+复制（真实 index 定位） */
-  const handleRowDrop = (index: number, e: DragEvent<HTMLDivElement>) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDropTarget(null);
-    if (!canReorder || !selectedFolderId || !items) return;
-    const dragId = e.dataTransfer.getData('text/plain');
-    if (!dragId) return;
-    const isCopy = e.ctrlKey || e.dataTransfer.dropEffect === 'copy';
-    const rect = e.currentTarget.getBoundingClientRect();
-    const position: 'above' | 'below' = e.clientY < rect.top + rect.height / 2 ? 'above' : 'below';
-    const targetIndex = position === 'above' ? index : index + 1;
-    if (isCopy) {
-      const dragNode = findNode(useBookmarkStore.getState().roots, dragId);
-      if (!dragNode) return;
-      void copyNodeDeep(dragNode, selectedFolderId, targetIndex)
+  const handleRowDrop = useCallback(
+    (index: number, e: DragEvent<HTMLDivElement>) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setDropTarget(null);
+      if (!canReorder || !selectedFolderId || !items) return;
+      const dragId = e.dataTransfer.getData('text/plain');
+      if (!dragId) return;
+      const isCopy = e.ctrlKey || e.dataTransfer.dropEffect === 'copy';
+      const rect = e.currentTarget.getBoundingClientRect();
+      const position: 'above' | 'below' = e.clientY < rect.top + rect.height / 2 ? 'above' : 'below';
+      // 落点即 index：Chromium 的 index 是「移除源之前」的插入位置，浏览器内部会换算，
+      // 调用方不得再自我补偿（详见 lib/bookmark-dnd.ts —— 减 1 会让向后拖拽静默失效）
+      const targetIndex = resolveDropIndex(index, position);
+      if (isCopy) {
+        const dragNode = findNode(useBookmarkStore.getState().roots, dragId);
+        if (!dragNode) return;
+        void copyNodeDeep(dragNode, selectedFolderId, targetIndex)
+          .then(() => {
+            pushToast('已复制到此文件夹', { variant: 'success' });
+            void useBookmarkStore.getState().loadTree();
+          })
+          .catch((err: unknown) => {
+            pushToast('复制失败', {
+              description: err instanceof Error ? err.message : String(err),
+              variant: 'destructive',
+            });
+          });
+        return;
+      }
+      // 同文件夹内重排：targetIndex 已是浏览器要的「移除源之前」坐标系，原样传递
+      void chrome.bookmarks
+        .move(dragId, { parentId: selectedFolderId, index: targetIndex })
         .then(() => {
-          pushToast('已复制到此文件夹', { variant: 'success' });
+          pushToast('已调整顺序', { variant: 'success' });
           void useBookmarkStore.getState().loadTree();
         })
         .catch((err: unknown) => {
-          pushToast('复制失败', {
+          pushToast('调整顺序失败', {
             description: err instanceof Error ? err.message : String(err),
             variant: 'destructive',
           });
         });
-      return;
-    }
-    void chrome.bookmarks
-      .move(dragId, { parentId: selectedFolderId, index: targetIndex })
-      .then(() => {
-        pushToast('已调整顺序', { variant: 'success' });
-        void useBookmarkStore.getState().loadTree();
-      })
-      .catch((err: unknown) => {
-        pushToast('调整顺序失败', {
-          description: err instanceof Error ? err.message : String(err),
-          variant: 'destructive',
-        });
-      });
-  };
-
-  // ── 行拖放回调的稳定包装（底层函数定义在此之后；BookmarkRow memo 需要稳定引用） ──
-  const handleDragOverRowStable = useCallback(
-    (i: number, e: DragEvent<HTMLDivElement>) => handleRowDragOver(i, e),
-    [handleRowDragOver],
-  );
-  const handleDragLeaveRowStable = useCallback(handleRowDragLeave, [handleRowDragLeave]);
-  const handleDropRowStable = useCallback(
-    (i: number, e: DragEvent<HTMLDivElement>) => handleRowDrop(i, e),
-    [handleRowDrop],
+    },
+    [canReorder, selectedFolderId, items],
   );
 
   return (
@@ -841,9 +848,9 @@ export function BookmarkList({ className, compact = false }: { className?: strin
               onActivate={handleActivateRow}
               onOpen={handleOpenRow}
               onContextMenu={handleContextMenuRow}
-              onDragOverRow={handleDragOverRowStable}
-              onDragLeaveRow={handleDragLeaveRowStable}
-              onDropRow={handleDropRowStable}
+              onDragOverRow={handleRowDragOver}
+              onDragLeaveRow={handleRowDragLeave}
+              onDropRow={handleRowDrop}
             />
           ))
         ) : (

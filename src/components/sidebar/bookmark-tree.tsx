@@ -28,6 +28,7 @@ import { useBookmarkStore, copyNodeDeep, resolveTitlePath, type TreeContextMenu 
 import { useUIStore } from '@/stores/uiStore';
 import { useAIStore } from '@/stores/aiStore';
 import { copyText } from '@/lib/clipboard';
+import { isSelfOrDescendant, resolveDropIndex } from '@/lib/bookmark-dnd';
 import { pushToast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 import { Favicon } from '@/components/common/favicon';
@@ -424,7 +425,7 @@ const TreeRow = memo(function TreeRow({
     // 复制模式：把源复制到目标（文件夹=复制进其内部；书签行=复制到同层位置）
     if (isCopy) {
       // 防护：不能把文件夹复制到自身或子文件夹内部（会形成怪异嵌套）
-      if (dragNode && !dragNode.url && findNode(dragNode.children ?? [], node.id)) {
+      if (isSelfOrDescendant(dragNode, node.id)) {
         pushToast('不能复制到自身或子文件夹', { variant: 'destructive' });
         return;
       }
@@ -493,9 +494,11 @@ const TreeRow = memo(function TreeRow({
     // 书签：行间排序（在目标书签的父目录内定位；单元素路径）
     const pos = getSiblingPosition(useBookmarkStore.getState().roots, node.id);
     if (!pos) return;
-    const targetIndex = positionOf(e) === 'above' ? pos.index : pos.index + 1;
+    // 落点即 index：Chromium 的 index 是「移除源之前」的插入位置，浏览器内部会换算，
+    // 调用方不得再自我补偿（详见 lib/bookmark-dnd.ts —— 减 1 会让向后拖拽静默失效）
+    const moveIndex = resolveDropIndex(pos.index, positionOf(e));
     void chrome.bookmarks
-      .move(dragIds[0]!, { parentId: pos.parentId, index: targetIndex })
+      .move(dragIds[0]!, { parentId: pos.parentId, index: moveIndex })
       .then(() => {
         pushToast('已调整顺序', { variant: 'success' });
         void useBookmarkStore.getState().loadTree();
@@ -827,7 +830,7 @@ export function ContextMenuOverlay() {
       const lines = selectedIds
         .map((id) => findNode(roots, id))
         .filter((n): n is BNode & { url: string } => !!n?.url)
-        .map((n) => `- [${(n.title || n.url).replace(/[[\]]/g, '')}](${n.url})`);
+        .map((n) => `- [${(n.title || n.url).replace(/[[\]]/g, '')}](<${n.url}>)`);
       if (lines.length === 0) {
         pushToast('所选内容没有可复制的网址');
         return;
@@ -1009,7 +1012,7 @@ export function ContextMenuOverlay() {
       const pad = '  '.repeat(depth);
       if (n.url) {
         const title = (n.title || n.url).replace(/[[\]]/g, '');
-        lines.push(`${pad}- [${title}](${n.url})`);
+        lines.push(`${pad}- [${title}](<${n.url}>)`);
       } else {
         lines.push(`${pad}- **${n.title || '(未命名)'}**`);
         for (const c of n.children ?? []) walk(c, depth + 1);

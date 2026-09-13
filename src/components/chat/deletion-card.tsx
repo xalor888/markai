@@ -119,7 +119,10 @@ export const DeletionCard = memo(function DeletionCard({ proposals }: { proposal
             size="sm"
             variant="destructive"
             disabled={checkedPending === 0}
-            onClick={() => void confirmDeletions([...checked])}
+            onClick={() => {
+              // 只提交仍为 pending 的勾选项，避免把已执行/已放弃的旧 id 误传
+              void confirmDeletions(pendingIds.filter((id) => checked.has(id)));
+            }}
           >
             确认删除（{checkedPending}）
           </Button>

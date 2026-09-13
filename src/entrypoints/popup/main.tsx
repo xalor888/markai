@@ -157,7 +157,7 @@ function PopupApp() {
       <div className="flex h-10 items-center gap-1.5 border-b border-border bg-card px-3">
         <BrandMark />
         <Badge variant="outline" className="ml-auto">
-          v0.2.0
+          v0.2.1
         </Badge>
       </div>
 

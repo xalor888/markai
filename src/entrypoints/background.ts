@@ -69,14 +69,27 @@ export default defineBackground(() => {
       .catch((e) => {
         // 兜底：handler 抛错也必须响应，否则 UI 侧 sendMessage 永久挂起
         // （如 confirmDeletions 卡死在"执行中"且无法重试）。
-        // failed 必须带真实 proposalId：空串会让 UI 把所有项标记为 executed（假成功且无法重试）
         const errMsg = e instanceof Error ? e.message : String(e);
         try {
-          const failed =
-            msg.type === 'deletions:execute'
-              ? msg.items.map((i) => ({ proposalId: i.proposalId, error: errMsg }))
-              : [{ proposalId: '', error: errMsg }];
-          sendResponse({ type: 'deletions:result', count: 0, failed } as OneShotOutbound);
+          // 按消息类型回发匹配的响应形状：此前非删除类消息抛错也会回 deletions:result，
+          // 会被调用方误解为删除结果（类型错乱）。
+          if (msg.type === 'deletions:execute') {
+            // failed 必须带真实 proposalId：空串会让 UI 把所有项标记为 executed（假成功且无法重试）
+            const failed = msg.items.map((i) => ({ proposalId: i.proposalId, error: errMsg }));
+            sendResponse({ type: 'deletions:result', count: 0, failed } satisfies OneShotOutbound);
+            return;
+          }
+          if (msg.type === 'ai:test') {
+            sendResponse({ type: 'ai:test:result', ok: false, message: errMsg } satisfies OneShotOutbound);
+            return;
+          }
+          if (msg.type === 'ai:models') {
+            sendResponse({ type: 'ai:models:result', ok: false, models: [], message: errMsg } satisfies OneShotOutbound);
+            return;
+          }
+          // 其余类型（sidepanel:open / seed:consume / task:status）极少抛错；回一个无害的
+          // seed:value 空值（消费方当作"无种子/未处理"），避免把删除结果错发给无关调用方。
+          sendResponse({ type: 'seed:value', text: undefined, folderId: undefined } satisfies OneShotOutbound);
         } catch {
           // 响应通道已断开，忽略
         }

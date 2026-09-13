@@ -108,5 +108,6 @@ src/
 
 ## 测试
 
-- 运行：`npx tsx tests/agent.test.ts`（共 **93 项**，覆盖 SSE 流式解析、工具循环与死循环检测、网络错误自动重连、URL 分类、批量创建、多会话墓碑/清空/远端合并、配置解析边界、任务端到端链路、大库工具（check_urls_bulk / auto_categorize / cleanup_sweep）、删除提议终态保护）
+- 运行：`npx tsx tests/agent.test.ts`（共 **118 项**，覆盖 SSE 流式解析、工具循环与死循环检测、网络错误自动重连、URL 分类、批量创建、多会话墓碑/清空/远端合并、配置解析边界、任务端到端链路、大库工具（check_urls_bulk / auto_categorize / cleanup_sweep）、删除提议终态保护、拖拽落点与 Chrome `move(index)` 语义、路径解析不含元根、失败不虚报计数、上下文预算记账）
+- 测试替身对 `chrome.bookmarks.move` 实现了 **Chromium 真实 index 语义**（同父向后移动 `index--`、`index == oldIndex || oldIndex + 1` 为空操作），因此"拖拽排序"类用例能被证伪；忽略 index 的替身会让这类测试永远为真
 - 本地验证：`npm run compile`（tsc）→ `npm test` → `npm run build`

@@ -35,8 +35,9 @@ async function resolvePath(id: string): Promise<string> {
     const nodes: chrome.bookmarks.BookmarkTreeNode[] = await chrome.bookmarks.get(cur).catch(() => []);
     const node = nodes[0];
     if (!node) break;
-    parts.unshift(node.title || '(未命名)');
+    // 元根（id '0'，无 parentId）不纳入路径，否则每个路径都以「(未命名)」开头
     if (!node.parentId) break;
+    parts.unshift(node.title || '(未命名)');
     cur = node.parentId;
   }
   return parts.join(' > ') || '(未知路径)';
@@ -68,8 +69,9 @@ async function resolvePaths(ids: string[]): Promise<Map<string, string>> {
     while (cur && depth++ < 64) {
       const node = index.get(cur);
       if (!node) break;
-      parts.unshift(node.title || '(未命名)');
+      // 元根（无 parentId）不纳入路径，避免路径以「(根)」开头
       if (!node.parentId) break;
+      parts.unshift(node.title || '(未命名)');
       cur = node.parentId;
     }
     out.set(id, parts.join(' > ') || '(未知路径)');
@@ -307,11 +309,13 @@ async function moveBookmark(args: unknown): Promise<ToolOutput> {
   if (!nodes[0]) throw new Error(`书签不存在（id: ${bookmarkId}）`);
   const pid = await assertFolder(parentId);
   await assertNoCycle(bookmarkId, pid);
+  // 移动前先解析来源路径：move 之后 bookmarkId 已在新位置，resolvePath 会返回新路径
+  const fromPath = await resolvePath(bookmarkId);
   const node = await chrome.bookmarks.move(bookmarkId, { parentId: pid, ...(index !== undefined ? { index } : {}) });
   return {
     result: JSON.stringify({
       moved: serializeBookmark(node),
-      fromPath: await resolvePath(bookmarkId),
+      fromPath,
       toPath: `${await resolvePath(pid)} > ${node.title}`,
     }),
   };
@@ -371,7 +375,8 @@ async function checkUrls(args: unknown): Promise<ToolOutput> {
   });
   await Promise.all(workers);
   const out = results as Record<string, unknown>[];
-  if (skipped.length > 0) out.push({ url: skipped, status: 'skipped', message: 'URL 格式无效，已跳过' });
+  // 逐条输出 skipped，保持每条 entry 的 url 都是字符串（聚合为数组会让模型读到不一致的形状）
+  for (const u of skipped) out.push({ url: u, status: 'skipped', message: 'URL 格式无效，已跳过' });
   return { result: JSON.stringify(out) };
 }
 
@@ -461,7 +466,9 @@ async function checkUrlsBulk(
   };
 }
 
-const classifyUrlsSchema = z.object({ urls: z.array(z.string().url()).min(1).max(500) });
+// 宽松 schema：书签 URL 可能含未编码中文/空格，严格 .url() 会让整批失败；
+// 无效条目由 classifyOneUrl 内部降级为 unknown（与 check_urls 一致，避免整批拒绝）
+const classifyUrlsSchema = z.object({ urls: z.array(z.string().min(1)).min(1).max(500) });
 
 /** 首页文件：路径为空、/、或 index.* 等（视为主页面） */
 const INDEX_FILE = /^(index|default|home)(\.\w+)?$/;
@@ -503,8 +510,8 @@ function classifyOneUrl(raw: string): { url: string; type: 'root' | 'page' | 'su
  * 批量分类 URL 类型（启发式，不联网）：
  * - root：主页面（域名根 / index.*）
  * - page：浅层页面（1 段路径，无文件扩展名）——如 /about /docs，通常是主站栏目页
- * - sub：子页面（2 段路径）或带查询参数的页面
- * - deep：深层子页面（3+ 段路径）——文章/文档页，清理场景优先考虑
+ * - sub：子页面（2 段路径，无查询参数）
+ * - deep：深层子页面（3+ 段路径，或带查询参数的页面）——文章/文档页，清理场景优先考虑
  * 用于「只保留主页面」类整理任务：模型先分类，再结合 check_urls 实测存活决定去留。
  */
 async function classifyUrls(args: unknown): Promise<ToolOutput> {
@@ -1165,6 +1172,9 @@ async function moveBookmarks(args: unknown): Promise<ToolOutput> {
   for (const id of ordered) {
     try {
       if (isRoot(id)) throw new Error('浏览器根文件夹不可移动');
+      // 文件夹批量移动同样校验循环嵌套（与 move_bookmark 一致，给出中文错误而非 Chrome 英文报错）
+      const node = (await chrome.bookmarks.get(id).catch(() => []))[0];
+      if (node && !node.url) await assertNoCycle(id, pid);
       await chrome.bookmarks.move(id, { parentId: pid, ...(index !== undefined ? { index } : {}) });
     } catch (e) {
       failures.push({ id, error: e instanceof Error ? e.message : String(e) });
@@ -1232,8 +1242,12 @@ async function openBookmarks(args: unknown): Promise<ToolOutput> {
     const nodes = await chrome.bookmarks.get(id).catch(() => []);
     const node = nodes[0];
     if (!node?.url) continue;
-    await chrome.tabs.create({ url: node.url, active: !background }).catch(() => {});
-    opened.push(node.title || node.url);
+    try {
+      await chrome.tabs.create({ url: node.url, active: !background });
+      opened.push(node.title || node.url);
+    } catch {
+      // 单个标签页创建失败（如被浏览器拦截）只计成功数，不虚报 opened
+    }
   }
   return {
     result: JSON.stringify({
@@ -1270,8 +1284,8 @@ async function findFolderByPath(path: string): Promise<string | undefined> {
 const getFolderContentSchema = z.object({
   folderId: z.string().optional(),
   folderPath: z.string().optional(),
-  // 每层书签上限；不传用用户配置的默认值
-  limit: z.number().int().min(1).max(500).optional(),
+  // 每层书签上限；不传用用户配置的默认值（2000，与 list_bookmarks 一致）
+  limit: z.number().int().min(1).max(2000).optional(),
   // 递归深度（1=只看子项，2=含孙级），避免一次展开整个书签库
   depth: z.number().int().min(1).max(3).optional(),
 });
@@ -1387,7 +1401,8 @@ async function exportBookmarks(args: unknown): Promise<ToolOutput> {
       ? page
           .map(
             (b) =>
-              `- [${b.title.replace(/[[\]]/g, '')}](${b.url})${b.date ? ` · ${b.date}` : ''}${includeId ? ` (id: ${b.id})` : ''}`,
+              // 链接目标用尖括号包裹：URL 含 () 等字符（如维基百科消歧义页）时 Markdown 链接不会断裂
+              `- [${b.title.replace(/[[\]]/g, '')}](<${b.url}>)${b.date ? ` · ${b.date}` : ''}${includeId ? ` (id: ${b.id})` : ''}`,
           )
           .join('\n')
       : JSON.stringify({
@@ -1440,10 +1455,16 @@ async function mergeFolders(args: unknown): Promise<ToolOutput> {
 
   const children = await chrome.bookmarks.getChildren(sourceId);
   let moved = 0;
+  let moveFailed = 0;
   for (const child of children) {
     // 逐个追加到 target 末尾，保持相对顺序
-    await chrome.bookmarks.move(child.id, { parentId: targetId }).catch(() => {});
-    moved++;
+    try {
+      await chrome.bookmarks.move(child.id, { parentId: targetId });
+      moved++;
+    } catch {
+      // 单条移动失败不阻断整体，但要如实计数（原先吞错后仍 moved++ 会虚报成功数）
+      moveFailed++;
+    }
   }
 
   const after = await chrome.bookmarks.getChildren(sourceId);
@@ -1468,7 +1489,7 @@ async function mergeFolders(args: unknown): Promise<ToolOutput> {
       target: t.title || '(未命名)',
       note: sourceEmpty
         ? `已移动 ${moved} 项到「${t.title || '(未命名)'}」，源文件夹已空，已提议删除空文件夹等待确认。`
-        : `已移动 ${moved} 项到「${t.title || '(未命名)'}」。`,
+        : `已移动 ${moved} 项到「${t.title || '(未命名)'}」${moveFailed > 0 ? `，${moveFailed} 项移动失败` : ''}。`,
     }),
     deletions,
   };

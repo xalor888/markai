@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { LocateFixed } from 'lucide-react';
 import { useAIStore } from '@/stores/aiStore';
 import { useBookmarkStore } from '@/stores/bookmarkStore';
@@ -25,7 +25,13 @@ export function DeletionsDialog({ open, onOpenChange }: { open: boolean; onOpenC
   // 本次打开是否已做初始全选（防止 pending 引用变化时把用户手动取消的项重新勾上）
   const initialSelectDone = useRef(false);
 
-  const pending = pendingDeletions.filter((p) => p.status === 'pending');
+  // useMemo 稳定引用：pending 若为每次渲染新建的数组，会被下面 useEffect 的依赖数组
+  // 视为「每次都在变」，导致打开对话框时 effect 每渲染都重跑 + setChecked 每渲染都产生新 Set，
+  // 形成无限重渲染（CPU 空转）
+  const pending = useMemo(
+    () => pendingDeletions.filter((p) => p.status === 'pending'),
+    [pendingDeletions],
+  );
 
   // 打开时全选当前项；打开期间新提议到达时只勾选新增项
   useEffect(() => {
@@ -55,7 +61,9 @@ export function DeletionsDialog({ open, onOpenChange }: { open: boolean; onOpenC
     if (!open) initialSelectDone.current = false;
   }, [open]);
 
-  const allChecked = pending.length > 0 && checked.size === pending.length;
+  // 仅统计仍处于 pending 的勾选项：checked 可能残留已执行/已放弃的旧 id（状态切换后 pending 收缩）
+  const checkedCount = pending.filter((p) => checked.has(p.id)).length;
+  const allChecked = pending.length > 0 && checkedCount === pending.length;
 
   const toggleAll = () => {
     setChecked(allChecked ? new Set() : new Set(pending.map((p) => p.id)));
@@ -86,16 +94,18 @@ export function DeletionsDialog({ open, onOpenChange }: { open: boolean; onOpenC
             <Button
               variant="destructive"
               size="sm"
-              disabled={checked.size === 0 || executing}
+              disabled={checkedCount === 0 || executing}
               onClick={() => {
                 setExecuting(true);
-                void confirmDeletions([...checked]).finally(() => {
+                // 只提交仍为 pending 的勾选项，避免把已执行/已放弃的旧 id 误传给删除执行
+                const ids = pending.filter((p) => checked.has(p.id)).map((p) => p.id);
+                void confirmDeletions(ids).finally(() => {
                   setExecuting(false);
                   onOpenChange(false);
                 });
               }}
             >
-              {executing ? '执行中…' : `执行清理（${checked.size}）`}
+              {executing ? '执行中…' : `执行清理（${checkedCount}）`}
             </Button>
           </>
         ) : undefined

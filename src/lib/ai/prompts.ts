@@ -60,7 +60,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         type: 'object',
         properties: {
           query: { type: 'string', description: '搜索关键字' },
-          limit: { type: 'integer', description: '返回条数上限，默认 50，最大 500' },
+          limit: { type: 'integer', description: '返回条数上限，默认 2000，最大 2000' },
         },
         required: ['query'],
         additionalProperties: false,

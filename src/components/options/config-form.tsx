@@ -154,7 +154,9 @@ export function ConfigForm() {
   const commitCtx = () => {
     const k = Number(ctxInput);
     if (Number.isFinite(k) && k >= 8) {
-      const clamped = Math.min(Math.max(Math.round(k), 8), 4000);
+      // 上限 2000K（2M token）：与 resolveConfig / agent 预算护栏的 2_000_000 上限保持一致，
+      // 超出会被静默钳回 2M，表单若允许 4000K 会与实际生效值脱节
+      const clamped = Math.min(Math.max(Math.round(k), 8), 2000);
       void update({ contextWindow: clamped * 1000 });
       setCtxInput(String(clamped));
     } else {
@@ -400,7 +402,7 @@ export function ConfigForm() {
               id="context-window"
               type="number"
               min={8}
-              max={4000}
+              max={2000}
               step={8}
               value={ctxInput}
               onChange={(e) => setCtxInput(e.target.value)}
@@ -562,7 +564,7 @@ export function ConfigForm() {
       />
 
       <p className="pb-4 text-center text-[11px] text-muted-foreground">
-        MarkAI v0.2.0 · 支持 OpenAI / DeepSeek / Moonshot / Ollama 及任意 OpenAI 兼容服务
+        MarkAI v0.2.1 · 支持 OpenAI / DeepSeek / Moonshot / Ollama 及任意 OpenAI 兼容服务
         {' · '}
         <button
           type="button"

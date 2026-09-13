@@ -281,7 +281,10 @@ export const useAIStore = create<AIState>((set, get) => ({
       ...(opts?.folderId ? { contextFolderId: opts.folderId } : {}),
     };
     const assistantMsg: ChatMessage = { id: uid(), role: 'assistant', blocks: [], createdAt: Date.now() };
-    const history = get().messages.slice(-HISTORY_LIMIT);
+    // 重试（replaceLastUser）时历史需排除被重试的那条 user 消息——它作为 text 单独发送，
+    // 否则模型会收到连续两条相同的 user 消息（retryLast 已把它 slice 成 messages 的最后一条）。
+    const source = get().messages;
+    const history = (opts?.replaceLastUser ? source.slice(0, -1) : source).slice(-HISTORY_LIMIT);
 
     // 超长会话截断提示：仅在首次达到上限时提醒一次
     const before = get().messages.length;
@@ -674,14 +677,21 @@ export const useAIStore = create<AIState>((set, get) => ({
         if (force && lc.id === s.activeId) continue; // 清空中的会话：以本地（空）为准
         if (force && rc.messages.length === 0 && lc.messages.length > 0) continue;
         const byId = new Map<string, ChatMessage>();
-        for (const m of [...lc.messages, ...rc.messages]) byId.set(m.id, m);
+        for (const m of [...lc.messages, ...rc.messages]) {
+          // 同 id 消息取内容量更大（更新）的一方：流式期间 storage 里可能还是发送时刻的空消息，
+          // 若按「远端覆盖本地」会把本窗口已完成的回复回退成空内容
+          const prev = byId.get(m.id);
+          if (!prev || messageWeight(m) >= messageWeight(prev)) byId.set(m.id, m);
+        }
         const mergedMsgs = [...byId.values()]
           .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
           .slice(-MAX_MESSAGES);
-        // 按 id 集合比较（长度相等但内容不同的情况也要写回）
+        // 按「id + 内容量」比较：id 相同但内容不同（远端更新）也要写回；
+        // 不含删除提议状态，因此提议状态变化仍走本地（不被远端旧快照回退）
+        const sig = (msgs: ChatMessage[]) => msgs.map((m) => `${m.id}:${messageWeight(m)}`).join('|');
         const sameSet =
           mergedMsgs.length === lc.messages.length &&
-          mergedMsgs.every((m, i) => m.id === lc.messages[i]?.id);
+          sig(mergedMsgs) === sig(lc.messages);
         if (!sameSet) {
           merged.splice(
             merged.findIndex((c) => c.id === rc.id),
@@ -814,6 +824,21 @@ export const useAIStore = create<AIState>((set, get) => ({
     return port;
   },
 }));
+
+/**
+ * 消息「内容量」估算：文本长度 + 工具结果/错误长度（+ 每个工具块计 1）。
+ * 跨窗口合并同 id 消息时，内容量更大的一方视为更新（流式内容只增不减），
+ * 避免「另一窗口在发送时刻落盘的空 assistant 消息」覆盖掉本窗口已完成的完整回复。
+ * 注意：不把删除提议状态纳入权重——状态变化应保留本地（见 _persist 的 sameSet 判断）。
+ */
+function messageWeight(m: ChatMessage): number {
+  let w = 0;
+  for (const b of m.blocks) {
+    if (b.kind === 'text') w += b.text.length;
+    else w += (b.record.result?.length ?? 0) + (b.record.error?.length ?? 0) + 1;
+  }
+  return w;
+}
 
 /** 按记录 id 更新或插入工具块（保持时序） */
 function upsertToolBlock(messages: ChatMessage[], messageId: string, record: ToolCallRecord): ChatMessage[] {

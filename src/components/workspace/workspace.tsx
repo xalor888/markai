@@ -39,6 +39,9 @@ export function Workspace({ mode, initialDeletionsOpen = false }: { mode: 'compa
   };
   /** 左缘拖拽手柄：向左拖变宽（完整页右栏 / 侧边栏抽屉共用） */
   const [dragging, setDragging] = useState(false);
+  // 拖拽起点宽度：ChatResizeHandle 回传的是「相对起点的累计位移」，必须基于拖拽开始时的宽度计算，
+  // 不能用不断更新的 chatWidth + 累计位移（会把中间已累加的位移重复计入，越拖越宽）
+  const chatWidthBase = useRef(chatWidth);
   const pendingCount = useAIStore((s) => s.pendingDeletions.filter((p) => p.status === 'pending').length);
   const streaming = useAIStore((s) => s.streaming);
   const messages = useAIStore((s) => s.messages);
@@ -205,9 +208,12 @@ export function Workspace({ mode, initialDeletionsOpen = false }: { mode: 'compa
           >
             {chatOpen && (
               <ChatResizeHandle
-                onDragStart={() => setDragging(true)}
+                onDragStart={() => {
+                  chatWidthBase.current = chatWidth;
+                  setDragging(true);
+                }}
                 onDragEnd={() => setDragging(false)}
-                onResize={(dx) => persistChatWidth(Math.min(Math.max(chatWidth + dx, 200), 640))}
+                onResize={(dx) => persistChatWidth(Math.min(Math.max(chatWidthBase.current + dx, 200), 640))}
               />
             )}
             <ChatPanel className={cn('h-full w-full border-l border-border', !chatOpen && 'border-l-0')} focusOnMount={chatOpen} />
@@ -223,9 +229,12 @@ export function Workspace({ mode, initialDeletionsOpen = false }: { mode: 'compa
             <div className="relative h-full">
               {chatOpen && (
                 <ChatResizeHandle
-                  onDragStart={() => setDragging(true)}
+                  onDragStart={() => {
+                    chatWidthBase.current = chatWidth;
+                    setDragging(true);
+                  }}
                   onDragEnd={() => setDragging(false)}
-                  onResize={(dx) => persistChatWidth(Math.min(Math.max(chatWidth + dx, 200), 560))}
+                  onResize={(dx) => persistChatWidth(Math.min(Math.max(chatWidthBase.current + dx, 200), 560))}
                 />
               )}
               <ChatPanel

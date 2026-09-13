@@ -16,7 +16,7 @@ import { runAgentTurn } from '../src/lib/ai/agent';
 import { ChatError } from '../src/lib/ai/client';
 import { TOOL_DEFINITIONS } from '../src/lib/ai/prompts';
 import { executeTool, TOOL_META } from '../src/lib/ai/tools';
-import type { AIConfig, ChatMessage, ChatOutbound, DeletionProposal } from '../src/lib/ai/types';
+import type { AIConfig, ChatInbound, ChatMessage, ChatOutbound, DeletionProposal } from '../src/lib/ai/types';
 import { z } from 'zod';
 
 /* ══════════ 1. mock chrome.bookmarks（内存书签树） ══════════ */
@@ -60,6 +60,22 @@ function toApi(n: FNode): chrome.bookmarks.BookmarkTreeNode {
   };
 }
 
+/**
+ * 把节点插入 store，使其成为（新）父文件夹内的第 index 个兄弟。
+ * store 数组的相对顺序即兄弟顺序（childrenOf 按数组顺序过滤），
+ * 因此"插入到目标位置"= 插到该位置兄弟的前面；越界或 index == 兄弟数则追加到末尾。
+ */
+function insertSiblingAt(node: FNode, index: number) {
+  const siblings = childrenOf(node.parentId!);
+  const before = siblings[index];
+  const anchor = before ?? siblings[siblings.length - 1];
+  if (!anchor) {
+    store.push(node);
+    return;
+  }
+  store.splice(store.findIndex((n) => n.id === anchor.id) + (before ? 0 : 1), 0, node);
+}
+
 const mockBookmarks = {
   getTree: async () => [toApi({ id: '0', title: '', dateAdded: 0 })],
   getSubTree: async (id: string) => {
@@ -76,7 +92,7 @@ const mockBookmarks = {
     [...store].sort((a, b) => b.dateAdded - a.dateAdded).slice(0, count).map((n) => toApi(n)),
   search: async (query: string) =>
     store.filter((n) => n.title.includes(query) || (n.url ?? '').includes(query)).map((n) => toApi(n)),
-  create: async (opt: { parentId?: string; title: string; url?: string }) => {
+  create: async (opt: { parentId?: string; title: string; url?: string; index?: number }) => {
     const id = String(nextId++);
     const node: FNode = {
       id,
@@ -85,13 +101,33 @@ const mockBookmarks = {
       url: opt.url,
       dateAdded: Date.now(),
     };
-    store.push(node);
+    insertSiblingAt(node, opt.index ?? childrenOf(node.parentId!).length);
     return toApi(node);
   },
-  move: async (id: string, dest: { parentId: string }) => {
+  /**
+   * 忠实实现 Chromium `BookmarkModel::Move` 的 index 语义
+   * （components/bookmarks/browser/bookmark_model.cc）：
+   *   - 同父且 index == oldIndex 或 index == oldIndex + 1 → 空操作（已在该位置）
+   *   - 同父且 index > oldIndex → index--（先移除再插入，目标下标前移一位）
+   * 替身若忽略 index，任何"重排顺序"的测试都不可能失败——这正是本文件必须实现它的原因。
+   */
+  move: async (id: string, dest: { parentId: string; index?: number }) => {
     const node = nodeById(id);
     assert(node, `move: 节点 ${id} 不存在`);
+    const oldParentId = node.parentId;
+    const oldIndex =
+      oldParentId === undefined ? -1 : childrenOf(oldParentId).findIndex((n) => n.id === id);
+    let target = dest.index;
+    if (oldParentId === dest.parentId && target !== undefined) {
+      if (target === oldIndex || target === oldIndex + 1) return toApi(node);
+      if (target > oldIndex) target--;
+    }
+    store.splice(
+      store.findIndex((n) => n.id === id),
+      1,
+    );
     node.parentId = dest.parentId;
+    insertSiblingAt(node, target ?? childrenOf(dest.parentId).length);
     return toApi(node);
   },
   update: async (id: string, patch: { title?: string; url?: string }) => {
@@ -203,7 +239,13 @@ function runTurn(text: string, events: ChatOutbound[] = []): Promise<void> {
 
 let passed = 0;
 function ok(name: string, fn: () => void) {
-  fn();
+  try {
+    fn();
+  } catch (e) {
+    // 打印失败用例名：否则只能看到断言栈，无法定位是哪一条（也便于"回滚修复→确认变红"）
+    console.error(`  ✘ ${name}`);
+    throw e;
+  }
   passed++;
   console.log(`  ✔ ${name}`);
 }
@@ -814,6 +856,42 @@ function ok(name: string, fn: () => void) {
     ok('终态防护：declined 不可回退', () => {
       assert.equal(useAIStore.getState().pendingDeletions.find((p) => p.id === 'p1')?.status, 'declined');
     });
+
+    // 5. 跨窗口合并：storage 中同 id 消息更「空」且多了别窗口的消息 → 本地完整内容不被回退
+    reset();
+    await useAIStore.getState().load();
+    const cid = useAIStore.getState().activeId!;
+    const localUser: ChatMessage = { id: 'm-user', role: 'user', blocks: [{ kind: 'text', text: 'hi' }], createdAt: 1 };
+    const localFinal: ChatMessage = { id: 'm-final', role: 'assistant', blocks: [{ kind: 'text', text: '完整回复内容'.repeat(20) }], createdAt: 2 };
+    useAIStore.setState((s) => ({
+      conversations: s.conversations.map((c) => (c.id === cid ? { ...c, messages: [localUser, localFinal] } : c)),
+      messages: [localUser, localFinal],
+    }));
+    // storage：同 id 的 m-final 是「发送时刻的空消息」，且多一条别窗口的新消息
+    storageMap.set(AI_STORAGE_KEY, {
+      conversations: [
+        {
+          id: cid, title: 'x', createdAt: 1, updatedAt: 1,
+          messages: [
+            { id: 'm-user', role: 'user', blocks: [{ kind: 'text', text: 'hi' }], createdAt: 1 },
+            { id: 'm-final', role: 'assistant', blocks: [], createdAt: 2 },
+            { id: 'm-other', role: 'user', blocks: [{ kind: 'text', text: '另一窗口的消息' }], createdAt: 3 },
+          ],
+        },
+      ],
+      activeId: cid,
+    });
+    await useAIStore.getState()._persist();
+    const persisted = storageMap.get(AI_STORAGE_KEY) as { conversations: { id: string; messages: ChatMessage[] }[] };
+    const conv = persisted.conversations.find((c) => c.id === cid)!;
+    ok('跨窗口合并：本地完整回复不被同 id 空消息回退', () => {
+      const mFinal = conv.messages.find((m) => m.id === 'm-final')!;
+      assert.ok(
+        mFinal.blocks.some((b) => b.kind === 'text' && b.text.length > 0),
+        '同 id 消息应保留本地完整内容而非被空消息覆盖',
+      );
+      assert.ok(conv.messages.some((m) => m.id === 'm-other'), '别窗口的新消息应合并进来');
+    });
   }
 
   /* ── T14: 批量创建书签 ── */
@@ -895,7 +973,7 @@ function ok(name: string, fn: () => void) {
       const ej = JSON.parse(ex.result) as { content: string; hasMore: boolean; nextOffset?: number };
       const lines = ej.content.split('\n').filter(Boolean);
       for (const l of lines) {
-        const m = l.match(/^- \[(.+)\]\((https?:\/\/[^)]+)\)/);
+        const m = l.match(/^- \[(.+)\]\(<?(https?:\/\/[^)>]+)>?\)/);
         if (m) all.push({ title: m[1]!, url: m[2]! });
       }
       if (!ej.hasMore) break;
@@ -1306,6 +1384,22 @@ function ok(name: string, fn: () => void) {
       assert.equal(pdf?.type, 'sub', '真文件 .pdf 单段路径按原规则为 sub');
     });
 
+    // 4.5 classify_urls 宽松 schema：无效 URL 降级 unknown，而非整批 ZodError 失败
+    const clInvalid = await executeTool(
+      'classify_urls',
+      JSON.stringify({ urls: ['https://a.com', '这不是网址', '中文 空格'] }),
+    );
+    const cljInvalid = JSON.parse(clInvalid.result) as { items: { url: string; type: string }[] };
+    ok('classify_urls 宽松 schema 无效项降级 unknown', () => {
+      assert.equal(cljInvalid.items.length, 3);
+      assert.equal(cljInvalid.items.find((i) => i.url === 'https://a.com')?.type, 'root');
+      assert.equal(
+        cljInvalid.items.find((i) => i.url === '这不是网址')?.type,
+        'unknown',
+        '非 URL 字符串应降级 unknown 而非整批失败',
+      );
+    });
+
     // 5. list_all_folders 分页：total/shown/hasMore/offset
     const laf = await executeTool('list_all_folders', JSON.stringify({ limit: 2 }));
     const lafj = JSON.parse(laf.result) as { total: number; shown: number; hasMore: boolean; nextOffset: number };
@@ -1322,6 +1416,267 @@ function ok(name: string, fn: () => void) {
       assert.equal(lafj2.offset, 2);
       assert.ok(lafj2.shown >= 1);
     });
+  }
+
+  /* ── T22: 拖放语义 / 未提交修复回归（每条都必须在修复回滚后变红） ── */
+  console.log('\n[T22] 拖放语义与修复回归');
+  {
+    const { resolveDropIndex, isSelfOrDescendant } = await import('../src/lib/bookmark-dnd');
+    const node = (
+      id: string,
+      url?: string,
+      children?: chrome.bookmarks.BookmarkTreeNode[],
+    ): chrome.bookmarks.BookmarkTreeNode =>
+      ({ id, title: id, url, children }) as chrome.bookmarks.BookmarkTreeNode;
+    const kids = async (pid: string) => (await mockBookmarks.getChildren(pid)).map((n) => n.title);
+
+    // ── A. 落点 → index：不做任何补偿 ──
+    ok('resolveDropIndex：上方=行下标，下方=行下标+1', () => {
+      assert.equal(resolveDropIndex(2, 'above'), 2);
+      assert.equal(resolveDropIndex(2, 'below'), 3);
+    });
+
+    // ── B. 语义链：落点 → Chrome（替身）→ 真实顺序 ──
+    // 这是本项目最容易被"顺手减 1"改坏的地方：减 1 会命中 Chromium 的
+    // index == old_index + 1 空操作，向后拖拽静默失效。替身已复现真实语义，
+    // 因此本用例能真正证伪。
+    const F = (await mockBookmarks.create({ parentId: '2', title: 'T22-F' })).id;
+    const mkBm = async (t: string) => (await mockBookmarks.create({ parentId: F, title: t, url: `https://t22.example/${t}` })).id;
+    await mkBm('a');
+    const bB = await mkBm('b');
+    const bC = await mkBm('c');
+    await mkBm('d');
+    assert.deepEqual(await kids(F), ['a', 'b', 'c', 'd']);
+
+    // 把 b 拖到 c 下方：c 在当前列表下标 2 → index 3
+    await mockBookmarks.move(bB, { parentId: F, index: resolveDropIndex(2, 'below') });
+    const order1 = await kids(F);
+    ok('向后拖一格真的生效：a c b d', () => assert.deepEqual(order1, ['a', 'c', 'b', 'd']));
+
+    // 再把 b 拖回 a 上方：a 下标 0 → index 0
+    await mockBookmarks.move(bB, { parentId: F, index: resolveDropIndex(0, 'above') });
+    const order2 = await kids(F);
+    ok('向前拖回首位：b a c d', () => assert.deepEqual(order2, ['b', 'a', 'c', 'd']));
+
+    // 拖到末尾（d 下方，下标 3 → index 4）：应落到最后
+    await mockBookmarks.move(bB, { parentId: F, index: resolveDropIndex(3, 'below') });
+    const order3 = await kids(F);
+    ok('拖到末尾：a c d b', () => assert.deepEqual(order3, ['a', 'c', 'd', 'b']));
+
+    // ── C. 替身复现 Chromium 的空操作与向后移动（bookmark_model_unittest.cc: MoveToSameParent）──
+    await mockBookmarks.move(bC, { parentId: F, index: 1 }); // c 当前下标 1 → index == oldIndex
+    await mockBookmarks.move(bC, { parentId: F, index: 2 }); // index == oldIndex + 1
+    const orderNoop = await kids(F);
+    ok('替身复现空操作：index == oldIndex / oldIndex+1 均不动', () =>
+      assert.deepEqual(orderNoop, ['a', 'c', 'd', 'b']),
+    );
+    await mockBookmarks.move(bC, { parentId: F, index: 3 }); // oldIndex+2 → 右移一格
+    const orderMoved = await kids(F);
+    ok('替身复现向后移动一格（oldIndex+2 → 右移）', () =>
+      assert.deepEqual(orderMoved, ['a', 'd', 'c', 'b']),
+    );
+
+    // ── D. 非法落点：自身 / 子树 ──
+    const outer = node('o', undefined, [node('i', undefined, [node('deep')]), node('bm', 'https://x')]);
+    ok('isSelfOrDescendant 拦截自身', () => assert.ok(isSelfOrDescendant(outer, 'o')));
+    ok('isSelfOrDescendant 拦截子文件夹', () => assert.ok(isSelfOrDescendant(outer, 'i')));
+    ok('isSelfOrDescendant 拦截深层后代', () => assert.ok(isSelfOrDescendant(outer, 'deep')));
+    ok('isSelfOrDescendant 放行无关文件夹', () => assert.ok(!isSelfOrDescendant(outer, 'zzz')));
+    ok('isSelfOrDescendant 不拦书签（无子树）', () => assert.ok(!isSelfOrDescendant(node('bm', 'https://x'), 'bm')));
+
+    // ── E. move_bookmark：fromPath 必须是「移动前」的路径，且不含元根 ──
+    const E1 = (await mockBookmarks.create({ parentId: '2', title: 'T22-SRC' })).id;
+    const E2 = (await mockBookmarks.create({ parentId: '2', title: 'T22-DST' })).id;
+    const eb = (await mockBookmarks.create({ parentId: E1, title: 'e-bm', url: 'https://t22.example/e' })).id;
+    const mo = await executeTool('move_bookmark', JSON.stringify({ bookmarkId: eb, parentId: E2 }));
+    const moj = JSON.parse(mo.result) as { fromPath: string; toPath: string };
+    ok('move_bookmark fromPath 记录移动前路径（而非移动后）', () => {
+      assert.ok(moj.fromPath.includes('T22-SRC'), `fromPath 应为源路径，实际「${moj.fromPath}」`);
+      assert.ok(!moj.fromPath.includes('T22-DST'), 'fromPath 不应是移动后的新路径');
+      assert.ok(moj.toPath.includes('T22-DST'), `toPath 应为目标路径，实际「${moj.toPath}」`);
+    });
+    ok('路径不把元根渲染成「(未命名)」', () => {
+      assert.ok(!moj.fromPath.includes('(未命名)'), `fromPath 不应含元根：${moj.fromPath}`);
+      assert.ok(!moj.toPath.includes('(未命名)'), `toPath 不应含元根：${moj.toPath}`);
+    });
+    const fp = await executeTool('get_folder_path', JSON.stringify({ bookmarkId: eb }));
+    ok('get_folder_path 同样不含元根（resolvePaths 分支）', () => {
+      const path = (JSON.parse(fp.result) as { path: string }).path;
+      assert.ok(path.includes('T22-DST') && !path.includes('(未命名)'), `实际「${path}」`);
+    });
+
+    // ── F. check_urls：skipped 逐条输出（每条 url 都是字符串）──
+    fetchCalls.length = 0;
+    sseQueue = [new Response(null, { status: 200 })];
+    const cu = await executeTool(
+      'check_urls',
+      JSON.stringify({ urls: ['https://example.com/t22', '这不是网址', 'https://空格 未编码.com/x'] }),
+    );
+    const cuj = JSON.parse(cu.result) as { url: unknown; status: string }[];
+    ok('check_urls skipped 逐条输出且 url 为字符串', () => {
+      const skipped = cuj.filter((r) => r.status === 'skipped');
+      assert.equal(skipped.length, 2, `应有 2 条 skipped，实际 ${JSON.stringify(cuj)}`);
+      for (const r of skipped) assert.equal(typeof r.url, 'string', 'url 必须是字符串，不能聚合成数组');
+    });
+    // ── G. move_bookmarks：文件夹移入自身子树 → 中文错误而非 Chrome 英文报错 ──
+    const G1 = (await mockBookmarks.create({ parentId: '2', title: 'T22-G1' })).id;
+    const G2 = (await mockBookmarks.create({ parentId: G1, title: 'T22-G2' })).id;
+    const G3 = (await mockBookmarks.create({ parentId: G2, title: 'T22-G3' })).id;
+    const mg = await executeTool('move_bookmarks', JSON.stringify({ ids: [G1], parentId: G3 }));
+    const mgj = JSON.parse(mg.result) as { moved: number; failures: { id: string; error: string }[] };
+    ok('move_bookmarks 拦截文件夹移入自身子树', () => {
+      assert.equal(mgj.moved, 0);
+      assert.equal(mgj.failures.length, 1);
+      assert.match(mgj.failures[0]!.error, /循环嵌套/, `应为中文循环嵌套错误，实际「${mgj.failures[0]!.error}」`);
+    });
+    const mgSelf = await executeTool('move_bookmarks', JSON.stringify({ ids: [G1], parentId: G1 }));
+    ok('move_bookmarks 拦截文件夹移入自身', () => {
+      const j = JSON.parse(mgSelf.result) as { failures: { error: string }[] };
+      assert.match(j.failures[0]?.error ?? '', /循环嵌套/);
+    });
+
+    // ── H. open_bookmarks：标签页创建失败不得虚报 opened ──
+    const g = globalThis as unknown as {
+      chrome: { tabs: { create: (o: { url: string; active: boolean }) => Promise<unknown> } };
+    };
+    const ob1 = (await mockBookmarks.create({ parentId: '2', title: 'ob1', url: 'https://t22.example/ob1' })).id;
+    const ob2 = (await mockBookmarks.create({ parentId: '2', title: 'ob2', url: 'https://t22.example/ob2' })).id;
+    const origCreate = g.chrome.tabs.create;
+    g.chrome.tabs.create = async () => {
+      throw new Error('TABS_BLOCKED');
+    };
+    let objResult: { requested: number; opened: number } | null = null;
+    let objThrew: string | null = null;
+    try {
+      const ob = await executeTool('open_bookmarks', JSON.stringify({ ids: [ob1, ob2] }));
+      objResult = JSON.parse(ob.result) as { requested: number; opened: number };
+    } catch (e) {
+      // 回滚后（无 try/catch）异常会冒到这里——归为该用例的失败，而不是整轮中断
+      objThrew = e instanceof Error ? e.message : String(e);
+    } finally {
+      g.chrome.tabs.create = origCreate;
+    }
+    ok('open_bookmarks 失败不虚报 opened', () => {
+      assert.equal(objThrew, null, `单个标签页失败不应让工具整体抛错：${objThrew}`);
+      assert.equal(objResult!.requested, 2);
+      assert.equal(objResult!.opened, 0, '全部创建失败时 opened 必须为 0');
+    });
+
+    // ── I. merge_folders：单条移动失败要如实计数，不得虚报 moved ──
+    const M1 = (await mockBookmarks.create({ parentId: '2', title: 'T22-M1' })).id;
+    const M2 = (await mockBookmarks.create({ parentId: '2', title: 'T22-M2' })).id;
+    const mc1 = (await mockBookmarks.create({ parentId: M1, title: 'mc1', url: 'https://t22.example/mc1' })).id;
+    await mockBookmarks.create({ parentId: M1, title: 'mc2', url: 'https://t22.example/mc2' });
+    const origMove = mockBookmarks.move;
+    mockBookmarks.move = async (id, dest) => {
+      if (id === mc1) throw new Error('MOVE_BLOCKED');
+      return origMove(id, dest);
+    };
+    let mres: { moved: number; note: string } | null = null;
+    try {
+      const mr = await executeTool('merge_folders', JSON.stringify({ sourceId: M1, targetId: M2 }));
+      mres = JSON.parse(mr.result) as { moved: number; note: string };
+    } finally {
+      mockBookmarks.move = origMove;
+    }
+    ok('merge_folders 如实计数：1 成功 1 失败', () => {
+      assert.equal(mres!.moved, 1, '只有 1 条真正移动成功');
+      assert.match(mres!.note, /1 项移动失败/, `note 应说明失败数，实际「${mres!.note}」`);
+    });
+    const m1Kids = await kids(M1);
+    ok('merge_folders 失败后源文件夹非空 → 不提议删除', () => assert.deepEqual(m1Kids, ['mc1']));
+
+    // ── J. 上下文预算：系统提示只能在 apiMessages 内计一次 ──
+    const { estimateTokens, estimateRequestTokens, fixedOverheadTokens } = await import('../src/lib/ai/agent');
+    const { SYSTEM_PROMPT: SP } = await import('../src/lib/ai/prompts');
+    const sysTokens = estimateTokens(SP);
+    const toolTokens = estimateTokens(JSON.stringify(TOOL_DEFINITIONS));
+
+    // J1 纯函数级：estimateRequestTokens 自身不含固定开销
+    const withSystem = estimateRequestTokens([{ role: 'system', content: SP }]);
+    ok('estimateRequestTokens 不含 fixedOverhead（系统提示只计一次）', () => {
+      const delta = withSystem - fixedOverheadTokens();
+      assert.ok(delta < 500, `重复计入系统提示会让差值多出数千 token，实际 ${delta}`);
+    });
+
+    // J2 行为级：真正守护调用点。预算窗口按下式反推——
+    //   正确记账：回填后用量 ≈ 工具定义 + 系统提示 + 超长输入 ≤ 预算 → 工具循环应继续
+    //   错误记账（再叠加一次固定开销）：用量多出（系统提示+工具定义），必然超预算 →
+    //   autoCompress=false 下提前中止并输出「上下文空间不足」，第 2 次请求根本不会发出。
+    const bigText = '请统计书签数量。'.repeat(700).slice(0, 8000);
+    const eps = estimateTokens(bigText);
+    const windowFor = Math.ceil((2 * (sysTokens + toolTokens) + eps + 100 + 5000) / 0.8);
+    fetchCalls.length = 0;
+    sseQueue = [
+      sseResponse([
+        sseEvent(
+          JSON.stringify({
+            choices: [
+              { delta: { tool_calls: [{ index: 0, id: 'ctx1', function: { name: 'stats', arguments: '{}' } }] } },
+            ],
+          }),
+        ),
+        sseEvent('[DONE]'),
+      ]),
+      sseResponse([sseEvent(JSON.stringify({ choices: [{ delta: { content: '共 N 个书签。' } }] })), sseEvent('[DONE]')]),
+    ];
+    const ctxEvents: ChatOutbound[] = [];
+    await runAgentTurn({
+      config: { ...TEST_CONFIG, contextWindow: windowFor, compressThreshold: 0.8, autoCompress: false },
+      messageId: 'msg-ctx',
+      history: [],
+      text: bigText,
+      signal: new AbortController().signal,
+      onEvent: (e) => ctxEvents.push(e),
+    });
+    ok('预算记账正确时工具循环继续（不误报上下文不足）', () => {
+      assert.equal(fetchCalls.length, 2, `回填后应继续第 2 次请求，实际只发了 ${fetchCalls.length} 次`);
+      const deltas = ctxEvents
+        .filter((e): e is Extract<ChatOutbound, { type: 'chat:delta' }> => e.type === 'chat:delta')
+        .map((e) => e.text)
+        .join('');
+      assert.ok(!deltas.includes('上下文空间不足'), `不应触发上下文护栏，实际输出：${deltas.slice(0, 200)}`);
+    });
+
+    // ── K. 重试不把同一条 user 消息既放历史又当新输入发两遍 ──
+    const { useAIStore } = await import('../src/stores/aiStore');
+    storageMap.clear();
+    useAIStore.setState({
+      messages: [], conversations: [], activeId: null, deletedIds: [], clearedIds: [],
+      pendingDeletions: [], streaming: false, streamingMessageId: null,
+    });
+    await useAIStore.getState().load();
+    const sentInbound: ChatInbound[] = [];
+    const fakePort = {
+      postMessage: (m: ChatInbound) => sentInbound.push(m),
+    } as unknown as chrome.runtime.Port;
+    const u0: ChatMessage = { id: 'u0', role: 'user', blocks: [{ kind: 'text', text: '第一轮' }], createdAt: 1 };
+    const a0: ChatMessage = { id: 'a0', role: 'assistant', blocks: [{ kind: 'text', text: '回复一' }], createdAt: 2 };
+    const u1: ChatMessage = { id: 'u1', role: 'user', blocks: [{ kind: 'text', text: '重试我' }], createdAt: 3 };
+    const a1: ChatMessage = { id: 'a1', role: 'assistant', blocks: [{ kind: 'text', text: '失败的一半' }], createdAt: 4 };
+    useAIStore.setState((s) => ({
+      port: fakePort,
+      streaming: false,
+      conversations: s.conversations.map((c) => (c.id === s.activeId ? { ...c, messages: [u0, a0, u1, a1] } : c)),
+      messages: [u0, a0, u1, a1],
+    }));
+    useAIStore.getState().retryLast();
+    await new Promise((r) => setTimeout(r, 0));
+    ok('重试时历史排除被重试的 user 消息', () => {
+      const inbound = sentInbound.find((m) => m.type === 'chat:send') as
+        | { text: string; history: ChatMessage[] }
+        | undefined;
+      assert.ok(inbound, 'retryLast 应发出 chat:send');
+      assert.equal(inbound.text, '重试我');
+      assert.deepEqual(
+        inbound.history.map((m) => m.id),
+        ['u0', 'a0'],
+        `历史只应含此前轮次，重复发送会让模型收到两条相同 user 消息：${inbound.history.map((m) => m.id).join(',')}`,
+      );
+    });
+    // 复位，避免影响后续（本区块为最后一段，仍保持一致状态）
+    useAIStore.setState({ port: null, streaming: false });
+    await mockBookmarks.removeTree(F).catch(() => {});
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

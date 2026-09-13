@@ -46,6 +46,11 @@ jobs:
         with:
           name: markai-build
           path: .output/*.zip
+          # 必须显式打开：`.output` 是隐藏目录，而 upload-artifact@v4.4+ / v5
+          # 默认 include-hidden-files=false —— 于是这一步会「成功但什么都没上传」
+          # （只在 run 的 ANNOTATIONS 里留一句 "No files were found"）。
+          # v0.2.0 / v0.2.1 / v0.2.2 三次发版都中了这个坑，2026-09-14 修。
+          include-hidden-files: true
           retention-days: 14
 
       # tag 触发时发布 GitHub Release；手动触发同样发布（用 package.json 版本号）

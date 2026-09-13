@@ -102,7 +102,21 @@ git tag -d v0.2.2
 修好问题后重新打 tag。**已经在用户浏览器里加载的旧 zip 不受影响**——
 扩展不发版也能继续用，这是它比服务端安全的地方。
 
-## 5. 已知边界（如实记录，别当成已解决）
+## 5. CI 里的一个已修陷阱（别再踩）
+
+`actions/upload-artifact@v4.4+` / `v5` **默认不上传隐藏目录里的文件**
+（`include-hidden-files: false`），而 WXT 的产物目录叫 `.output`（点开头）。
+
+后果很隐蔽：**这一步"成功"了，run 也是绿的，只是什么都没上传**——
+唯一的痕迹是 run 页面 ANNOTATIONS 里一句 `No files were found with the provided path: .output/*.zip`。
+`softprops/action-gh-release` 用的是另一套 glob（能匹配隐藏目录），所以
+**Release 资产一直是好的，坏掉的只有构建产物 artifact**：v0.2.0 / v0.2.1 / v0.2.2
+三次发版都中了这个坑，2026-09-14 加 `include-hidden-files: true` 修掉。
+
+教训：**"步骤绿了"不等于"事情做成了"**。发版后要看的不是 workflow 的结论，
+而是 run 的 ANNOTATIONS 与 Release 的资产列表。
+
+## 6. 已知边界（如实记录，别当成已解决）
 
 - **没有商店渠道**：不发 Chrome Web Store，产物只挂在 GitHub Release，用户手动加载。
 - **没有真机验证**：Release 校验只能证明产物结构正确，**证明不了**扩展在真实 Chrome 里

@@ -12,6 +12,9 @@
  */
 
 import assert from 'node:assert/strict';
+import { readFileSync, readdirSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { runAgentTurn } from '../src/lib/ai/agent';
 import { ChatError } from '../src/lib/ai/client';
 import { TOOL_DEFINITIONS } from '../src/lib/ai/prompts';
@@ -200,11 +203,19 @@ const mockBookmarks = {
     }),
     // 一次性消息：由各测试用例注入响应（默认无响应，等价于"没人处理"）
     sendMessage: async (msg: unknown) => sendMessageMock(msg),
+    // 扩展清单：UI 的版本号来源（与 WXT 从 package.json 注入的行为一致）
+    getManifest: () => ({ version: manifestVersion }),
   },
 };
 
 /** 注入 chrome.runtime.sendMessage 的响应；测试按需覆盖 */
 let sendMessageMock: (msg: unknown) => unknown = () => undefined;
+
+/** 测试期清单版本：默认取 package.json（与 WXT 注入一致），用例可临时覆盖 */
+const pkgVersion = (
+  JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }
+).version;
+let manifestVersion = pkgVersion;
 
 /** 内存 storage（多会话墓碑/清空/合并测试用） */
 const storageMap = new Map<string, unknown>();
@@ -2019,6 +2030,47 @@ function ok(name: string, fn: () => void) {
 
     sendMessageMock = () => undefined;
     useToastStore.setState({ toasts: [] });
+  }
+
+  /* ── T25: 版本号单一来源（UI 不得硬编码，必须与产物一致） ── */
+  console.log('\n[T25] 版本号单一来源');
+  {
+    const { appVersion } = await import('../src/lib/version');
+
+    ok('appVersion 取的就是清单版本（与 package.json 一致）', () => {
+      assert.equal(appVersion(), pkgVersion, 'UI 显示的版本必须等于产物版本');
+    });
+
+    // 覆盖清单版本：证明它真的在"读清单"，而不是又一个写死的常量
+    manifestVersion = '9.9.9';
+    const overridden = appVersion();
+    manifestVersion = pkgVersion;
+    ok('appVersion 跟随清单变化（不是写死的常量）', () => assert.equal(overridden, '9.9.9'));
+
+    // 源码守卫：src 下不得再出现硬编码的三段式版本号（注释除外）。
+    // 这个 bug 真的发生过：0.2.0 → 0.2.1 时 config-form 与 popup 两处都漏改。
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const stripComments = (s: string) =>
+      s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+        e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)],
+      );
+    const offenders = walk(srcDir)
+      .filter((f) => /\.tsx?$/.test(f))
+      .filter((f) => /\bv?\d+\.\d+\.\d+\b/.test(stripComments(readFileSync(f, 'utf8'))))
+      .map((f) => f.slice(srcDir.length + 1));
+    ok('src 下没有硬编码的三段式版本号（防再次漂移）', () =>
+      assert.deepEqual(offenders, [], `以下文件硬编码了版本号，请改用 appVersion()：${offenders.join('、')}`),
+    );
+
+    // 守卫的前置条件：两个 UI 面确实在"显示版本"，否则上面的守卫可以被"干脆不显示"绕过
+    for (const rel of ['components/options/config-form.tsx', 'entrypoints/popup/main.tsx']) {
+      const text = readFileSync(join(srcDir, rel), 'utf8');
+      ok(`${rel} 通过 appVersion() 显示版本而不是写死`, () => {
+        assert.match(text, /appVersion\s*\(/, `${rel} 应调用 appVersion()`);
+      });
+    }
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

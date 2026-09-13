@@ -6,6 +6,7 @@ import { AI_STORAGE_KEY } from '@/stores/aiStore';
 import type { AIConfig, ChatMessage, DeletionProposal } from '@/lib/ai/types';
 import { resolveConfig, PROVIDERS } from '@/lib/providers';
 import { ThemeProvider } from '@/components/theme/theme-provider';
+import { appVersion } from '@/lib/version';
 import { BrandMark } from '@/components/theme/theme-provider';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -157,7 +158,7 @@ function PopupApp() {
       <div className="flex h-10 items-center gap-1.5 border-b border-border bg-card px-3">
         <BrandMark />
         <Badge variant="outline" className="ml-auto">
-          v0.2.1
+          v{appVersion()}
         </Badge>
       </div>
 

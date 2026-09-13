@@ -25,6 +25,20 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: 'appVersion 变成写死的常量',
+    file: 'src/lib/version.ts',
+    from: '    return chrome.runtime.getManifest().version;',
+    to: "    return '0.2.2';",
+    expectFail: ['appVersion 跟随清单变化（不是写死的常量）'],
+  },
+  {
+    name: 'UI 又硬编码版本号（0.2.0→0.2.1 真实发生过的漂移）',
+    file: 'src/components/options/config-form.tsx',
+    from: '        MarkAI v{appVersion()} · 支持',
+    to: '        MarkAI v0.2.2 · 支持',
+    expectFail: ['src 下没有硬编码的三段式版本号（防再次漂移）'],
+  },
+  {
     name: 'undoLast 把"拒绝"也报成成功',
     file: 'src/stores/aiStore.ts',
     from: "      if (!r.ok && r.restored === 0) {",

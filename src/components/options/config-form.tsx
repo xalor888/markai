@@ -6,6 +6,7 @@ import { useThemeStore, type Theme } from '@/stores/themeStore';
 import { PROVIDERS, getPreset } from '@/lib/providers';
 import type { OneShotOutbound } from '@/lib/ai/types';
 import { pushToast } from '@/lib/toast';
+import { appVersion } from '@/lib/version';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
@@ -564,7 +565,7 @@ export function ConfigForm() {
       />
 
       <p className="pb-4 text-center text-[11px] text-muted-foreground">
-        MarkAI v0.2.1 · 支持 OpenAI / DeepSeek / Moonshot / Ollama 及任意 OpenAI 兼容服务
+        MarkAI v{appVersion()} · 支持 OpenAI / DeepSeek / Moonshot / Ollama 及任意 OpenAI 兼容服务
         {' · '}
         <button
           type="button"

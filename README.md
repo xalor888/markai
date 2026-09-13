@@ -43,7 +43,7 @@ npm run dev # 开发模式：自动打开 Chrome 并加载扩展
 
 ```bash
 npm run build # 构建到 .output/chrome-mv3
-npm run zip # 生成可分发 zip
+npm run zip # 生成可分发 zip（发版流程见 docs/release.md）
 ```
 
 > 若 `npm run dev` 未自动打开浏览器，手动到 `chrome://extensions` → 开发者模式 → 加载已解压的扩展程序 → 选择 `.output/chrome-mv3` 目录。
@@ -110,7 +110,7 @@ src/
 
 ## 测试
 
-- 运行：`npx tsx tests/agent.test.ts`（共 **140 项**，覆盖 SSE 流式解析、工具循环与死循环检测、网络错误自动重连、URL 分类、批量创建、多会话墓碑/清空/远端合并、配置解析边界、任务端到端链路、大库工具（check_urls_bulk / auto_categorize / cleanup_sweep）、删除提议终态保护、拖拽落点与 Chrome `move(index)` 语义、路径解析不含元根、失败不虚报计数、上下文预算记账、**操作日志与撤销（含删除拒绝、顺序还原、生产路径）**）
+- 运行：`npx tsx tests/agent.test.ts`（共 **145 项**，覆盖 SSE 流式解析、工具循环与死循环检测、网络错误自动重连、URL 分类、批量创建、多会话墓碑/清空/远端合并、配置解析边界、任务端到端链路、大库工具（check_urls_bulk / auto_categorize / cleanup_sweep）、删除提议终态保护、拖拽落点与 Chrome `move(index)` 语义、路径解析不含元根、失败不虚报计数、上下文预算记账、**操作日志与撤销（含删除拒绝、顺序还原、生产路径）**）
 - 测试替身对 `chrome.bookmarks.move` 实现了 **Chromium 真实 index 语义**（同父向后移动 `index--`、`index == oldIndex || oldIndex + 1` 为空操作），因此"拖拽排序"类用例能被证伪；忽略 index 的替身会让这类测试永远为真
 - 撤销的验收不是"按钮能点"，而是替身里「一轮移动/重命名/新建/排序/复制 → 撤销 → 整棵树含顺序与操作前逐节点深比对一致」；每条新测试都用「回滚实现 → 必须变红」反证过
 - 反证（证明测试不是假绿）：`node scripts/falsify.mjs` —— 逐条把实现回滚成 bug 版本，要求对应测试**必须失败**；任何一条「回滚后仍然全绿」都会以非零码退出（当前 18/18）。⚠️ 运行期间会临时改写工作区源码，**不要与 `tsc`/测试/构建并行运行**

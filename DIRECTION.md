@@ -31,9 +31,9 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
-| 测试 | `npm test` | **140 项全绿**（P0 前 95 → P0 后 118 → P1 后 140） |
+| 测试 | `npm test` | **145 项全绿**（P0 前 95 → P0 后 118 → P1 后 140 → 发版后 145） |
 | 构建 | `npm run build` | 通过，`.output/chrome-mv3` 788.17 kB |
-| 版本 | `package.json` | 0.2.1 |
+| 版本 | `package.json` | **0.2.2（已发版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
 | 发布 | `.github/workflows/release.yml` | `v*` tag → 构建 + Release |
 
@@ -95,6 +95,14 @@ if (old_parent == new_parent && index > old_index) {
 因此：`index` 语义被固化在 `src/lib/bookmark-dnd.ts` 的 `resolveDropIndex`（一个"只返回落点"的函数，
 存在的唯一理由就是钉住这条契约并让测试能证伪），替身也按真实语义实现。
 这与"删除安全闸门"是同一件事的两面：**给 Agent 最高权限的前提，是我们能证明它在边界上做对了。**
+
+**同类的第三个实例（发版时抓到）**：CI 的「上传构建产物」步骤连续三个版本（v0.2.0 / v0.2.1 / v0.2.2）
+都是**绿的，却什么都没上传**。根因是 WXT 的产物在 `.output`（点开头的隐藏目录），
+而 `actions/upload-artifact@v4.4+` 默认 `include-hidden-files: false`；
+唯一的痕迹是 run 页面 ANNOTATIONS 里一句 `No files were found with the provided path`。
+它和"假绿测试"是同一个病：**绿只说明"这一步没抛错"，不等于"这件事做成了"。**
+所以发版后的验收对象是 run 的 ANNOTATIONS、Release 的资产列表、以及下载回来的
+`manifest.json`——而不是 workflow 的结论。
 
 ## 4. 三条主线
 
@@ -159,8 +167,9 @@ Chromium 的 `index` 是「移除源之前」坐标，而我们要的是「移�
 | **P3** | 真浏览器端到端验证（加载 `.output/chrome-mv3`，跑一次真实整理任务 + 点一次撤销） | 单测看不见 UI 与真实 API 的差异 |
 | **P4** | 分发就绪（权限最小化、隐私说明、上架材料） | 无人值守下无法完成商店审核，只能把可自动化的部分做完 |
 
-> 版本节奏：P0 的修复未单独发版（已发布的 v0.2.1 并不包含那个 off-by-one，无用户面回归需要紧急修复）。
-> 计划在 P1（撤销）之后一起打 tag 发布——头部功能才值得一个版本号。
+> 版本节奏（已执行）：P0 的修复没有单独发版，与 P1（撤销）一起打成 **v0.2.2** —— 头部功能才值得一个版本号。
+> 发版流程与验证方式见 `docs/release.md`（markai 不走 keepgoal 部署主机：扩展没有服务端与探针）。
+> 本次发版顺带发现并修掉了 CI 里一个长期存在的静默失败，见 §3 末尾。
 
 
 ## 6. 每个目标的完成标准（Definition of Done）

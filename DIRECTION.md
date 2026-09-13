@@ -33,7 +33,7 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
 | 测试 | `npm test` | **157 项全绿**（P0 前 95 → P0 后 118 → P1 后 140 → 发版后 145 → P2 后 157） |
 | 构建 | `npm run build` | 通过，`.output/chrome-mv3` 788.17 kB |
-| 版本 | `package.json` | **0.2.2（已发版）** |
+| 版本 | `package.json` | **0.2.3（已发版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
 | 发布 | `.github/workflows/release.yml` | `v*` tag → 构建 + Release |
 
@@ -192,9 +192,10 @@ sort_folder + merge_folders 再撤销）抓出**并发批量移动**的坑——
 > 只能用来抓自家代码的 O(n²) 爆炸与顺序错误，**不代表真实浏览器性能**。
 > 真要谈性能，得在真机上量（P3）。
 
-> 版本节奏（已执行）：P0 的修复没有单独发版，与 P1（撤销）一起打成 **v0.2.2** —— 头部功能才值得一个版本号。
+> 版本节奏（已执行）：P0 的修复没有单独发版，与 P1（撤销）一起打成 **v0.2.2**（头部功能才值得一个版本号）；
+> P2 修掉的撤销缺陷在 v0.2.2 里**已经发布**，因此单独发了补丁版 **v0.2.3**（含说明"修了什么、是否该升级"的发布说明）。
 > 发版流程与验证方式见 `docs/release.md`（markai 不走 keepgoal 部署主机：扩展没有服务端与探针）。
-> 本次发版顺带发现并修掉了 CI 里一个长期存在的静默失败，见 §3 末尾。
+> v0.2.2 那次发版顺带发现并修掉了 CI 里一个长期存在的静默失败，见 §3 末尾（v0.2.3 的发版已复验该修复在 tag 触发的真实发版里生效）。
 
 
 ## 6. 每个目标的完成标准（Definition of Done）

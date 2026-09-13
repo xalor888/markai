@@ -112,6 +112,8 @@ git tag -d v0.2.2
 `softprops/action-gh-release` 用的是另一套 glob（能匹配隐藏目录），所以
 **Release 资产一直是好的，坏掉的只有构建产物 artifact**：v0.2.0 / v0.2.1 / v0.2.2
 三次发版都中了这个坑，2026-09-14 加 `include-hidden-files: true` 修掉。
+**复验**：v0.2.3 的发版 run 里，ANNOTATIONS 只剩 Node 20 弃用告警，且 artifacts 中确实出现
+`markai-build`（约 746 KB）——修复在真实的 tag 触发流程里生效（此前只用 workflow_dispatch 验过）。
 
 教训：**"步骤绿了"不等于"事情做成了"**。发版后要看的不是 workflow 的结论，
 而是 run 的 ANNOTATIONS 与 Release 的资产列表。

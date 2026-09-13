@@ -54,15 +54,15 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 
 **我们的验证能力低于我们的声称。** 具体实例：
 
-`tests/agent.test.ts:91` 的 mock 是：
+`tests/agent.test.ts` 的替身（P0 前）是：
 
 ```ts
 move: async (id: string, dest: { parentId: string }) => { ... }   // 完全忽略 index
 ```
 
-而 `tests/agent.test.ts:584` 有一条测试叫
+而同一文件里有一条测试叫
 **「move_bookmarks 保持输入顺序（逆序 index 移动）」** —— 它断言的正是 `index` 语义，
-但 mock 根本不实现 `index`。这条测试**在当前实现下不可能失败**：书签 3、4 本来就排在 5 前面，
+但替身根本不实现 `index`。这条测试**在当时不可能失败**：书签 3、4 本来就排在 5 前面，
 `childrenOf` 按插入顺序返回，于是 `kids[0]==='GitHub 主页'` 恒真。
 
 更糟的是，未提交的那批修复里有两处**正是**同文件夹重排的下标逻辑

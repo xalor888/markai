@@ -67,11 +67,16 @@ const cases = [
     expectFail: ['别的窗口改动撤销点会触发本窗口 refreshUndo'],
   },
   {
+    // ⚠️ 回滚值必须是**与版本无关**的假值：早期写死 '0.2.2'，一旦 package.json 升到 0.2.3
+    //    它就变成"与清单不一致"，于是先红的是另一条断言（同样是有效证据，但预期名会失配）。
     name: 'appVersion 变成写死的常量',
     file: 'src/lib/version.ts',
     from: '    return chrome.runtime.getManifest().version;',
-    to: "    return '0.2.2';",
-    expectFail: ['appVersion 跟随清单变化（不是写死的常量）'],
+    to: "    return '0.0.0-hardcoded';",
+    expectFail: [
+      'appVersion 取的就是清单版本（与 package.json 一致）',
+      'appVersion 跟随清单变化（不是写死的常量）',
+    ],
   },
   {
     name: 'UI 又硬编码版本号（0.2.0→0.2.1 真实发生过的漂移）',

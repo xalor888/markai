@@ -25,6 +25,48 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: 'auto_categorize 退回逐条埋点（并发下标不构成一致历史）',
+    file: 'src/lib/ai/tools.ts',
+    from: '          await chrome.bookmarks.move(id, { parentId: folderId });',
+    to: '          await jMove(id, { parentId: folderId });',
+    expectFail: ['大库下的撤销点覆盖了全部写入，且并发批次只记一条', '5000+ 节点下撤销后整棵树（含顺序）与操作前逐节点一致'],
+  },
+  {
+    name: 'moveBatch 撤销时不做顺序还原（只把节点搬回去）',
+    file: 'src/lib/undo/apply.ts',
+    from: '      const current = await chrome.bookmarks.getChildren(op.fromParentId).catch(() => []);',
+    to: '      return;\n      const current = await chrome.bookmarks.getChildren(op.fromParentId).catch(() => []);',
+    expectFail: ['5000+ 节点下撤销后整棵树（含顺序）与操作前逐节点一致'],
+  },
+  {
+    name: '批次按操作条数计权重（800 条显示成 1 项）',
+    file: 'src/lib/undo/journal.ts',
+    from: '  for (const op of ops) counts.set(op.kind, (counts.get(op.kind) ?? 0) + opWeight(op));',
+    to: '  for (const op of ops) counts.set(op.kind, (counts.get(op.kind) ?? 0) + 1);',
+    expectFail: ['批次按条数计权重'],
+  },
+  {
+    name: 'applyUndo 把"指定 id 找不到"退化成撤销最新点',
+    file: 'src/lib/undo/apply.ts',
+    from: '  if (id && !target) {',
+    to: '  if (false) {',
+    expectFail: ['applyUndo 对不存在的 id 如实拒绝'],
+  },
+  {
+    name: '撤销只发「最新那个」而不带展示点的 id',
+    file: 'src/stores/aiStore.ts',
+    from: "        type: 'undo:apply',\n        id: shown,",
+    to: "        type: 'undo:apply',",
+    expectFail: ['撤销显式针对 store 当前展示的撤销点'],
+  },
+  {
+    name: '跨窗口不监听 markai.undo（按钮会留陈旧入口）',
+    file: 'src/stores/aiStore.ts',
+    from: '    if (changes[UNDO_STORAGE_KEY]) {',
+    to: '    if (false) {',
+    expectFail: ['别的窗口改动撤销点会触发本窗口 refreshUndo'],
+  },
+  {
     name: 'appVersion 变成写死的常量',
     file: 'src/lib/version.ts',
     from: '    return chrome.runtime.getManifest().version;',

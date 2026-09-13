@@ -35,6 +35,23 @@ export type UndoOp =
       isFolder: boolean;
     }
   | {
+      /**
+       * 并发批量移动（目前只有 auto_categorize）。
+       *
+       * 为什么不能拆成逐条 move：并发 worker 各自读到的 fromIndex 来自**正在被别人修改**的
+       * 兄弟列表，那组下标不构成任何一致的串行历史，撤销后顺序会错乱（5000 节点规模测试实测）。
+       * 所以整批只记一条，并带上批次开始前源文件夹的**完整子序**——它是批次自身的"操作前状态"，
+       * 与撤销的逆序回放天然一致（自包含，不与其他操作的下标混用坐标系）。
+       */
+      kind: 'moveBatch';
+      title: string;
+      /** 这些节点从 fromParentId 被移走 */
+      fromParentId: string;
+      ids: string[];
+      /** 批次开始前 fromParentId 的完整子项顺序（用于精确还原顺序） */
+      order: string[];
+    }
+  | {
       kind: 'delete';
       id: string;
       title: string;

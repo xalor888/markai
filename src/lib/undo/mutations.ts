@@ -65,6 +65,31 @@ export async function jUpdate(
 }
 
 /**
+ * 记录一条**并发批量移动**（整批一条，替代逐条 jMove 埋点）。
+ *
+ * 调用方必须在动手前拿到源文件夹的完整子序 `order`（工具本来就会先 getChildren）。
+ * 逐条埋点在并发下记录的是互相矛盾的下标——每个 worker 读到的是别人正在修改的列表，
+ * 那组下标不构成任何一致的串行历史，撤销后顺序必然错乱（5000 节点规模测试实测到过）。
+ *
+ * 调用方用裸 `chrome.bookmarks.move` 执行这批移动（不要再走 jMove，否则会重复记录）。
+ */
+export function recordMoveBatch(params: {
+  fromParentId: string;
+  ids: string[];
+  order: string[];
+  title?: string;
+}): void {
+  if (params.ids.length === 0) return;
+  recordOp({
+    kind: 'moveBatch',
+    title: params.title ?? `${params.ids.length} 项`,
+    fromParentId: params.fromParentId,
+    ids: [...params.ids],
+    order: [...params.order],
+  });
+}
+
+/**
  * 删除：**不可逆**（没有子树快照）。把本轮标记为「含删除」，撤销时会明确拒绝整轮，
  * 而不是只撤一半再假装成功。
  *

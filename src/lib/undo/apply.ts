@@ -40,6 +40,40 @@ async function applyOne(op: UndoOp): Promise<void> {
       await chrome.bookmarks.move(op.id, { parentId: op.fromParentId, index });
       return;
     }
+    case 'moveBatch': {
+      // 1) 先把这批节点全部搬回源文件夹（此刻顺序无所谓，下一步统一校正）
+      for (const id of op.ids) {
+        const nodes = await chrome.bookmarks.get(id).catch(() => []);
+        const node = nodes[0];
+        if (!node) continue;
+        if (node.parentId !== op.fromParentId) {
+          await chrome.bookmarks.move(id, { parentId: op.fromParentId });
+        }
+      }
+      // 2) 把源文件夹的子项顺序还原成批次开始前的样子。
+      //    批次记录自带完整子序，所以这里不需要（也不能）依赖逐条下标——
+      //    这正是并发批量移动能安全撤销的原因。
+      const current = await chrome.bookmarks.getChildren(op.fromParentId).catch(() => []);
+      const orderSet = new Set(op.order);
+      const present = new Set(current.map((n) => n.id));
+      // 批次开始前就存在的节点按原序在前；本轮新建的节点（如分类文件夹）排到末尾，
+      // 稍后由它们自己的 create 逆操作删除
+      const target = [
+        ...op.order.filter((id) => present.has(id)),
+        ...current.filter((n) => !orderSet.has(n.id)).map((n) => n.id),
+      ];
+      const mirror = current.map((n) => n.id); // 本地镜像，避免每个位置都重新 getChildren
+      for (let i = 0; i < target.length; i++) {
+        const at = mirror.indexOf(target[i]!);
+        if (at < 0 || at === i) continue;
+        // 同 applyOne('move') 的换算：要落到第 i 位，Chromium 要的是「移除源之前」的坐标
+        const index = i >= at ? i + 1 : i;
+        await chrome.bookmarks.move(target[i]!, { parentId: op.fromParentId, index });
+        mirror.splice(at, 1);
+        mirror.splice(i, 0, target[i]!);
+      }
+      return;
+    }
     case 'update': {
       const nodes = await chrome.bookmarks.get(op.id).catch(() => []);
       if (nodes.length === 0) return;
@@ -59,6 +93,17 @@ async function applyOne(op: UndoOp): Promise<void> {
 export async function applyUndo(id?: string): Promise<UndoApplyResult> {
   const points = await readUndoPoints();
   const target = id ? points.find((p) => p.id === id) : points[0];
+  // 指定了 id 却找不到：说明这个撤销点已经不在了（多半是另一个窗口刚撤过）。
+  // 必须如实说明「你点的那个没了」，**不能**退化成「那就撤最新的那个」——
+  // 那会撤销一个用户没点过的操作，比失败更糟。
+  if (id && !target) {
+    return {
+      ok: false,
+      reason: '该操作已不存在（可能已在另一个窗口撤销过，或已被更新的一轮挤出保留范围）',
+      restored: 0,
+      failures: [],
+    };
+  }
   const ready = undoReadiness(target);
   if (!target || !ready.undoable) {
     return { ok: false, ...(ready.reason ? { reason: ready.reason } : {}), restored: 0, failures: [] };

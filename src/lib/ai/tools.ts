@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { uid } from '../format';
 import type { DeletionProposal } from './types';
 import { CONFIG_STORAGE_KEY } from '@/stores/configStore';
-import { jCreate, jMove, jRemove, jUpdate } from '@/lib/undo/mutations';
+import { jCreate, jMove, jRemove, jUpdate, recordMoveBatch } from '@/lib/undo/mutations';
 
 /** 工具执行结果 */
 export interface ToolOutput {
@@ -627,6 +627,13 @@ async function autoCategorize(
 
   // 建文件夹 + 移动（并发池 10：同一目标文件夹顺序无关，Chrome API 内部串行化；
   // 万条书签从逐条串行 ~50s 降到 ~5s；组粒度上报进度）
+  //
+  // 埋点：这一批**不逐条记日志**，只在整个批次结束后记一条 moveBatch（见 undo/types.ts）。
+  // 并发 worker 各自读到的 fromIndex 来自正在被同伴修改的兄弟列表，那组下标不构成
+  // 任何一致的串行历史；逐条记录会让「撤销自动分类」后的顺序错乱（5000 节点规模测试实测）。
+  // 顺带收益：少掉每条一次 getChildren，批次本身也更快。
+  const sourceOrder = children.map((c) => c.id); // children 在函数开头已取，是批次开始前的完整子序
+  const movedIds: string[] = [];
   let created = 0;
   let moved = 0;
   try {
@@ -635,7 +642,8 @@ async function autoCategorize(
       const workers = Array.from({ length: Math.min(10, ids.length) }, async () => {
         while (cursor < ids.length) {
           const id = ids[cursor++]!;
-          await jMove(id, { parentId: folderId });
+          await chrome.bookmarks.move(id, { parentId: folderId });
+          movedIds.push(id);
           moved++;
         }
       });
@@ -655,11 +663,14 @@ async function autoCategorize(
       onProgress?.(`已把 ${overflow.length} 个小众分类并入「其他」文件夹`);
     }
   } catch (e) {
-    // 部分失败不整体回滚：已完成的分类保留，错误如实上报
+    // 部分失败不整体回滚：已完成的分类保留，错误如实上报。
+    // 已移动的部分照样记日志，撤销才能把用户带回操作前。
+    recordMoveBatch({ fromParentId: pid, ids: movedIds, order: sourceOrder, title: '自动分类' });
     throw new Error(
       `分类执行中断：${e instanceof Error ? e.message : String(e)}（已创建 ${created} 个文件夹，已移动 ${moved} 条书签）`,
     );
   }
+  recordMoveBatch({ fromParentId: pid, ids: movedIds, order: sourceOrder, title: '自动分类' });
 
   return {
     result: JSON.stringify({

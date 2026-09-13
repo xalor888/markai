@@ -95,6 +95,46 @@ async function snapshotTree(): Promise<string> {
   return JSON.stringify((tree[0]?.children ?? []).map(norm));
 }
 
+/** 树快照的规范化结构（深比对 + 差异定位用） */
+interface TreeNorm {
+  id: string;
+  title: string;
+  url: string | null;
+  children: TreeNorm[];
+}
+
+async function snapshotTreeObj(): Promise<TreeNorm[]> {
+  const tree = await mockBookmarks.getTree();
+  const norm = (n: chrome.bookmarks.BookmarkTreeNode): TreeNorm => ({
+    id: n.id,
+    title: n.title,
+    url: n.url ?? null,
+    children: (n.children ?? []).map(norm),
+  });
+  return (tree[0]?.children ?? []).map(norm);
+}
+
+/**
+ * 定位两棵树的第一处差异，返回可读路径。
+ * 大库用例（5000+ 节点）里直接 assert.deepEqual 会打印 40 万字符，根本看不出哪错了。
+ */
+function firstTreeDiff(expected: TreeNorm[], actual: TreeNorm[], path = ''): string | null {
+  if (expected.length !== actual.length) {
+    return `${path || '(根)'}：子项数 期望 ${expected.length}，实际 ${actual.length}`;
+  }
+  for (let i = 0; i < expected.length; i++) {
+    const e = expected[i]!;
+    const a = actual[i]!;
+    const here = `${path}/${e.title || e.id}`;
+    if (e.id !== a.id) return `${here}：id 期望 ${e.id}，实际 ${a.id}`;
+    if (e.title !== a.title) return `${here}：标题 期望「${e.title}」，实际「${a.title}」`;
+    if (e.url !== a.url) return `${here}：URL 期望「${e.url}」，实际「${a.url}」`;
+    const child = firstTreeDiff(e.children, a.children, here);
+    if (child) return child;
+  }
+  return null;
+}
+
 const mockBookmarks = {
   getTree: async () => [toApi({ id: '0', title: '', dateAdded: 0 })],
   getSubTree: async (id: string) => {
@@ -192,7 +232,16 @@ const mockBookmarks = {
       remove: async (keys: string | string[]) => {
         for (const k of Array.isArray(keys) ? keys : [keys]) storageMap.delete(k);
       },
-      onChanged: { addListener: () => {}, removeListener: () => {} },
+    },
+    // 真实 API 是 chrome.storage.onChanged（不是 storage.local.onChanged）
+    onChanged: {
+      addListener: (fn: StorageListener) => {
+        storageListeners.push(fn);
+      },
+      removeListener: (fn: StorageListener) => {
+        const i = storageListeners.indexOf(fn);
+        if (i >= 0) storageListeners.splice(i, 1);
+      },
     },
   },
   runtime: {
@@ -216,6 +265,19 @@ const pkgVersion = (
   JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }
 ).version;
 let manifestVersion = pkgVersion;
+
+/* ── chrome.storage.onChanged：真实注册 + 可主动触发（跨窗口同步测试用） ── */
+
+type StorageListener = (
+  changes: { [key: string]: chrome.storage.StorageChange },
+  area: chrome.storage.AreaName,
+) => void;
+const storageListeners: StorageListener[] = [];
+
+/** 模拟"另一个窗口/background 写了 storage"，通知本窗口的监听器 */
+function fireStorageChange(changes: Record<string, { oldValue?: unknown; newValue?: unknown }>, area: chrome.storage.AreaName = 'local') {
+  for (const fn of [...storageListeners]) fn(changes, area);
+}
 
 /** 内存 storage（多会话墓碑/清空/合并测试用） */
 const storageMap = new Map<string, unknown>();
@@ -1742,6 +1804,16 @@ function ok(name: string, fn: () => void) {
       assert.equal(summarizeOps(ops), '移动 2 项、新建 1 项、删除 1 项');
       assert.equal(summarizeOps([]), '无写操作');
     });
+    ok('批次按条数计权重：800 条并发移动不能显示成「1 项」', () => {
+      const batch: UndoOp[] = [
+        { kind: 'moveBatch', title: '自动分类', fromParentId: 'p', ids: Array.from({ length: 800 }, (_, i) => `b${i}`), order: ['p'] },
+      ];
+      assert.equal(summarizeOps(batch), '移动 800 项');
+      assert.equal(
+        undoReadiness({ id: '1', runId: 'r', createdAt: 0, ops: batch, containsDelete: false }).count,
+        800,
+      );
+    });
     ok('undoableOps 排除删除（删除没有快照）', () => {
       const ops: UndoOp[] = [opMove('a', 0), opDelete('d')];
       assert.deepEqual(
@@ -1752,7 +1824,7 @@ function ok(name: string, fn: () => void) {
     ok('reverseOps 严格逆序（先做的后撤）', () => {
       const ops: UndoOp[] = [opMove('a', 0), opCreate('b'), opCreate('c')];
       assert.deepEqual(
-        reverseOps(ops).map((o) => o.id),
+        reverseOps(ops).map((o) => ('id' in o ? o.id : o.title)),
         ['c', 'b', 'a'],
       );
     });
@@ -2071,6 +2143,239 @@ function ok(name: string, fn: () => void) {
         assert.match(text, /appVersion\s*\(/, `${rel} 应调用 appVersion()`);
       });
     }
+  }
+
+  /* ── T26: 撤销的边界与一致性（DIRECTION P2） ── */
+  console.log('\n[T26] 撤销的边界与一致性');
+  {
+    const { useAIStore, initCrossWindowSync } = await import('../src/stores/aiStore');
+    const { useToastStore } = await import('../src/lib/toast');
+    const { applyUndo } = await import('../src/lib/undo/apply');
+    const {
+      UNDO_STORAGE_KEY,
+      beginUndoTransaction,
+      endUndoTransaction,
+      resetUndoTransactionForTest,
+    } = await import('../src/lib/undo/recorder');
+    type UndoPointT = import('../src/lib/undo/types').UndoPoint;
+
+    const mkPoint = (id: string, kind: 'move' | 'create' = 'move'): UndoPointT => ({
+      id,
+      runId: `run-${id}`,
+      createdAt: Date.now(),
+      ops:
+        kind === 'move'
+          ? [{ kind: 'move', id: `bm-${id}`, title: id, fromParentId: 'p', fromIndex: 0 }]
+          : [{ kind: 'create', id: `new-${id}`, title: id, isFolder: true }],
+      containsDelete: false,
+    });
+
+    // ── A. 点击撤销必须针对「界面上展示的那个点」 ──
+    const sentMessages: { type?: string; id?: string }[] = [];
+    let listed: UndoPointT[] = [];
+    let applyResult: unknown = undefined;
+    sendMessageMock = (msg) => {
+      const m = msg as { type?: string; id?: string };
+      sentMessages.push(m);
+      if (m.type === 'undo:list') return { type: 'undo:list:result', points: listed };
+      if (m.type === 'undo:apply') return { type: 'undo:apply:result', result: applyResult };
+      return undefined;
+    };
+
+    const shownPoint = mkPoint('P-shown');
+    const newerPoint = mkPoint('P-newer');
+    listed = [shownPoint, newerPoint];
+    await useAIStore.getState().refreshUndo();
+    applyResult = { ok: true, restored: 1, failures: [] };
+    sentMessages.length = 0;
+    await useAIStore.getState().undoLast();
+
+    ok('撤销显式针对 store 当前展示的撤销点（而不是"最新那个"）', () => {
+      const applied = sentMessages.find((m) => m.type === 'undo:apply');
+      assert.ok(applied, '应发出 undo:apply');
+      assert.equal(
+        applied!.id,
+        shownPoint.id,
+        '必须带上界面展示的那个 id——只发"最新"时，别的窗口中途跑完一轮就会撤错对象',
+      );
+    });
+
+    // 展示点已被别的窗口撤掉：background 如实拒绝，界面不得谎报成功，并刷新掉陈旧入口
+    useToastStore.setState({ toasts: [] });
+    listed = [shownPoint];
+    await useAIStore.getState().refreshUndo();
+    applyResult = { ok: false, reason: '该操作已不存在（可能已在另一个窗口撤销过）', restored: 0, failures: [] };
+    listed = [];
+    await useAIStore.getState().undoLast();
+    const goneToasts = useToastStore.getState().toasts;
+    ok('目标撤销点已消失时如实拒绝，且不再显示陈旧按钮', () => {
+      assert.ok(
+        goneToasts.some((t) => t.title === '无法撤销' && /已不存在/.test(t.description ?? '')),
+        `应提示已不存在，实际 ${JSON.stringify(goneToasts)}`,
+      );
+      assert.ok(!goneToasts.some((t) => t.title.includes('已撤销')),
+        '不得出现成功提示');
+      assert.equal(useAIStore.getState().undoPoints.length, 0, '刷新后应清掉被消费的点');
+    });
+
+    // 没有任何可撤销点：连请求都不该发
+    useToastStore.setState({ toasts: [] });
+    listed = [];
+    await useAIStore.getState().refreshUndo();
+    sentMessages.length = 0;
+    await useAIStore.getState().undoLast();
+    ok('没有可撤销点时直接提示，不发无意义的请求', () => {
+      assert.equal(sentMessages.filter((m) => m.type === 'undo:apply').length, 0);
+      assert.ok(useToastStore.getState().toasts.some((t) => t.title === '没有可撤销的操作'));
+    });
+
+    // ── B. 引擎层：指定 id 找不到时不得退化成"那就撤最新的" ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    await beginUndoTransaction('run-exists');
+    const survivor = (await mockBookmarks.create({ parentId: '2', title: 'T26-SURVIVOR', url: 'https://t26.test/s' })).id;
+    await import('../src/lib/undo/mutations').then((m) => m.jRemove(survivor));
+    await endUndoTransaction();
+    const missing = await applyUndo('no-such-point-id');
+    const stillThere = (await mockBookmarks.get(survivor).catch(() => [])).length > 0;
+    ok('applyUndo 对不存在的 id 如实拒绝（不退化成撤销最新点）', () => {
+      assert.equal(missing.ok, false);
+      assert.match(missing.reason ?? '', /已不存在/);
+      assert.equal(missing.restored, 0);
+      assert.equal(stillThere, false, '不得顺手把最新那个撤销点也执行掉');
+    });
+
+    // ── C. 跨窗口：markai.undo 变化要让其他窗口立刻刷新 ──
+    const stopSync = initCrossWindowSync();
+    let listCalls = 0;
+    sendMessageMock = (msg) => {
+      const m = msg as { type?: string };
+      if (m.type === 'undo:list') {
+        listCalls++;
+        return { type: 'undo:list:result', points: listed };
+      }
+      return undefined;
+    };
+    listed = [shownPoint];
+    fireStorageChange({ [UNDO_STORAGE_KEY]: { newValue: { points: [shownPoint] } } });
+    await new Promise((r) => setTimeout(r, 20));
+    ok('别的窗口改动撤销点会触发本窗口 refreshUndo', () => {
+      assert.ok(listCalls >= 1, `应发起 undo:list，实际 ${listCalls} 次`);
+      assert.equal(useAIStore.getState().undoPoints.length, 1);
+    });
+    const callsAfterUndo = listCalls;
+    fireStorageChange({ 'markai.unrelated': { newValue: 1 } });
+    await new Promise((r) => setTimeout(r, 20));
+    ok('无关 key 的变化不触发撤销点刷新（不做无谓刷新）', () => assert.equal(listCalls, callsAfterUndo));
+    stopSync();
+
+    // ── D. 规模：5000+ 节点大库下，一轮整理 → 撤销 → 整树含顺序深比对一致 ──
+    // 注意：替身的 getChildren 是 O(全库)（真实 API 是 O(该文件夹子项)），
+    // 所以这里的耗时是**悲观上界**，只能用来抓自家代码的 O(n²) 爆炸，不代表真实性能。
+    const bulk = (parentId: string, count: number, prefix: string, url?: (i: number) => string) => {
+      const ids: string[] = [];
+      for (let i = 0; i < count; i++) {
+        const id = String(nextId++);
+        store.push({
+          id,
+          parentId,
+          title: `${prefix}${String(i).padStart(4, '0')}`,
+          ...(url ? { url: url(i) } : {}),
+          dateAdded: 10_000 + i,
+        });
+        ids.push(id);
+      }
+      return ids;
+    };
+    const big = (await mockBookmarks.create({ parentId: '2', title: 'T26-BIG' })).id;
+    const fillerA = (await mockBookmarks.create({ parentId: big, title: 'T26-FILL-A' })).id;
+    const fillerB = (await mockBookmarks.create({ parentId: big, title: 'T26-FILL-B' })).id;
+    const catFolder = (await mockBookmarks.create({ parentId: big, title: 'T26-CAT' })).id;
+    const sortFolder = (await mockBookmarks.create({ parentId: big, title: 'T26-SORT' })).id;
+    const mergeSrc = (await mockBookmarks.create({ parentId: big, title: 'T26-MERGE-SRC' })).id;
+    const mergeDst = (await mockBookmarks.create({ parentId: big, title: 'T26-MERGE-DST' })).id;
+    bulk(fillerA, 2000, 'fa-', (i) => `https://filler-a.test/${i}`);
+    bulk(fillerB, 1800, 'fb-', (i) => `https://filler-b.test/${i}`);
+    // 分类目标：800 条直接书签，8 个注册域各 100 条
+    bulk(catFolder, 800, 'cat-', (i) => `https://d${i % 8}.example/page/${i}`);
+    // 排序目标：300 条，标题倒序灌入
+    for (let i = 300; i > 0; i--) {
+      const id = String(nextId++);
+      store.push({
+        id,
+        parentId: sortFolder,
+        title: `s-${String(i).padStart(4, '0')}`,
+        url: `https://sort.test/${i}`,
+        dateAdded: 20_000 + i,
+      });
+    }
+    bulk(mergeSrc, 300, 'ms-', (i) => `https://merge.test/${i}`);
+    const totalNodes = store.length;
+
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    const beforeBig = await snapshotTreeObj();
+    const turnStart = Date.now();
+    await beginUndoTransaction('run-scale');
+    const catOut = await executeTool(
+      'auto_categorize',
+      JSON.stringify({ folderId: catFolder, minGroupSize: 50, maxGroups: 25, foldOverflow: true }),
+    );
+    const sortOut = await executeTool('sort_folder', JSON.stringify({ parentId: sortFolder, by: 'title' }));
+    const mergeOut = await executeTool('merge_folders', JSON.stringify({ sourceId: mergeSrc, targetId: mergeDst }));
+    const scalePoint = await endUndoTransaction();
+    const undoStart = Date.now();
+    const scaleUndo = await applyUndo();
+    const elapsedTurn = undoStart - turnStart;
+    const elapsedUndo = Date.now() - undoStart;
+    const afterBig = await snapshotTreeObj();
+
+    ok('大库夹具确实超过 5000 个节点', () =>
+      assert.ok(totalNodes > 5000, `实际 ${totalNodes} 个节点`),
+    );
+    ok('大库下三个工具都跑出了预期规模', () => {
+      const c = JSON.parse(catOut.result) as { moved: number; created: number };
+      const s = JSON.parse(sortOut.result) as { sorted: number };
+      const m = JSON.parse(mergeOut.result) as { moved: number };
+      assert.equal(c.created, 8, `应建 8 个域名文件夹，实际 ${c.created}`);
+      assert.equal(c.moved, 800, `应移动 800 条，实际 ${c.moved}`);
+      assert.equal(s.sorted, 300);
+      assert.equal(m.moved, 300);
+    });
+    ok('大库下的撤销点覆盖了全部写入，且并发批次只记一条', () => {
+      assert.ok(scalePoint, '应产生撤销点');
+      type Op = import('../src/lib/undo/types').UndoOp;
+      const batch = scalePoint!.ops.filter((o): o is Extract<Op, { kind: 'moveBatch' }> => o.kind === 'moveBatch');
+      assert.equal(batch.length, 1, 'auto_categorize 的 800 次并发移动必须折叠成一条 moveBatch');
+      assert.equal(batch[0]!.ids.length, 800, '批次应覆盖全部 800 条');
+      assert.equal(batch[0]!.order.length, 800, '批次应带上批次开始前的完整子序（撤销顺序靠它）');
+      assert.equal(scalePoint!.ops.filter((o) => o.kind === 'create').length, 8, '8 个域名文件夹');
+      assert.equal(
+        scalePoint!.ops.filter((o) => o.kind === 'move').length,
+        600,
+        'sort_folder 300 + merge_folders 300 仍是逐条记录',
+      );
+      assert.equal(scalePoint!.containsDelete, false, 'merge 只提议删除源空文件夹，不算删除');
+    });
+    ok('5000+ 节点下撤销后整棵树（含顺序）与操作前逐节点一致', () => {
+      assert.ok(scaleUndo.ok, `撤销应成功，实际 ${JSON.stringify(scaleUndo).slice(0, 200)}`);
+      assert.equal(scaleUndo.failures.length, 0);
+      const diff = firstTreeDiff(beforeBig, afterBig);
+      assert.equal(diff, null, `大库撤销后第一处差异：${diff ?? ''}`);
+    });
+    // 护栏：只为抓自家代码的 O(n²) 爆炸（替身比真实 API 悲观，故阈值给得很宽）
+    ok('大库一轮整理 + 撤销未出现灾难性耗时（< 180s）', () => {
+      assert.ok(
+        elapsedTurn < 180_000,
+        `一轮工具调用耗时 ${elapsedTurn}ms，疑似自家代码 O(n²) 爆炸`,
+      );
+      assert.ok(elapsedUndo < 180_000, `撤销耗时 ${elapsedUndo}ms，疑似自家代码 O(n²) 爆炸`);
+    });
+    console.log(`     （实测：一轮 ${elapsedTurn}ms，撤销 ${elapsedUndo}ms，节点 ${totalNodes}）`);
+
+    resetUndoTransactionForTest();
+    storageMap.delete(UNDO_STORAGE_KEY);
+    sendMessageMock = () => undefined;
+    useToastStore.setState({ toasts: [] });
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

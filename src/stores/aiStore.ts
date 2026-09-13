@@ -15,6 +15,7 @@ import type {
 } from '@/lib/ai/types';
 import type { UndoPoint } from '@/lib/undo/types';
 import { undoReadiness } from '@/lib/undo/journal';
+import { UNDO_STORAGE_KEY } from '@/lib/undo/recorder';
 import { useBookmarkStore } from './bookmarkStore';
 
 /** storage key（popup 通过该 key 只读展示待删数） */
@@ -116,13 +117,23 @@ let truncateWarned = false;
 /**
  * 跨窗口同步：sidepanel 与完整页同时打开时，聊天与待删清单实时一致。
  * 监听 chrome.storage 变化（防抖合并），流式中或本窗口写入时跳过。
+ *
+ * 也监听**操作日志**（`markai.undo`）：撤销点是 background 侧写的，
+ * 任一窗口撤销或任一轮结束后，其他窗口必须立刻收起过期按钮——
+ * 否则会留下一个「点了会撤错对象」的陈旧入口。
  */
 export function initCrossWindowSync(): () => void {
   const onChanged = (
     changes: { [key: string]: chrome.storage.StorageChange },
     area: chrome.storage.AreaName,
   ) => {
-    if (area !== 'local' || !changes[AI_STORAGE_KEY] || crossWindowWrite.current) return;
+    if (area !== 'local') return;
+    if (changes[UNDO_STORAGE_KEY]) {
+      // 撤销点的写入者总是 background，不存在"本窗口自己写"的情况，无需跳过
+      void useAIStore.getState().refreshUndo();
+      return;
+    }
+    if (!changes[AI_STORAGE_KEY] || crossWindowWrite.current) return;
     if (crossSyncTimer) clearTimeout(crossSyncTimer);
     crossSyncTimer = setTimeout(() => {
       crossSyncTimer = null;
@@ -670,10 +681,18 @@ export const useAIStore = create<AIState>((set, get) => ({
   },
 
   async undoLast(id?: string) {
+    // 明确针对「界面上正在展示的那个撤销点」：不传 id 时取 store 里的第一个，
+    // 并把它显式发给 background。绝不能只发「撤销最新的那个」——别的窗口中途完成
+    // 一轮后，latest 已经变成另一个操作，用户点的和实际撤的就会不是一回事。
+    const shown = id ?? get().undoPoints[0]?.id;
+    if (!shown) {
+      pushToast('没有可撤销的操作');
+      return;
+    }
     try {
       const res = (await chrome.runtime.sendMessage({
         type: 'undo:apply',
-        ...(id ? { id } : {}),
+        id: shown,
       })) as OneShotOutbound | undefined;
       if (res?.type !== 'undo:apply:result') {
         pushToast('撤销未返回结果，请重试', { variant: 'destructive' });

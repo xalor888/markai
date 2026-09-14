@@ -4288,6 +4288,124 @@ function ok(name: string, fn: () => void) {
     resetUndoTransactionForTest();
   }
 
+  /* ── T40: 右键指令写入失败不得"打开空聊天" ── */
+  console.log('\n[T40] 右键指令的失败反馈');
+  {
+    const { handleContextMenuClick } = await import('../src/lib/ai/context-menu');
+    type SeedPayload = import('../src/lib/ai/context-menu').SeedPayload;
+    type Deps = import('../src/lib/ai/context-menu').ContextMenuDeps;
+
+    /** 记录编排层做了哪些"可见动作"，用来断言失败时**不该**做的事 */
+    const mkDeps = (opts: { seedFails?: boolean; tabFails?: boolean; node?: chrome.bookmarks.BookmarkTreeNode }) => {
+      const log = {
+        seeds: [] as SeedPayload[],
+        clearedSeed: 0,
+        openedPanel: 0,
+        broadcasts: 0,
+        openedTabs: [] as string[],
+        hints: [] as string[],
+        clearedHint: 0,
+      };
+      const deps: Deps = {
+        getNode: async () => opts.node,
+        setSeed: async (seed) => {
+          if (opts.seedFails) throw new Error('QUOTA_BYTES quota exceeded');
+          log.seeds.push(seed);
+        },
+        clearSeed: async () => {
+          log.clearedSeed += 1;
+        },
+        openSidePanel: async () => {
+          log.openedPanel += 1;
+        },
+        broadcastSeed: async () => {
+          log.broadcasts += 1;
+        },
+        getWindowId: async () => 7,
+        openTab: async (url) => {
+          if (opts.tabFails) throw new Error('tabs.create failed');
+          log.openedTabs.push(url);
+        },
+        pageUrl: () => 'chrome-extension://x/page.html',
+        setErrorHint: async (title) => {
+          log.hints.push(title);
+        },
+        clearErrorHint: async () => {
+          log.clearedHint += 1;
+        },
+      };
+      return { deps, log };
+    };
+
+    const folderNode = {
+      id: 'f1',
+      title: 'T40 文件夹',
+      dateAdded: 1,
+    } as unknown as chrome.bookmarks.BookmarkTreeNode;
+
+    // ── A. seed 写入失败：不打开、不广播，但要有可见错误提示 ──
+    const fail = mkDeps({ seedFails: true, node: folderNode });
+    await handleContextMenuClick({ menuItemId: 'markai:organize', bookmarkId: 'f1' }, fail.deps);
+    ok('seed 写入失败时不得打开侧边栏（否则用户只看到一个空聊天）', () =>
+      assert.equal(fail.log.openedPanel, 0),
+    );
+    ok('seed 写入失败时不得广播 markai:seed（指令根本没保存）', () =>
+      assert.equal(fail.log.broadcasts, 0),
+    );
+    ok('seed 写入失败必须给出可见反馈（工具栏提示，不依赖 storage）', () => {
+      assert.equal(fail.log.hints.length, 1, `应有一条错误提示，实际 ${fail.log.hints.length}`);
+      assert.match(fail.log.hints[0]!, /未能保存|重试/);
+    });
+
+    // ── B. 成功路径：写入、打开、广播，并清掉历史错误提示 ──
+    const good = mkDeps({ node: folderNode });
+    await handleContextMenuClick({ menuItemId: 'markai:organize', bookmarkId: 'f1' }, good.deps);
+    ok('成功路径不回归：写入 seed、打开侧边栏、广播、清掉错误提示', () => {
+      assert.equal(good.log.seeds.length, 1, '应写入一条 seed');
+      assert.equal(good.log.seeds[0]!.folderId, 'f1', '文件夹应带上上下文 id');
+      assert.equal(good.log.openedPanel, 1);
+      assert.equal(good.log.broadcasts, 1);
+      assert.ok(good.log.clearedHint >= 1, '成功后应清掉可能残留的错误提示');
+      assert.equal(good.log.hints.length, 0, '成功路径不该报错');
+    });
+
+    // ── C. 书签已被删除：走 notice 提示路径，行为不变 ──
+    const gone = mkDeps({ node: undefined });
+    await handleContextMenuClick({ menuItemId: 'markai:organize', bookmarkId: 'ghost' }, gone.deps);
+    ok('右键的书签已不存在时仍走 notice 路径（不回归）', () => {
+      assert.equal(gone.log.seeds.length, 1);
+      assert.match(gone.log.seeds[0]!.notice ?? '', /已被删除/);
+      assert.equal(gone.log.openedPanel, 1);
+    });
+
+    // ── D. 完整页打开失败：也要有可见反馈 ──
+    const tabFail = mkDeps({ tabFails: true });
+    await handleContextMenuClick({ menuItemId: 'markai:fullpage' }, tabFail.deps);
+    ok('完整页打开失败不再静默（给出可见反馈）', () => {
+      assert.equal(tabFail.log.openedTabs.length, 0);
+      assert.equal(tabFail.log.hints.length, 1, '应有一条错误提示');
+      assert.match(tabFail.log.hints[0]!, /完整页/);
+    });
+
+    // ── E. 完整页正常：打开标签页，且不碰 seed ──
+    const tabOk = mkDeps({});
+    await handleContextMenuClick({ menuItemId: 'markai:fullpage' }, tabOk.deps);
+    ok('完整页正常路径：打开标签页且不改写 seed', () => {
+      assert.equal(tabOk.log.openedTabs.length, 1);
+      assert.equal(tabOk.log.seeds.length, 0);
+      assert.equal(tabOk.log.hints.length, 0);
+    });
+
+    // ── F. 无指令的菜单项：清掉残留旧种子，避免误消费幽灵指令 ──
+    const noop = mkDeps({ node: folderNode });
+    // 必须带上 bookmarkId：不带的话语义是"右键的书签已不存在"，那是走 notice 路径
+    await handleContextMenuClick({ menuItemId: 'markai:unknown', bookmarkId: 'f1' }, noop.deps);
+    ok('没有要送出的指令时清掉残留种子（避免幽灵指令）', () => {
+      assert.equal(noop.log.seeds.length, 0);
+      assert.equal(noop.log.clearedSeed, 1);
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

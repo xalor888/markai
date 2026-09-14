@@ -25,6 +25,35 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: '右键 seed 写失败仍继续打开侧边栏（用户只看到空聊天）',
+    file: 'src/lib/ai/context-menu.ts',
+    from: '      await deps.setErrorHint(ERROR_TITLE);\n      return;',
+    to: '      // reverted',
+    expectFail: [
+      'seed 写入失败时不得打开侧边栏',
+      'seed 写入失败时不得广播',
+      'seed 写入失败必须给出可见反馈',
+    ],
+  },
+  {
+    name: '右键 seed 写失败也照常广播（假装指令已送出）',
+    file: 'src/lib/ai/context-menu.ts',
+    from: '      await deps.setErrorHint(ERROR_TITLE);\n      return;',
+    to: '      await deps.broadcastSeed().catch(() => {});\n      return;',
+    expectFail: [
+      'seed 写入失败时不得打开侧边栏',
+      'seed 写入失败时不得广播',
+      'seed 写入失败必须给出可见反馈',
+    ],
+  },
+  {
+    name: '完整页打开失败被静默忽略',
+    file: 'src/lib/ai/context-menu.ts',
+    from: '      await deps.setErrorHint(\'MarkAI：完整页打开失败，请重试\');',
+    to: '      // reverted',
+    expectFail: ['完整页打开失败不再静默'],
+  },
+  {
     name: '收尾不等在途 pending 写入（迟到写入把快照复活）',
     file: 'src/lib/undo/recorder.ts',
     from: '  // 已正经收尾：先等在途写入落定，再清快照——避免"清理之后才落地的写入"把它复活\n  await drainPendingWrites();\n  await clearPending();',

@@ -31,7 +31,7 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
-| 测试 | `npm test` | **260 项全绿**（… → 248 → 255 → 259 → 260） |
+| 测试 | `npm test` | **268 项全绿**（… → 255 → 259 → 260 → 268） |
 | 构建 | `npm run build` | 通过，`.output/chrome-mv3` 788.17 kB |
 | 版本 | `package.json` | **0.2.13（已发版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
@@ -217,7 +217,9 @@ API Key 静默丢失（下次启动聊天莫名其妙失败）；更严重的是
   落定再删键**，因此不存在"清理之后才落地的写入"，连"进程恰好在此刻被杀"的窗口也一并关掉
   （T39 断言 `end()`/`clearUndoPoints()` 返回那一刻在途写入数为 0）。跨进程边界如实标注：
   恢复那侧仍靠 `runId` 去重兜底；
-- 至此撤销这侧的已知缺陷全部修完；**仍未修复**的是 background 右键指令的 seed 写失败（会打开空聊天）；
+- 撤销这侧的已知缺陷全部修完；background 右键指令的 seed 写失败也**已修**（不打开空聊天，
+  改用工具栏提示说清失败；见 docs/error-handling.md）。
+- 至此**审计台账里已确认的静默失败全部修完**；剩下的只是尚未逐处复核的 best-effort catch 类别；
 - "Chrome 到底多久杀一次 SW、这个窗口有多现实"需要真机才能量化，我没有那个环境。
 
 **撤销历史（把"盲点一次"变成"可控回退"）**：撤销栈里本来就有 10 个点（摘要/条数/时间齐备），

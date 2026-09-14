@@ -10,6 +10,10 @@ import { runAgentTurn } from '@/lib/ai/agent';
 import { ChatError, testConnection } from '@/lib/ai/client';
 import { ensureRoots } from '@/lib/ai/tools';
 import { recoverInterruptedTransaction } from '@/lib/undo/recorder';
+import {
+  handleContextMenuClick as runContextMenuClick,
+  type ContextMenuClickInfo,
+} from '@/lib/ai/context-menu';
 import { executeDeletions as runDeletions } from '@/lib/ai/deletion-executor';
 import { normalizeBaseUrl, resolveConfig } from '@/lib/providers';
 import { CONFIG_STORAGE_KEY } from '@/stores/configStore';
@@ -155,73 +159,53 @@ function bookmarkMenuProps(id: string, title: string): chrome.contextMenus.Creat
   return { id, title, contexts: ['bookmark'] } as unknown as chrome.contextMenus.CreateProperties;
 }
 
-/** ── contextMenus 点击处理 ── */
+/** ── contextMenus 点击处理：编排逻辑在 src/lib/ai/context-menu.ts（可单测） ── */
 async function handleContextMenuClick(info: chrome.contextMenus.OnClickData, tab?: chrome.tabs.Tab): Promise<void> {
-  // bookmarkId 仅出现在书签上下文，@types/chrome 尚未收录，这里断言读取
-  const bookmarkId = (info as unknown as { bookmarkId?: string }).bookmarkId;
-
-  // 「在完整页打开」直接开标签页，无需书签上下文
-  if (info.menuItemId === 'markai:fullpage') {
-    void chrome.tabs.create({ url: chrome.runtime.getURL('page.html') }).catch(() => {});
-    return;
-  }
-
-  let node: chrome.bookmarks.BookmarkTreeNode | undefined;
-  if (bookmarkId) {
-    const nodes = await chrome.bookmarks.get(bookmarkId).catch(() => []);
-    node = nodes[0];
-  }
-  const title = node?.title || '此书签';
-
-  let text = '';
-  let folderId: string | undefined;
-  let notice: string | undefined;
-  // 书签上下文菜单但目标已不存在（菜单打开后书签被删）：给用户可见提示，而不是静默无反馈
-  if (bookmarkId && !node) {
-    notice = '右键的书签已被删除或不可用，请重新选择。';
-  } else if (info.menuItemId === 'markai:organize' && node) {
-    if (node.url) {
-      // 单个书签：归位到合适分类（与文件夹的"整理全部子项"语义区分）
-      text = `请处理书签「${title}」（${node.url}）：判断现有分类里是否有合适的文件夹，把它归位到位；没有合适分类时新建一个语义清晰的文件夹。`;
-    } else {
-      text = `请整理书签文件夹「${title}」：浏览其全部书签，创建合适的子分类并把书签归类移动到位。`;
-      folderId = node.id; // 仅文件夹提供上下文
-    }
-  } else if (info.menuItemId === 'markai:analyze' && node) {
-    text = `请分析书签「${title}」${node.url ? `（${node.url}）` : ''}：检查链接是否有效、内容是否过时，给出整理或清理建议。`;
-  }
-
-  // 写入种子指令（侧边栏挂载时消费），并尝试打开侧边栏
-  if (text || notice) {
-    const seed: SeedPayload = {
-      text,
-      ...(folderId ? { folderId } : {}),
-      ...(notice ? { notice } : {}),
-      createdAt: Date.now(),
-    };
-    await chrome.storage.local.set({ 'markai.seed': seed }).catch(() => {});
-  } else {
-    // 无新指令（如「打开完整页」）：清除残留的旧种子，避免下次挂载误消费幽灵指令
-    await chrome.storage.local.remove('markai.seed').catch(() => {});
-  }
-
-  const windowId = tab?.windowId ?? (await chrome.windows.getCurrent()).id;
-  if (windowId !== undefined) {
-    try {
+  await runContextMenuClick(toClickInfo(info, tab), {
+    getNode: async (id) => (await chrome.bookmarks.get(id).catch(() => []))[0],
+    setSeed: async (seed) => {
+      await chrome.storage.local.set({ 'markai.seed': seed });
+    },
+    clearSeed: async () => {
+      await chrome.storage.local.remove('markai.seed');
+    },
+    openSidePanel: async (windowId) => {
+      // 拿不到窗口 id 就没法打开：抛出去让编排层按 best-effort 处理（seed 已保存）
+      if (windowId === undefined) throw new Error('没有可用的窗口 id');
       await chrome.sidePanel.open({ windowId });
-    } catch {
-      // 某些场景（如浏览器限制）打开失败时静默，用户可手动打开
-    }
-  }
-
-  // 若侧边栏已打开，直接广播（比等挂载更即时）
-  if (text || notice) {
-    try {
+    },
+    broadcastSeed: async () => {
       await chrome.runtime.sendMessage({ type: 'markai:seed' });
-    } catch {
-      // 无页面在监听，忽略（种子已在 storage 中）
-    }
-  }
+    },
+    getWindowId: async () => (await chrome.windows.getCurrent()).id,
+    openTab: async (url) => {
+      await chrome.tabs.create({ url });
+    },
+    pageUrl: () => chrome.runtime.getURL('page.html'),
+    // storage 写不进去时的唯一可见通路：工具栏标记 + 悬停说明
+    setErrorHint: async (title) => {
+      await chrome.action.setBadgeBackgroundColor({ color: '#dc2626' }).catch(() => {});
+      await chrome.action.setBadgeText({ text: '!' }).catch(() => {});
+      await chrome.action.setTitle({ title }).catch(() => {});
+    },
+    clearErrorHint: async () => {
+      await chrome.action.setTitle({ title: 'MarkAI' }).catch(() => {});
+      await chrome.action.setBadgeText({ text: '' }).catch(() => {});
+    },
+  });
+}
+
+/** 把 contextMenus 的点击数据收敛成本模块需要的最小形状（bookmarkId 尚未进 @types） */
+function toClickInfo(
+  info: chrome.contextMenus.OnClickData,
+  tab?: chrome.tabs.Tab,
+): ContextMenuClickInfo {
+  const bookmarkId = (info as unknown as { bookmarkId?: string }).bookmarkId;
+  return {
+    menuItemId: String(info.menuItemId),
+    ...(bookmarkId ? { bookmarkId } : {}),
+    ...(tab?.windowId !== undefined ? { windowId: tab.windowId } : {}),
+  };
 }
 
 /** ── 一次性消息分发 ── */

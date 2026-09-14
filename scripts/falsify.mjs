@@ -25,6 +25,27 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: '收尾时正式写入失败仍清掉 pending（唯一快照被删，改动再也撤不了）',
+    file: 'src/lib/undo/recorder.ts',
+    from: '  const written = await writeUndoPoints(trim.kept, notice);\n  if (!written.ok) {',
+    to: '  const written = await writeUndoPoints(trim.kept, notice);\n  if (false) {',
+    expectFail: ['收尾时正式写入失败：pending 必须保留', '收尾时正式写入失败不得声称'],
+  },
+  {
+    name: '恢复时先删 pending 再写正式点（写失败即永久丢失）',
+    file: 'src/lib/undo/recorder.ts',
+    from: '  // 写失败时**保留 pending**，下次启动重试——绝不能在正式点落盘前就把它删掉\n  if (!written.ok) return null;\n  await clearPending();\n  return point;',
+    to: '  await clearPending();\n  if (!written.ok) return null;\n  return point;',
+    expectFail: ['恢复时正式写入失败：pending 必须保留'],
+  },
+  {
+    name: '重复恢复不去重（同一事务生成第二个可回放点）',
+    file: 'src/lib/undo/recorder.ts',
+    from: '  const already = state.points.find((p) => p.runId === pending!.runId);\n  if (already) {\n    await clearPending();\n    return null;\n  }',
+    to: '  // reverted',
+    expectFail: ['同一事务重复恢复不会生成第二个可回放点'],
+  },
+  {
     name: 'update 不再返回如实结果（调用方无从判断成败）',
     file: 'src/stores/configStore.ts',
     from: '      return { ok: false, error: reason };',
@@ -139,8 +160,8 @@ const cases = [
   {
     name: '启动时不恢复被中断的轮次',
     file: 'src/lib/undo/recorder.ts',
-    from: '  if (!pending || !Array.isArray(pending.ops) || pending.ops.length === 0) return null;',
-    to: '  if (true) return null;',
+    from: '  if (!pending || !Array.isArray(pending.ops) || pending.ops.length === 0) {\n    await clearPending();\n    return null;\n  }',
+    to: '  if (true) {\n    await clearPending();\n    return null;\n  }',
     expectFail: ['被中断的轮次会被提升为可撤销点'],
   },
   {

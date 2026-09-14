@@ -117,6 +117,27 @@ function cancelTrailingFlush(): void {
   }
 }
 
+/** 把一个事务写成 pending 快照（快照副本，不依赖 storage 的克隆行为） */
+async function savePendingFrom(tx: ActiveTransaction): Promise<boolean> {
+  const snapshot: PendingTransaction = {
+    runId: tx.runId,
+    ops: structuredClone(tx.ops),
+    containsDelete: tx.containsDelete,
+    orderCheckpoints: [...tx.orderCheckpoints.entries()].map(([parentId, order]) => ({
+      parentId,
+      order: [...order],
+    })),
+    updatedAt: Date.now(),
+  };
+  try {
+    await chrome.storage.local.set({ [UNDO_PENDING_KEY]: snapshot });
+    return true;
+  } catch {
+    // 写不进 pending 不该影响书签操作本身（撤销点仍会在轮次结束时尝试落盘）
+    return false;
+  }
+}
+
 /**
  * 把进行中的事务增量落盘（节流）。写的是**快照副本**——真实 storage 会结构化克隆，
  * 但这里不依赖那个行为，避免调用方后续改动数组影响到已写出的内容。
@@ -133,21 +154,7 @@ async function persistPending(force = false): Promise<void> {
   cancelTrailingFlush();
   pendingWrittenAt = now;
   pendingWrittenOps = active.ops.length;
-  const snapshot: PendingTransaction = {
-    runId: active.runId,
-    ops: structuredClone(active.ops),
-    containsDelete: active.containsDelete,
-    orderCheckpoints: [...active.orderCheckpoints.entries()].map(([parentId, order]) => ({
-      parentId,
-      order: [...order],
-    })),
-    updatedAt: now,
-  };
-  try {
-    await chrome.storage.local.set({ [UNDO_PENDING_KEY]: snapshot });
-  } catch {
-    // 写不进 pending 不该影响书签操作本身（撤销点仍会在轮次结束时尝试落盘）
-  }
+  await savePendingFrom(active);
 }
 
 /** 记录一条可逆操作。没有活动事务时静默忽略（例如测试或非 Agent 触发的写入）。 */
@@ -199,7 +206,13 @@ export async function endUndoTransaction(): Promise<UndoPoint | null> {
   const candidates = [point, ...state.points].slice(0, MAX_UNDO_POINTS);
   const trim = trimPointsToBudget(candidates, budgetBytes);
   const notice = describeUndoTrim(trim) ?? state.notice;
-  await writeUndoPoints(trim.kept, notice);
+  const written = await writeUndoPoints(trim.kept, notice);
+  if (!written.ok) {
+    // 正式点没落盘：**保留（并补全）pending**，让下次启动仍能把它恢复出来。
+    // 返回 null 而不是 point——写不进去就不算"已记录"，不能对调用方谎报成功。
+    await savePendingFrom(tx);
+    return null;
+  }
   // 已正经收尾：清掉进行中的快照，避免下次启动把它当成"被中断的轮次"重复提升
   await clearPending();
   return point;
@@ -344,8 +357,20 @@ export async function recoverInterruptedTransaction(): Promise<UndoPoint | null>
   } catch {
     return null;
   }
-  await clearPending();
-  if (!pending || !Array.isArray(pending.ops) || pending.ops.length === 0) return null;
+  if (!pending || !Array.isArray(pending.ops) || pending.ops.length === 0) {
+    await clearPending();
+    return null;
+  }
+
+  const state = await readUndoState();
+  // 幂等：同一个事务（runId）已经提升过就不再造第二个点。
+  // 覆盖"正式点写入成功、但 clearPending 失败"的情况——否则下次启动会把同一段改动
+  // 再提升一次，出现两个都能被回放的点（删除类逆操作会重复重建子树）。
+  const already = state.points.find((p) => p.runId === pending!.runId);
+  if (already) {
+    await clearPending();
+    return null;
+  }
 
   const point: UndoPoint = {
     id: uid(),
@@ -355,11 +380,13 @@ export async function recoverInterruptedTransaction(): Promise<UndoPoint | null>
     ...(pending.orderCheckpoints?.length ? { orderCheckpoints: pending.orderCheckpoints } : {}),
     containsDelete: !!pending.containsDelete,
   };
-  const state = await readUndoState();
   const trim = trimPointsToBudget([point, ...state.points].slice(0, MAX_UNDO_POINTS), budgetBytes);
-  await writeUndoPoints(
+  const written = await writeUndoPoints(
     trim.kept,
     `上一轮被中断，已把当时已完成的改动保留为可撤销记录（${summarizeOps(point.ops)}）`,
   );
+  // 写失败时**保留 pending**，下次启动重试——绝不能在正式点落盘前就把它删掉
+  if (!written.ok) return null;
+  await clearPending();
   return point;
 }

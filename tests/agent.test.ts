@@ -238,6 +238,12 @@ const mockBookmarks = {
         return structuredClone(out);
       },
       set: async (obj: Record<string, unknown>) => {
+        // 全局故障注入；storageSetFailKeys 非空时只让这些键失败，
+        // 用来单独验证"正式撤销点写入失败、但 pending 仍可写"这类交接
+        const keys = Object.keys(obj);
+        if (storageSetFailKeys && keys.some((k) => storageSetFailKeys!.includes(k))) {
+          throw new Error(`QUOTA_BYTES quota exceeded (${keys.join(',')})`);
+        }
         if (storageSetFail) throw new Error('QUOTA_BYTES quota exceeded');
         for (const [k, v] of Object.entries(obj)) storageMap.set(k, structuredClone(v));
       },
@@ -283,6 +289,9 @@ let sendMessageMock: (msg: unknown) => unknown = () => undefined;
 
 /** 故障注入：模拟 chrome.storage.local.set 失败（超配额） */
 let storageSetFail = false;
+
+/** 故障注入（按 key）：只让列出的键写入失败；null = 关闭该模式 */
+let storageSetFailKeys: string[] | null = null;
 
 /** 测试期清单版本：默认取 package.json（与 WXT 注入一致），用例可临时覆盖 */
 const pkgVersion = (
@@ -3906,6 +3915,122 @@ function ok(name: string, fn: () => void) {
     storageSetFail = false;
     storageMap.delete('markai.config');
     useConfigStore.setState({ saveError: null });
+  }
+
+  /* ── T37: 撤销点交接——正式写入失败时必须保留 pending ── */
+  console.log('\n[T37] 撤销点交接');
+  {
+    const {
+      UNDO_STORAGE_KEY,
+      UNDO_PENDING_KEY,
+      beginUndoTransaction,
+      endUndoTransaction,
+      ensureOrderCheckpoint,
+      recoverInterruptedTransaction,
+      readUndoState,
+      resetUndoTransactionForTest,
+    } = await import('../src/lib/undo/recorder');
+    const { jCreate } = await import('../src/lib/undo/mutations');
+    type Pending = {
+      runId: string;
+      ops: unknown[];
+      containsDelete: boolean;
+      orderCheckpoints: { parentId: string; order: string[] }[];
+      updatedAt: number;
+    };
+    const pendingOf = () => storageMap.get(UNDO_PENDING_KEY) as Pending | undefined;
+    const mkPending = (runId: string): Pending => ({
+      runId,
+      ops: [{ kind: 'create', id: 'ghost-1', title: '被中断的新建', isFolder: false }],
+      containsDelete: false,
+      orderCheckpoints: [],
+      updatedAt: Date.now(),
+    });
+
+    // ── A. 正常收尾：正式写入失败 → pending 必须保留 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+    await beginUndoTransaction('handoff-end');
+    await ensureOrderCheckpoint('1');
+    await jCreate({ parentId: '1', title: 'T37-KEEP', url: 'https://t37.test/keep' });
+    await new Promise((r) => setTimeout(r, 300)); // 让节流窗口过去，pending 追上
+    const pendingBeforeEnd = pendingOf();
+    storageSetFailKeys = [UNDO_STORAGE_KEY]; // 只让正式点写入失败，pending 仍可写
+    const endResult = await endUndoTransaction();
+    storageSetFailKeys = null;
+    ok('收尾时正式写入失败：pending 必须保留（否则唯一快照被删掉，改动再也撤不了）', () => {
+      assert.ok(pendingBeforeEnd, '前置条件：收尾前应有 pending 快照');
+      assert.ok(pendingOf(), '正式写入失败后 pending 必须还在');
+    });
+    ok('收尾时正式写入失败不得声称"已记录"（返回 null + 有如实错误）', async () => {
+      assert.equal(endResult, null, '写不进去就不能返回一个"已记录"的点');
+    });
+
+    // ── B. 恢复：正式写入失败 → pending 保留且不返回成功点 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+    storageMap.set(UNDO_PENDING_KEY, mkPending('handoff-recover'));
+    storageSetFailKeys = [UNDO_STORAGE_KEY];
+    const recoveredFail = await recoverInterruptedTransaction();
+    storageSetFailKeys = null;
+    ok('恢复时正式写入失败：pending 必须保留、且不得返回成功点', () => {
+      assert.ok(pendingOf(), '恢复失败后 pending 必须还在（否则下次启动无料可恢复）');
+      assert.equal(recoveredFail, null, '没写成就不能返回一个撤销点');
+    });
+    ok('恢复失败会留下如实错误（UI 能说出"撤销记录没写进去"）', async () => {
+      const st = await readUndoState();
+      assert.match(st.notice ?? '', /写入失败/);
+    });
+
+    // ── C. 重复恢复要按事务身份去重（清 pending 失败也不能变成两个点） ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+    const dupPending = mkPending('handoff-dup');
+    storageMap.set(UNDO_STORAGE_KEY, {
+      points: [
+        {
+          id: 'already-promoted',
+          runId: 'handoff-dup', // 同一个事务：说明上次已成功提升，只是 pending 没清掉
+          createdAt: Date.now() - 1000,
+          ops: dupPending.ops,
+          containsDelete: false,
+        },
+      ],
+      notice: '已有记录',
+    });
+    storageMap.set(UNDO_PENDING_KEY, dupPending);
+    const dupRecovered = await recoverInterruptedTransaction();
+    const dupState = await readUndoState();
+    ok('同一事务重复恢复不会生成第二个可回放点（按 runId 去重）', () => {
+      assert.equal(dupState.points.length, 1, '不该出现两个撤销点');
+      assert.equal(dupState.points[0]!.id, 'already-promoted', '应保留既有那个，而不是新造一个');
+      assert.equal(dupRecovered, null, '没有新提升就不该返回新点');
+    });
+    ok('去重后 pending 会被清掉（避免每次启动都重放同一段）', () =>
+      assert.equal(pendingOf(), undefined),
+    );
+
+    // ── D. 成功路径不受影响：写入成功才清 pending，点可被撤销 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+    storageMap.set(UNDO_PENDING_KEY, mkPending('handoff-ok'));
+    const recoveredOk = await recoverInterruptedTransaction();
+    const okState = await readUndoState();
+    ok('恢复成功：产生撤销点并清掉 pending（原有成功路径不回归）', () => {
+      assert.ok(recoveredOk, '应提升出一个撤销点');
+      assert.equal(okState.points.length, 1);
+      assert.equal(pendingOf(), undefined, '成功后 pending 才该被清掉');
+    });
+
+    storageSetFail = false;
+    storageSetFailKeys = null;
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

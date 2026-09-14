@@ -310,20 +310,25 @@ export async function writeUndoPoints(points: UndoPoint[], notice?: string): Pro
 export async function clearUndoPoints(): Promise<void> {
   lastWriteError = null;
   await chrome.storage.local.remove(UNDO_STORAGE_KEY);
+  // 进行中的快照也要清：否则下次启动会把它恢复成一个"用户以为已经清掉"的撤销点。
+  // 如实说明边界：这里**不能**取消正在运行中的轮次——那一轮结束时仍会写下新的撤销点，
+  // 这是刻意的语义（用户清的是"已有记录"，不是"正在进行的操作"）。
+  await clearPending();
 }
 
 /** 取出并移除一个撤销点（不指定 id 时取最新的） */
-export async function takeUndoPoint(id?: string): Promise<UndoPoint | null> {
+export async function takeUndoPoint(id?: string): Promise<{ point: UndoPoint | null; removed: boolean }> {
   const state = await readUndoState();
   const points = state.points;
   const idx = id ? points.findIndex((p) => p.id === id) : 0;
-  if (idx < 0 || idx >= points.length) return null;
+  if (idx < 0 || idx >= points.length) return { point: null, removed: false };
   const point = points[idx] ?? null;
   // 不原地改读取到的数组：真实 storage 给的是副本，但"读到的值就地改"本身就是坏习惯
   const remaining = points.filter((_, i) => i !== idx);
   // 保留原有 notice：消费一个点不该抹掉"曾丢弃过更早点"的记录
-  await writeUndoPoints(remaining, state.notice);
-  return point;
+  const written = await writeUndoPoints(remaining, state.notice);
+  // 如实回报是否真的移除：消费失败时点仍在存储里，调用方据此阻止重复回放
+  return { point, removed: written.ok };
 }
 
 /** 清除进行中事务的快照 */

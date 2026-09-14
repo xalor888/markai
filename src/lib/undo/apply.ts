@@ -12,6 +12,15 @@ import { readUndoPoints, takeUndoPoint } from './recorder';
 import type { BookmarkSnapshot, UndoApplyResult, UndoOp } from './types';
 
 /**
+ * 本 SW 会话内"已执行但未能消费掉"的撤销点 id。
+ *
+ * 为什么需要：消费写入失败时原点会留在存储里，UI 刷新后它还在列表里，
+ * 用户再点一次就会**重复回放**（删除类逆操作重复重建子树）。这里在会话内堵住这条路；
+ * 跨会话（SW 被回收后重启）这道内存保护会消失——这是仍存在的残留风险，已写进文档。
+ */
+const appliedThisSession = new Set<string>();
+
+/**
  * 把某个父目录的子项顺序校正为 `order`：
  * 在 `order` 里出现过的节点按原序排前面，其余（本轮新建的）留在末尾。
  * 用于 moveBatch 与删除的顺序检查点——两者都不依赖逐条下标，因此抗并发。
@@ -119,7 +128,10 @@ async function applyOne(op: UndoOp, idMap: Map<string, string>): Promise<void> {
 
 /**
  * 撤销指定（默认最新）的撤销点，并消费掉它。
- * 即使部分失败也会消费——避免"半撤销"状态在下次点击时被反复套用。
+ *
+ * 部分操作失败**仍会尝试消费**——避免"半撤销"状态在下次点击时被反复套用。
+ * 但消费本身失败时**不能报成功**：原撤销点还在存储里，再点一次就会重复回放，
+ * 而删除类逆操作会重复重建子树（造出重复书签）。
  */
 export async function applyUndo(id?: string): Promise<UndoApplyResult> {
   const points = await readUndoPoints();
@@ -130,7 +142,9 @@ export async function applyUndo(id?: string): Promise<UndoApplyResult> {
   if (id && !target) {
     return {
       ok: false,
-      reason: '该操作已不存在（可能已在另一个窗口撤销过，或已被更新的一轮挤出保留范围）',
+      reason: appliedThisSession.has(id)
+        ? '这条撤销刚刚已经执行过，但本地记录没能更新；重复执行会造成重复改动，已拒绝。'
+        : '该操作已不存在（可能已在另一个窗口撤销过，或已被更新的一轮挤出保留范围）',
       restored: 0,
       failures: [],
     };
@@ -138,6 +152,15 @@ export async function applyUndo(id?: string): Promise<UndoApplyResult> {
   const ready = undoReadiness(target);
   if (!target || !ready.undoable) {
     return { ok: false, ...(ready.reason ? { reason: ready.reason } : {}), restored: 0, failures: [] };
+  }
+  // 同一 SW 会话内已经执行过、但消费失败的点：再执行一次会重复改动，直接拒绝
+  if (appliedThisSession.has(target.id)) {
+    return {
+      ok: false,
+      reason: '这条撤销刚刚已经执行过，但本地记录没能更新；重复执行会造成重复改动，已拒绝。',
+      restored: 0,
+      failures: [],
+    };
   }
 
   const failures: UndoApplyResult['failures'] = [];
@@ -170,6 +193,23 @@ export async function applyUndo(id?: string): Promise<UndoApplyResult> {
       });
     }
   }
-  await takeUndoPoint(target.id);
+  // 消费这个撤销点：**必须确认真的消费掉了**。写失败时原点还在存储里，
+  // 再点一次就会重复回放（删除类逆操作会重复重建子树），所以要如实报失败并堵住本会话的重复调用。
+  let consumed = await takeUndoPoint(target.id);
+  if (!consumed.removed) {
+    // 先重试一次：瞬时失败（限流/竞态）常常一次就好
+    consumed = await takeUndoPoint(target.id);
+  }
+  if (!consumed.removed) {
+    appliedThisSession.add(target.id);
+    return {
+      ok: false,
+      reason:
+        '撤销已执行，但本地记录没能更新（存储写入失败）：请不要重复点击这条撤销，重复执行会造成重复改动。刷新后该记录可能仍在，届时可再次尝试。',
+      restored,
+      failures,
+    };
+  }
+  appliedThisSession.delete(target.id); // 正常消费：解除本会话的重复保护
   return { ok: failures.length === 0, restored, failures };
 }

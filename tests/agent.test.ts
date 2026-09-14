@@ -241,7 +241,8 @@ const mockBookmarks = {
         // 全局故障注入；storageSetFailKeys 非空时只让这些键失败，
         // 用来单独验证"正式撤销点写入失败、但 pending 仍可写"这类交接
         const keys = Object.keys(obj);
-        if (storageSetFailKeys && keys.some((k) => storageSetFailKeys!.includes(k))) {
+        if (storageSetFailKeys && keys.some((k) => storageSetFailKeys!.includes(k)) && storageSetFailTimes > 0) {
+          storageSetFailTimes -= 1;
           throw new Error(`QUOTA_BYTES quota exceeded (${keys.join(',')})`);
         }
         if (storageSetFail) throw new Error('QUOTA_BYTES quota exceeded');
@@ -292,6 +293,9 @@ let storageSetFail = false;
 
 /** 故障注入（按 key）：只让列出的键写入失败；null = 关闭该模式 */
 let storageSetFailKeys: string[] | null = null;
+
+/** 按 key 失败还要失败几次（默认无限；设 1 可验证"重试一次就成功"） */
+let storageSetFailTimes = Number.POSITIVE_INFINITY;
 
 /** 测试期清单版本：默认取 package.json（与 WXT 注入一致），用例可临时覆盖 */
 const pkgVersion = (
@@ -4028,6 +4032,119 @@ function ok(name: string, fn: () => void) {
 
     storageSetFail = false;
     storageSetFailKeys = null;
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+  }
+
+  /* ── T38: 消费失败不得可重复回放 ── */
+  console.log('\n[T38] 撤销点的消费失败');
+  {
+    const {
+      UNDO_STORAGE_KEY,
+      UNDO_PENDING_KEY,
+      beginUndoTransaction,
+      endUndoTransaction,
+      ensureOrderCheckpoint,
+      clearUndoPoints,
+      readUndoState,
+      resetUndoTransactionForTest,
+    } = await import('../src/lib/undo/recorder');
+    const { jRemove } = await import('../src/lib/undo/mutations');
+    const { applyUndo } = await import('../src/lib/undo/apply');
+
+    const childrenOf = (parentId: string) => store.filter((n) => n.parentId === parentId);
+
+    // 造一个"删除"撤销点：删除可撤销是重复回放后果最严重的一类（会重复重建子树）
+    const mkDeletePoint = async (title: string) => {
+      storageMap.delete(UNDO_STORAGE_KEY);
+      storageMap.delete(UNDO_PENDING_KEY);
+      resetUndoTransactionForTest();
+      const folder = (await mockBookmarks.create({ parentId: '1', title: `T38-${title}` })).id;
+      const kid = (await mockBookmarks.create({
+        parentId: folder,
+        title: `kid-${title}`,
+        url: `https://t38.test/${title}`,
+      })).id;
+      await beginUndoTransaction(`run-t38-${title}`);
+      await ensureOrderCheckpoint(folder);
+      await jRemove(kid);
+      const point = await endUndoTransaction();
+      assert.ok(point, '前置条件：应产生删除撤销点');
+      return { folder, kid, point: point! };
+    };
+
+    // ── A. 消费写入一直失败：不得报 ok，且原点仍在 ──
+    const a = await mkDeletePoint('consumefail');
+    storageSetFailKeys = [UNDO_STORAGE_KEY];
+    storageSetFailTimes = Number.POSITIVE_INFINITY;
+    const firstApply = await applyUndo(a.point.id);
+    storageSetFailKeys = null;
+    const afterFirst = await readUndoState();
+    ok('消费写入失败时不得报成功（否则用户以为已经撤过、记录也清了）', () => {
+      assert.equal(firstApply.ok, false, '消费没成功就不能返回 ok');
+      assert.match(firstApply.reason ?? '', /重复点击|重复执行/, '要明确警告不要重复执行');
+    });
+    ok('消费失败后原撤销点仍在存储里（这是必须如实告知的事实）', () => {
+      assert.ok(
+        afterFirst.points.some((p) => p.id === a.point.id),
+        '点应仍在（我们没能更新存储）',
+      );
+    });
+
+    // ── B. 同一会话再点同一条：必须拒绝，且不得重复重建子树 ──
+    const kidsBefore = childrenOf(a.folder).length;
+    const secondApply = await applyUndo(a.point.id);
+    const kidsAfter = childrenOf(a.folder).length;
+    ok('同一会话重复应用同一条撤销：拒绝执行，不产生重复子树', () => {
+      assert.equal(secondApply.ok, false);
+      assert.match(secondApply.reason ?? '', /已经执行过|重复/);
+      assert.equal(kidsAfter, kidsBefore, `子树不应被重复重建：${kidsBefore} → ${kidsAfter}`);
+    });
+    ok('被拒绝的重复回放不会虚报 restored 数量', () => assert.equal(secondApply.restored, 0));
+
+    // ── C. 只在第一次消费失败：内部重试一次即成功，正常消费 ──
+    const c = await mkDeletePoint('retryonce');
+    storageSetFailKeys = [UNDO_STORAGE_KEY];
+    storageSetFailTimes = 1; // 只失败一次，重试应成功
+    const retryApply = await applyUndo(c.point.id);
+    storageSetFailKeys = null;
+    const afterRetry = await readUndoState();
+    ok('消费失败会先自动重试一次：瞬时失败不再需要用户手动再点', () => {
+      assert.equal(retryApply.ok, true, `重试后应成功，实际 ${JSON.stringify(retryApply)}`);
+      assert.equal(
+        afterRetry.points.some((p) => p.id === c.point.id),
+        false,
+        '重试成功后点应被真正消费掉',
+      );
+    });
+
+    // ── D. 正常路径：消费成功、点消失（removed 语义不回归） ──
+    const d = await mkDeletePoint('normal');
+    const normalApply = await applyUndo(d.point.id);
+    const afterNormal = await readUndoState();
+    ok('正常路径不回归：撤销成功且撤销点被消费', () => {
+      assert.equal(normalApply.ok, true);
+      assert.equal(afterNormal.points.some((p) => p.id === d.point.id), false);
+    });
+
+    // ── E. 清空撤销记录要连进行中的快照一起清 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.set(UNDO_PENDING_KEY, {
+      runId: 't38-pending',
+      ops: [{ kind: 'create', id: 'x1', title: 'x', isFolder: false }],
+      containsDelete: false,
+      orderCheckpoints: [],
+      updatedAt: Date.now(),
+    });
+    await clearUndoPoints();
+    ok('「清空本地数据」会同时清掉进行中的 pending 快照', () =>
+      assert.equal(storageMap.has(UNDO_PENDING_KEY), false, 'pending 也必须被清掉'),
+    );
+
+    storageSetFail = false;
+    storageSetFailKeys = null;
+    storageSetFailTimes = Number.POSITIVE_INFINITY;
     storageMap.delete(UNDO_STORAGE_KEY);
     storageMap.delete(UNDO_PENDING_KEY);
     resetUndoTransactionForTest();

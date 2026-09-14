@@ -25,6 +25,34 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: '消费失败仍报成功（原点留在存储里，再点就重复回放）',
+    file: 'src/lib/undo/apply.ts',
+    from: '  if (!consumed.removed) {\n    appliedThisSession.add(target.id);',
+    to: '  if (false) {\n    appliedThisSession.add(target.id);',
+    expectFail: ['消费写入失败时不得报成功'],
+  },
+  {
+    name: '移除同一会话的重复回放保护（删除类逆操作会重复重建子树）',
+    file: 'src/lib/undo/apply.ts',
+    from: '  if (appliedThisSession.has(target.id)) {',
+    to: '  if (false) {',
+    expectFail: ['同一会话重复应用同一条撤销'],
+  },
+  {
+    name: 'takeUndoPoint 谎报已消费（removed 恒 true）',
+    file: 'src/lib/undo/recorder.ts',
+    from: '  return { point, removed: written.ok };',
+    to: '  return { point, removed: true };',
+    expectFail: ['消费写入失败时不得报成功'],
+  },
+  {
+    name: '清空撤销记录不 pending（旧快照下次启动会复活成撤销点）',
+    file: 'src/lib/undo/recorder.ts',
+    from: '  // 如实说明边界：这里**不能**取消正在运行中的轮次——那一轮结束时仍会写下新的撤销点，\n  // 这是刻意的语义（用户清的是"已有记录"，不是"正在进行的操作"）。\n  await clearPending();',
+    to: '  // reverted',
+    expectFail: ['「清空本地数据」会同时清掉进行中的 pending 快照'],
+  },
+  {
     name: '收尾时正式写入失败仍清掉 pending（唯一快照被删，改动再也撤不了）',
     file: 'src/lib/undo/recorder.ts',
     from: '  const written = await writeUndoPoints(trim.kept, notice);\n  if (!written.ok) {',
@@ -258,8 +286,8 @@ const cases = [
   {
     name: 'clearUndoPoints 不再真的清空（隐私承诺落空）',
     file: 'src/lib/undo/recorder.ts',
-    from: '  await chrome.storage.local.remove(UNDO_STORAGE_KEY);\n}\n\n/** 取出并移除一个撤销点',
-    to: '  // reverted\n}\n\n/** 取出并移除一个撤销点',
+    from: '  lastWriteError = null;\n  await chrome.storage.local.remove(UNDO_STORAGE_KEY);',
+    to: '  lastWriteError = null;',
     expectFail: ['clearUndoPoints 真的清空撤销记录'],
   },
   {

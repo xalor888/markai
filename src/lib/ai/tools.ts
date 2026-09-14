@@ -1561,7 +1561,7 @@ async function proposeDeletions(args: unknown): Promise<ToolOutput> {
   let executed = 0;
   let failed = 0;
   if (mode === 'auto') {
-    // 删除前给每个会失去子项的父目录拍一次"动手前完整子序"（撤销按它精确还原顺序）
+    // 同上：顺序删除，检查点属于纵深防御（逐条 index 兜底已足够）
     const parents = new Set<string>();
     for (const item of items) {
       const nodes = await chrome.bookmarks.get(item.bookmarkId).catch(() => []);
@@ -1646,7 +1646,9 @@ async function deleteAllBookmarks(args: unknown): Promise<ToolOutput> {
 
   const mode = await getDeleteMode();
   if (mode === 'auto') {
-    // 删除前给每个会失去子项的父目录拍一次"动手前完整子序"（撤销按它精确还原顺序）
+    // 删除前给每个会失去子项的父目录拍一次"动手前完整子序"。
+    // 这里是**顺序**删除，逐条 index 兜底其实就能还原正确顺序（逆序回放 + 状态不变式）；
+    // 检查点是纵深防御：与 cleanup_sweep 走同一套还原语义，避免以后改成并发时静默失准。
     for (const p of new Set(targets.map((t) => t.parentId).filter((x): x is string => !!x))) {
       await ensureOrderCheckpoint(p);
     }

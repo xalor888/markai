@@ -29,14 +29,20 @@ const cases = [
     file: 'src/lib/undo/mutations.ts',
     from: '    ...(captured?.snapshot ? { snapshot: captured.snapshot } : {}),',
     to: '',
-    expectFail: ['删除记录了子树快照与位置锚点', '并发删除后撤销', '撤销删除文件夹', '自动清理一轮后撤销'],
+    expectFail: [
+      '删除记录了子树快照与位置锚点',
+      '并发删除后撤销',
+      '撤销删除文件夹',
+      '自动清理一轮后撤销',
+      '清空书签库后撤销',
+    ],
   },
   {
     name: '删除还原后不做 old→new id 映射（顺序检查点对不上）',
     file: 'src/lib/undo/apply.ts',
     from: '        cp.order.map((id) => idMap.get(id) ?? id),',
     to: '        cp.order,',
-    expectFail: ['并发删除后撤销', '撤销删除文件夹', '自动清理一轮后撤销'],
+    expectFail: ['并发删除后撤销', '撤销删除文件夹', '自动清理一轮后撤销', '清空书签库后撤销'],
   },
   {
     name: 'applyUndo 不执行父目录顺序检查点',

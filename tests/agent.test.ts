@@ -2567,6 +2567,73 @@ function ok(name: string, fn: () => void) {
       assert.equal(diff, null, `第一处差异：${diff ?? ''}`);
     });
 
+    // ── D. delete_all_bookmarks（auto）全链路：清空书签库 → 撤销 → 整棵树一致 ──
+    // 用隔离的小书签库跑：把前面测试积累的 5000+ 节点全删一遍既慢、也不是这条链路要验的东西。
+    // 保存现场 → 换夹具 → 跑 → 无论成败都还原现场。
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    const savedStore = [...store];
+    let delAllOut: { deleted: number; failed: number } | null = null;
+    let delAllPoint: Awaited<ReturnType<typeof endUndoTransaction>> = null;
+    let delAllUndo: Awaited<ReturnType<typeof applyUndo>> | null = null;
+    let beforeDelAll: TreeNorm[] = [];
+    let midDelAll: TreeNorm[] = [];
+    let afterDelAll: TreeNorm[] = [];
+    let delAllError: string | null = null;
+    try {
+      store.length = 0;
+      store.push({ id: '0', title: '', dateAdded: 0 });
+      store.push({ id: '1', title: '书签栏', parentId: '0', dateAdded: 1 });
+      store.push({ id: '2', title: '其他书签', parentId: '0', dateAdded: 1 });
+      // 书签栏：[F1(c1, c2), b3, b4]；其他书签：[F2(c5), b6]
+      store.push({ id: 'DA-F1', parentId: '1', title: 'DA-F1', dateAdded: 2 });
+      store.push({ id: 'DA-c1', parentId: 'DA-F1', title: 'DA-c1', url: 'https://da.test/1', dateAdded: 3 });
+      store.push({ id: 'DA-c2', parentId: 'DA-F1', title: 'DA-c2', url: 'https://da.test/2', dateAdded: 4 });
+      store.push({ id: 'DA-b3', parentId: '1', title: 'DA-b3', url: 'https://da.test/3', dateAdded: 5 });
+      store.push({ id: 'DA-b4', parentId: '1', title: 'DA-b4', url: 'https://da.test/4', dateAdded: 6 });
+      store.push({ id: 'DA-F2', parentId: '2', title: 'DA-F2', dateAdded: 7 });
+      store.push({ id: 'DA-c5', parentId: 'DA-F2', title: 'DA-c5', url: 'https://da.test/5', dateAdded: 8 });
+      store.push({ id: 'DA-b6', parentId: '2', title: 'DA-b6', url: 'https://da.test/6', dateAdded: 9 });
+
+      storageMap.set('markai.config', { deleteMode: 'auto' });
+      beforeDelAll = await snapshotTreeObj();
+      await beginUndoTransaction('run-t27-delall');
+      const out = await executeTool('delete_all_bookmarks', JSON.stringify({ reason: 'T27 测试' }));
+      delAllOut = JSON.parse(out.result) as { deleted: number; failed: number };
+      delAllPoint = await endUndoTransaction();
+      midDelAll = await snapshotTreeObj();
+      delAllUndo = await applyUndo();
+      afterDelAll = await snapshotTreeObj();
+    } catch (e) {
+      delAllError = e instanceof Error ? e.message : String(e);
+    } finally {
+      store.length = 0;
+      store.push(...savedStore);
+      storageMap.delete('markai.config');
+    }
+
+    ok('delete_all_bookmarks 自动模式清空书签库（含文件夹子树）', () => {
+      assert.equal(delAllError, null, `不应抛错：${delAllError}`);
+      assert.equal(delAllOut!.deleted, 5, '顶层 5 项（书签栏 3 + 其他书签 2）');
+      assert.equal(delAllOut!.failed, 0);
+      assert.equal(
+        midDelAll.reduce((acc, r) => acc + r.children.length, 0),
+        0,
+        '清空后两个根都不该还有子项',
+      );
+    });
+    ok('清空书签库后撤销：整棵树含顺序逐节点复原', () => {
+      assert.ok(delAllPoint?.containsDelete, '应标记含删除');
+      assert.ok(delAllUndo?.ok, `撤销应成功，实际 ${JSON.stringify(delAllUndo)}`);
+      assert.equal(delAllUndo!.failures.length, 0);
+      const diff = firstTreeDiff(beforeDelAll, afterDelAll, '', { ignoreIds: true });
+      assert.equal(diff, null, `第一处差异：${diff ?? ''}`);
+      const countNodes = (rows: TreeNorm[]): number =>
+        rows.reduce((acc, r) => acc + 1 + countNodes(r.children), 0);
+      // 快照的顶层就是两个根（书签栏 / 其他书签），所以是 2 根 + 被删的 8 个节点
+      assert.equal(countNodes(afterDelAll), 10, '两个根 + 被删的 8 个节点都应回来');
+    });
+
     resetUndoTransactionForTest();
     storageMap.delete(UNDO_STORAGE_KEY);
     storageMap.delete('markai.config');

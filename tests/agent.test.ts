@@ -3061,6 +3061,99 @@ function ok(name: string, fn: () => void) {
     storageMap.delete(UNDO_STORAGE_KEY);
   }
 
+  /* ── T31: 撤销历史（可浏览、可跳选） ── */
+  console.log('\n[T31] 撤销历史');
+  {
+    const { describeUndoHistory } = await import('../src/lib/undo/journal');
+    const { useAIStore } = await import('../src/stores/aiStore');
+    const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    type UndoPointT = import('../src/lib/undo/types').UndoPoint;
+
+    const now = Date.now();
+    const legacy: UndoPointT = {
+      id: 'h-legacy',
+      runId: 'r1',
+      createdAt: now - 60_000,
+      // 旧版本写下的删除没有快照 → 不可撤销
+      ops: [{ kind: 'delete', id: 'old', title: '旧删除' }],
+      containsDelete: true,
+    };
+    const movable: UndoPointT = {
+      id: 'h-move',
+      runId: 'r2',
+      createdAt: now - 30_000,
+      ops: [
+        { kind: 'move', id: 'a', title: 'a', fromParentId: 'p', fromIndex: 0 },
+        { kind: 'create', id: 'b', title: 'b', isFolder: false },
+      ],
+      containsDelete: false,
+    };
+    const batch: UndoPointT = {
+      id: 'h-batch',
+      runId: 'r3',
+      createdAt: now - 10_000,
+      ops: [
+        {
+          kind: 'moveBatch',
+          title: '自动分类',
+          fromParentId: 'p',
+          ids: ['x', 'y', 'z'],
+          order: ['p'],
+        },
+      ],
+      containsDelete: false,
+    };
+
+    const rows = describeUndoHistory([batch, movable, legacy]);
+    ok('撤销历史：顺序保持（新在前）且摘要/条数正确', () => {
+      assert.deepEqual(
+        rows.map((r) => r.id),
+        ['h-batch', 'h-move', 'h-legacy'],
+        '展示顺序应与传入顺序一致（新在前）',
+      );
+      assert.equal(rows[0]!.summary, '移动 3 项', '批次按条数汇总');
+      assert.equal(rows[0]!.count, 3, '批次还原 3 项');
+      assert.equal(rows[1]!.summary, '移动 1 项、新建 1 项');
+      assert.equal(rows[1]!.count, 2);
+      assert.equal(rows[2]!.count, 0, 'count 的契约是可还原条数：旧的无快照删除可还原 0 项');
+    });
+    ok('撤销历史：不可撤销的点标出来并带原因（不让用户点了才知道）', () => {
+      assert.equal(rows[0]!.undoable, true);
+      assert.equal(rows[1]!.undoable, true);
+      assert.equal(rows[2]!.undoable, false, '旧的无快照删除不可撤销');
+      assert.match(rows[2]!.reason ?? '', /没有快照/);
+    });
+    ok('撤销历史：空列表就是空（不造占位行）', () => assert.deepEqual(describeUndoHistory([]), []));
+
+    // 跳选：点历史里的某一步，必须针对**那一步**下发（而不是"最新的那个"）
+    const sent: { type?: string; id?: string }[] = [];
+    let listed: UndoPointT[] = [batch, movable, legacy];
+    sendMessageMock = (msg) => {
+      const m = msg as { type?: string; id?: string };
+      sent.push(m);
+      if (m.type === 'undo:list') return { type: 'undo:list:result', points: listed };
+      if (m.type === 'undo:apply') return { type: 'undo:apply:result', result: { ok: true, restored: 2, failures: [] } };
+      return undefined;
+    };
+    await useAIStore.getState().refreshUndo();
+    sent.length = 0;
+    await useAIStore.getState().undoLast('h-move'); // 用户点的是第二步
+    ok('跳选撤销：显式传入的撤销点 id 被原样下发', () => {
+      const applied = sent.find((m) => m.type === 'undo:apply');
+      assert.ok(applied, '应发出 undo:apply');
+      assert.equal(applied!.id, 'h-move', '必须撤用户点的那一步，而不是最新的那一步');
+    });
+    sendMessageMock = () => undefined;
+    listed = [];
+
+    ok('聊天面板确实从 store 的撤销点渲染历史、并把行 id 传给 undoLast（接线被守住）', () => {
+      const panel = readFileSync(resolve(rootDir, 'src/components/chat/chat-panel.tsx'), 'utf8');
+      assert.match(panel, /describeUndoHistory\(/, '面板应使用纯函数生成历史行');
+      assert.match(panel, /undoLast\(row\.id\)/, '点击某一行必须把该行的 id 传给 undoLast');
+      assert.match(panel, /undoNotice/, '容量提示也要在面板里可见（解释为何更早的点不见了）');
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

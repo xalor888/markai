@@ -25,6 +25,27 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: '撤销历史不再标出可撤销性（点了才知道撤不了）',
+    file: 'src/lib/undo/journal.ts',
+    from: '      undoable: ready.undoable,',
+    to: '      undoable: true,',
+    expectFail: ['撤销历史：不可撤销的点标出来并带原因'],
+  },
+  {
+    name: '历史面板点击不回传行 id（退回"撤销最新那个"）',
+    file: 'src/components/chat/chat-panel.tsx',
+    from: '                      void undoLast(row.id);',
+    to: '                      void undoLast();',
+    expectFail: ['聊天面板确实从 store 的撤销点渲染历史'],
+  },
+  {
+    name: 'store 忽略显式指定的撤销点 id',
+    file: 'src/stores/aiStore.ts',
+    from: '    const shown = id ?? get().undoPoints[0]?.id;',
+    to: '    const shown = get().undoPoints[0]?.id;',
+    expectFail: ['跳选撤销：显式传入的撤销点 id 被原样下发'],
+  },
+  {
     name: '手工删除不再记日志（回到裸 removeTree，即不可撤销）',
     file: 'src/lib/ai/deletion-executor.ts',
     from: '        await jRemove(id, { tree: true });\n      } catch {\n        // 瞬时失败（限流/竞态）重试一次',

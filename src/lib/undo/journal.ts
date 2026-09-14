@@ -87,6 +87,36 @@ export function undoReadiness(point: UndoPoint | null | undefined): UndoReadines
   return { undoable: true, count };
 }
 
+export interface UndoHistoryRow {
+  id: string;
+  /** 摘要，如「移动 3 项、新建 1 项」 */
+  summary: string;
+  /** 会被还原的书签条数（批次/删除按条数计） */
+  count: number;
+  createdAt: number;
+  /** 不可撤销（如旧版本写下的无快照删除）时为 false，并给出原因 */
+  undoable: boolean;
+  reason?: string;
+}
+
+/**
+ * 把撤销点渲染成「撤销历史」列表用的行（纯逻辑，可直接单测）。
+ * 传入顺序即展示顺序（新在前）。
+ */
+export function describeUndoHistory(points: UndoPoint[]): UndoHistoryRow[] {
+  return points.map((p) => {
+    const ready = undoReadiness(p);
+    return {
+      id: p.id,
+      summary: summarizeOps(p.ops),
+      count: ready.count,
+      createdAt: p.createdAt,
+      undoable: ready.undoable,
+      ...(ready.reason ? { reason: ready.reason } : {}),
+    };
+  });
+}
+
 /** 撤销点的展示标题：优先给摘要，空轮次给占位 */
 export function describeUndoPoint(point: UndoPoint): string {
   return summarizeOps(point.ops);

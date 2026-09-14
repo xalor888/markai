@@ -3,6 +3,7 @@ import {
   Bot,
   Download,
   FolderTree,
+  History,
   MessagesSquare,
   Pencil,
   Plus,
@@ -22,7 +23,7 @@ import { useAIStore } from '@/stores/aiStore';
 import { useBookmarkStore, findNode, resolveTitlePath } from '@/stores/bookmarkStore';
 import { useConfigStore } from '@/stores/configStore';
 import { formatRelativeTime } from '@/lib/format';
-import { summarizeOps, undoReadiness } from '@/lib/undo/journal';
+import { describeUndoHistory, summarizeOps, undoReadiness } from '@/lib/undo/journal';
 import { resolveConfig, PROVIDERS } from '@/lib/providers';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -79,6 +80,8 @@ export function ChatPanel({
   const deleteConversation = useAIStore((s) => s.deleteConversation);
   const undoPoints = useAIStore((s) => s.undoPoints);
   const undoNotice = useAIStore((s) => s.undoNotice);
+  // 撤销历史（新在前）：让「撤销第几步」可控，而不是只能盲点最新那一个
+  const undoHistory = describeUndoHistory(undoPoints);
   const undoLast = useAIStore((s) => s.undoLast);
   // 撤销：最新一轮的写操作。含删除的轮次会返回不可撤销 + 原因（不假装成功）
   const undoPoint = undoPoints[0];
@@ -106,6 +109,7 @@ export function ChatPanel({
   const [confirmClear, setConfirmClear] = useState(false);
   const [confirmDeleteSession, setConfirmDeleteSession] = useState<string | null>(null);
   const [sessionsOpen, setSessionsOpen] = useState(false);
+  const [undoHistoryOpen, setUndoHistoryOpen] = useState(false);
   const [editingSession, setEditingSession] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
   const [sessionQuery, setSessionQuery] = useState('');
@@ -294,6 +298,16 @@ export function ChatPanel({
           <Button
             variant="ghost"
             size="icon"
+            title={`撤销历史（最近 ${undoHistory.length} 步）`}
+            aria-label="撤销历史"
+            disabled={undoHistory.length === 0}
+            onClick={() => setUndoHistoryOpen(true)}
+          >
+            <History className="h-3.5 w-3.5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
             className="relative"
             title={undoTitle}
             aria-label={undoTitle}
@@ -352,6 +366,66 @@ export function ChatPanel({
       {/* 消息区 */}
       <div className="relative min-h-0 flex-1">
         {/* 会话管理面板（覆盖消息区） */}
+        {undoHistoryOpen && (
+          <div className="absolute inset-0 z-20 flex flex-col bg-card">
+            <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border px-2.5">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setUndoHistoryOpen(false)}
+                title="返回聊天"
+                aria-label="返回聊天"
+              >
+                <ArrowDown className="h-3.5 w-3.5 rotate-180" />
+              </Button>
+              <span className="text-xs font-medium text-foreground">撤销历史</span>
+              <span className="text-[11px] text-muted-foreground">最近 {undoHistory.length} 步</span>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+              {undoHistory.length === 0 ? (
+                <p className="px-2 py-3 text-center text-[11px] text-muted-foreground">
+                  还没有可撤销的操作。Agent 每次整理（以及你手工确认的删除）都会在这里留下一步。
+                </p>
+              ) : (
+                undoHistory.map((row, i) => (
+                  <button
+                    key={row.id}
+                    type="button"
+                    disabled={!row.undoable || streaming}
+                    title={row.undoable ? '回到这一步之前' : (row.reason ?? '无法撤销')}
+                    onClick={() => {
+                      setUndoHistoryOpen(false);
+                      void undoLast(row.id);
+                    }}
+                    className={cn(
+                      'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left transition-colors',
+                      row.undoable && !streaming ? 'hover:bg-muted/60' : 'cursor-not-allowed opacity-55',
+                    )}
+                  >
+                    <span className="w-6 shrink-0 text-[10px] text-muted-foreground/70">
+                      {i === 0 ? '最新' : `−${i}`}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-xs text-foreground">{row.summary}</span>
+                      <span className="block truncate text-[10px] text-muted-foreground">
+                        {row.undoable ? `还原 ${row.count} 项` : (row.reason ?? '无法撤销')}
+                        {' · '}
+                        {formatRelativeTime(row.createdAt)}
+                      </span>
+                    </span>
+                    <Undo2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
+                  </button>
+                ))
+              )}
+            </div>
+            {undoNotice && (
+              <p className="shrink-0 border-t border-border px-2.5 py-1.5 text-[10px] text-muted-foreground">
+                {undoNotice}
+              </p>
+            )}
+          </div>
+        )}
+
         {sessionsOpen && (
           <div className="absolute inset-0 z-20 flex flex-col bg-card">
             <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border px-2.5">

@@ -530,7 +530,17 @@ export function ConfigForm() {
           <button
             type="button"
             className="shrink-0 underline"
-            onClick={() => void useConfigStore.getState().update({})}
+            onClick={() => {
+              // 用返回值给出**真实**反馈：成功与失败不能显示同一句话
+              void useConfigStore
+                .getState()
+                .update({})
+                .then((r) =>
+                  r.ok
+                    ? pushToast('设置已保存', { variant: 'success' })
+                    : pushToast('仍未保存成功', { variant: 'destructive', description: r.error }),
+                );
+            }}
           >
             重试保存
           </button>

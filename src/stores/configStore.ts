@@ -27,7 +27,7 @@ interface ConfigState {
   /** 从 chrome.storage.local 载入配置 */
   load: () => Promise<void>;
   /** 部分更新并持久化 */
-  update: (patch: Partial<AIConfig>) => Promise<void>;
+  update: (patch: Partial<AIConfig>) => Promise<{ ok: boolean; error?: string }>;
   /** 应用 Provider 预设（自动填充 Base URL 与默认模型） */
   applyPreset: (providerId: string) => Promise<void>;
   /** 最近一次设置保存失败的如实说明（null = 正常）；at 稳定，界面只提示一次 */
@@ -64,6 +64,7 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       await chrome.storage.local.set({ [CONFIG_STORAGE_KEY]: next });
       // 保存成功：清掉上一次的失败状态（提示是一次性的）
       if (get().saveError) set({ saveError: null });
+      return { ok: true };
     } catch (e) {
       // 原先这里是空 catch，注释称"下次输入会再写"——但配额满时之后**每次**都会失败，
       // 而 UI 已经显示成保存好了。这条路径存的是 API Key、Base URL、模型与**删除模式**：
@@ -87,6 +88,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
       if (!prev || prev.message !== message) {
         pushToast('设置未能保存', { variant: 'destructive', description: reason });
       }
+      // 如实返回结果：调用方（例如"重试保存"按钮）据此给出真实反馈，
+      // 而不是不管成败都显示同一句话。
+      return { ok: false, error: reason };
     }
   },
 

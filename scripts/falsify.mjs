@@ -25,6 +25,20 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: 'update 不再返回如实结果（调用方无从判断成败）',
+    file: 'src/stores/configStore.ts',
+    from: '      return { ok: false, error: reason };',
+    to: '      return { ok: true };',
+    expectFail: ['update 返回如实结果'],
+  },
+  {
+    name: '重试按钮不消费返回值（成败显示同一句话）',
+    file: 'src/components/options/config-form.tsx',
+    from: '                .then((r) =>\n                  r.ok\n                    ? pushToast(\'设置已保存\', { variant: \'success\' })\n                    : pushToast(\'仍未保存成功\', { variant: \'destructive\', description: r.error }),\n                );',
+    to: '                .then(() => pushToast(\'设置已保存\', { variant: \'success\' }));',
+    expectFail: ['设置页渲染了保存失败警示'],
+  },
+  {
     name: '设置保存失败回到空 catch（UI 已显示新值却没说没保存）',
     file: 'src/stores/configStore.ts',
     from: '      set({ saveError: { message, at } });',

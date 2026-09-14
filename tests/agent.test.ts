@@ -3866,6 +3866,19 @@ function ok(name: string, fn: () => void) {
       assert.equal(savedCfg?.model, 'ok-model');
     });
 
+    // ── C2. 返回值必须如实（调用方据此给真实反馈，而不是成败同一句话） ──
+    storageMap.delete('markai.config');
+    storageSetFail = false;
+    const okResult = await useConfigStore.getState().update({ model: 'ret-ok' });
+    storageSetFail = true;
+    const failResult = await useConfigStore.getState().update({ model: 'ret-fail' });
+    storageSetFail = false;
+    ok('update 返回如实结果：成功 {ok:true}、失败 {ok:false,error}', () => {
+      assert.equal(okResult.ok, true, '成功应返回 ok:true');
+      assert.equal(failResult.ok, false, '失败必须返回 ok:false（不能只写状态）');
+      assert.ok(failResult.error, '失败要带回原因');
+    });
+
     // ── D. 设置页确实会显示这条警示（可见，不是只进状态） ──
     ok('设置页渲染了保存失败警示并提供重试入口（接线被守住）', () => {
       const form = readFileSync(resolve(rootDir, 'src/components/options/config-form.tsx'), 'utf8');
@@ -3873,6 +3886,8 @@ function ok(name: string, fn: () => void) {
       // 即使把消息渲染删掉（留一个空 span）依然能通过——反证脚本抓到过这条假绿。
       assert.match(form, /saveError\.message/, '页面必须把失败说明渲染出来，而不只是读取它');
       assert.match(form, /重试保存/, '应提供重试入口');
+      // 重试按钮必须消费返回值：否则成功/失败会显示同一句话，等于又一处"假成功"
+      assert.match(form, /r\.ok/, '重试后应按返回值给出真实反馈');
     });
 
     // ── E. 错误处理清单存在，且如实写出"仍有大量 catch 未逐处审计" ──

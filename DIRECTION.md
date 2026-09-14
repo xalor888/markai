@@ -31,7 +31,7 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
-| 测试 | `npm test` | **240 项全绿**（… → 222 → 233 → 234 → 240） |
+| 测试 | `npm test` | **241 项全绿**（… → 233 → 234 → 240 → 241） |
 | 构建 | `npm run build` | 通过，`.output/chrome-mv3` 788.17 kB |
 | 版本 | `package.json` | **0.2.11（已发版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
@@ -163,7 +163,8 @@ Chromium 的 `index` 是「移除源之前」坐标，而我们要的是「移�
 再静默 catch 写盘"。这条路径存的是 **API Key、Base URL、模型与删除模式**，于是有两个真实后果：
 API Key 静默丢失（下次启动聊天莫名其妙失败）；更严重的是**安全相关**——把删除模式从"无需确认"切到
 "需要确认"时若保存失败，界面显示已切换、存储里仍是"无需确认"，重载后 Agent 会**不打招呼就删**，
-而用户以为自己受保护。现在：失败如实上报（带 `getBytesInUse` 真实占用）、设置页显示可见警示并可一键重试、
+而用户以为自己受保护。现在：失败如实上报（带 `getBytesInUse` 真实占用）、`update()` **返回如实结果**
+（`{ok,error}`，重试按钮据此给真实反馈，不再是成败同一句话）、设置页显示可见警示并可一键重试、
 **删除模式的失败文案直接点名风险**。
 
 同时把判定规则固化成 `docs/error-handling.md`：什么时候必须如实上报、什么时候可以 best-effort 忽略

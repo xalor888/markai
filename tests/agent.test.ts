@@ -250,7 +250,12 @@ const mockBookmarks = {
         // storageSetDelaySequence 按次消费，可让**较旧的写入更慢**（验证串行化）。
         if (keys.includes('markai.undo.pending')) {
           const delay = storageSetDelaySequence.length > 0 ? storageSetDelaySequence.shift()! : storageSetDelayMs;
-          if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+          inflightPendingWrites += 1;
+          try {
+            if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+          } finally {
+            inflightPendingWrites -= 1;
+          }
         }
         for (const [k, v] of Object.entries(obj)) storageMap.set(k, structuredClone(v));
       },
@@ -308,6 +313,9 @@ let storageSetDelayMs = 0;
 
 /** 按次消费的延迟序列：可让较旧的写入更慢，用于验证写入串行化 */
 let storageSetDelaySequence: number[] = [];
+
+/** 当前正在"路上"的 pending 写入数：用来断言"收尾返回时没有在途写入" */
+let inflightPendingWrites = 0;
 
 /** 测试期清单版本：默认取 package.json（与 WXT 注入一致），用例可临时覆盖 */
 const pkgVersion = (
@@ -4195,14 +4203,19 @@ function ok(name: string, fn: () => void) {
     const inFlight = (pendingOf()?.ops ?? []).length === 0;
     const endP = endUndoTransaction(); // 收尾时那条写入仍在路上
     const endPoint = await endP;
+    // 关键采样：必须在 end 返回的**那一刻**取，否则等写完再看就永远看到 0
+    const inflightAtEnd = inflightPendingWrites;
     await new Promise((r) => setTimeout(r, 500)); // 给迟到写入充分落地的机会
     storageSetDelayMs = 0;
     const raceState = await readUndoState();
-    ok('收尾后落地的迟到写入会自我补偿：pending 不得残留', () => {
+    ok('收尾会等待在途的 pending 写入：返回时不得还有写入在路上', () => {
       assert.ok(inFlight, '前置条件：收尾时那条带操作的 pending 写入应仍在路上');
       assert.ok(endPoint, '正常收尾应产生撤销点');
+      assert.equal(inflightAtEnd, 0, 'end 返回时不应还有在途的 pending 写入');
+    });
+    ok('收尾之后 pending 不得残留在存储里（含迟到写入）', () => {
       assert.equal(raceState.points.length, 1, '应恰好一个撤销点');
-      assert.equal(pendingOf(), undefined, '收尾之后 pending 不得残留在存储里');
+      assert.equal(pendingOf(), undefined, '收尾之后 pending 不得残留');
     });
 
     // ── B. 慢速写入进行中清空：pending 不得被迟到写入复活 ──
@@ -4216,10 +4229,12 @@ function ok(name: string, fn: () => void) {
     await new Promise((r) => setTimeout(r, 320)); // 让慢写入真的上路
     const clearInFlight = (pendingOf()?.ops ?? []).length === 0;
     await clearUndoPoints();
+    const inflightAtClear = inflightPendingWrites; // 同样在返回那一刻采样
     await new Promise((r) => setTimeout(r, 500));
     storageSetDelayMs = 0;
-    ok('清空后落地的迟到写入不得让 pending 复活', () => {
+    ok('清空也会等在途写入落定，且不被迟到写入复活', () => {
       assert.ok(clearInFlight, '前置条件：清空时那条带操作的 pending 写入应仍在路上');
+      assert.equal(inflightAtClear, 0, 'clearUndoPoints 返回时不应还有在途写入');
       assert.equal(pendingOf(), undefined, '清空后 pending 必须仍然不存在');
     });
 
@@ -4264,6 +4279,7 @@ function ok(name: string, fn: () => void) {
 
     storageSetDelayMs = 0;
     storageSetDelaySequence = [];
+    inflightPendingWrites = 0;
     storageSetFail = false;
     storageSetFailKeys = null;
     storageSetFailTimes = Number.POSITIVE_INFINITY;

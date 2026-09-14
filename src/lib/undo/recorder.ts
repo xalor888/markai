@@ -125,15 +125,6 @@ function cancelTrailingFlush(): void {
  */
 let pendingIo: Promise<void> = Promise.resolve();
 
-/**
- * 事务纪元：事务结束/被清理时递增。
- *
- * 用来识别"迟到写入"——某个写入在发起时属于旧纪元，落地时事务已经结束；
- * 此时必须**补偿性删掉**它写下的 pending，否则它会在下次启动复活成撤销点
- * （极端情况下那个 runId 的点已被用户撤销消费过，复活后会变成"再撤一次"）。
- */
-let txEpoch = 0;
-
 function enqueuePendingWrite<T>(task: () => Promise<T>): Promise<T> {
   const next = pendingIo.then(task, task);
   // 链上保留一个不会 reject 的版本，避免一次失败让后续写入全部短路
@@ -144,12 +135,18 @@ function enqueuePendingWrite<T>(task: () => Promise<T>): Promise<T> {
   return next;
 }
 
-async function removePendingKey(): Promise<void> {
-  try {
-    await chrome.storage.local.remove(UNDO_PENDING_KEY);
-  } catch {
-    // 删不掉只会多一次去重后的无害清理（恢复按 runId 去重）
-  }
+/**
+ * 等到当前排队的写入**全部落定**（含等待期间新排入的）。
+ *
+ * 这是收尾/清空的把关机制：清掉 pending 之前先等干净，就不存在"清理之后才落地的写入"
+ * 把它复活——连"进程恰好在此刻被杀"的窗口也一起关掉（补偿式写法在那个窗口里仍会留下快照）。
+ */
+async function drainPendingWrites(): Promise<void> {
+  let seen: Promise<void>;
+  do {
+    seen = pendingIo;
+    await seen;
+  } while (seen !== pendingIo);
 }
 
 /** 把一个事务写成 pending 快照（快照副本，不依赖 storage 的克隆行为） */
@@ -193,7 +190,6 @@ async function persistPending(force = false): Promise<void> {
   cancelTrailingFlush();
   pendingWrittenAt = now;
   pendingWrittenOps = active.ops.length;
-  const epoch = txEpoch;
   const snapshot: PendingTransaction = {
     runId: active.runId,
     ops: structuredClone(active.ops),
@@ -205,15 +201,11 @@ async function persistPending(force = false): Promise<void> {
     updatedAt: now,
   };
   await enqueuePendingWrite(async () => {
-    let ok = false;
     try {
       await chrome.storage.local.set({ [UNDO_PENDING_KEY]: snapshot });
-      ok = true;
     } catch {
-      // 写不进 pending 不该影响书签操作本身
+      // 写不进 pending 不该影响书签操作本身（撤销点仍会在轮次结束时尝试落盘）
     }
-    // 迟到写入：事务已经结束/被清理，删掉它刚写下的内容
-    if (ok && epoch !== txEpoch) await removePendingKey();
   });
 }
 
@@ -244,8 +236,6 @@ export async function endUndoTransaction(): Promise<UndoPoint | null> {
   const tx = active;
   active = null;
   cancelTrailingFlush();
-  // 递增纪元：本事务**在途**的增量写入落地时会发现纪元已变，自行补偿删掉
-  txEpoch += 1;
   if (!tx || tx.ops.length === 0) return null;
   const point: UndoPoint = {
     id: uid(),
@@ -272,12 +262,12 @@ export async function endUndoTransaction(): Promise<UndoPoint | null> {
   if (!written.ok) {
     // 正式点没落盘：**保留（并补全）pending**，让下次启动仍能把它恢复出来。
     // 返回 null 而不是 point——写不进去就不算"已记录"，不能对调用方谎报成功。
-    // 这是**刻意**的写入（savePendingFrom 不受纪元补偿约束），所以不会被误删。
+    // 刻意补全快照（此刻在途写入已经等干净，不会与它竞争同一个键）
     await savePendingFrom(tx);
     return null;
   }
-  // 已正经收尾：清掉快照。此刻若还有**在途**写入，它落地时会发现纪元已变，自行补偿删除
-  // （这条补偿是唯一的把关机制，因此它可以被反证单独证伪）
+  // 已正经收尾：先等在途写入落定，再清快照——避免"清理之后才落地的写入"把它复活
+  await drainPendingWrites();
   await clearPending();
   return point;
 }
@@ -373,9 +363,8 @@ export async function writeUndoPoints(points: UndoPoint[], notice?: string): Pro
  */
 export async function clearUndoPoints(): Promise<void> {
   lastWriteError = null;
-  // 递增纪元：在途的 pending 写入落地时会发现纪元已变，自行补偿删除
-  // （否则它会在清空之后把快照复活，下次启动又变成撤销点）
-  txEpoch += 1;
+  // 先等在途写入落定再删：否则一条在路上的 pending 写入会在清空之后把它复活
+  await drainPendingWrites();
   await chrome.storage.local.remove(UNDO_STORAGE_KEY);
   // 进行中的快照也要清：否则下次启动会把它恢复成一个"用户以为已经清掉"的撤销点。
   // 如实说明边界：这里**不能**取消正在运行中的轮次——那一轮结束时仍会写下新的撤销点，
@@ -434,6 +423,8 @@ export async function recoverInterruptedTransaction(): Promise<UndoPoint | null>
     return null;
   }
 
+  // 恢复前先等在途写入落定：否则清理之后可能又来一条旧写入
+  await drainPendingWrites();
   const state = await readUndoState();
   // 幂等：同一个事务（runId）已经提升过就不再造第二个点。
   // 覆盖"正式点写入成功、但 clearPending 失败"的情况——否则下次启动会把同一段改动

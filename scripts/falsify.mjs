@@ -25,18 +25,18 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
-    name: '迟到写入不再自我补偿（收尾后它把 pending 复活）',
+    name: '收尾不等在途 pending 写入（迟到写入把快照复活）',
     file: 'src/lib/undo/recorder.ts',
-    from: '    if (ok && epoch !== txEpoch) await removePendingKey();',
-    to: '    if (false && ok && epoch !== txEpoch) await removePendingKey();',
-    expectFail: ['收尾后落地的迟到写入会自我补偿'],
+    from: '  // 已正经收尾：先等在途写入落定，再清快照——避免"清理之后才落地的写入"把它复活\n  await drainPendingWrites();\n  await clearPending();',
+    to: '  await clearPending();',
+    expectFail: ['收尾会等待在途的 pending 写入'],
   },
   {
-    name: '清空不递增纪元（迟到写入把快照写回来）',
+    name: '清空不等在途写入（清完又被写回来）',
     file: 'src/lib/undo/recorder.ts',
-    from: '  // 递增纪元：在途的 pending 写入落地时会发现纪元已变，自行补偿删除\n  // （否则它会在清空之后把快照复活，下次启动又变成撤销点）\n  txEpoch += 1;',
+    from: '  // 先等在途写入落定再删：否则一条在路上的 pending 写入会在清空之后把它复活\n  await drainPendingWrites();',
     to: '  // reverted',
-    expectFail: ['清空后落地的迟到写入不得让 pending 复活'],
+    expectFail: ['清空也会等在途写入落定'],
   },
   {
     name: 'pending 写入不串行化（慢的旧写入覆盖新快照）',
@@ -202,7 +202,7 @@ const cases = [
   {
     name: '正常收尾后不清 pending（下次启动会重复提升）',
     file: 'src/lib/undo/recorder.ts',
-    from: '  // 已正经收尾：清掉快照。此刻若还有**在途**写入，它落地时会发现纪元已变，自行补偿删除\n  // （这条补偿是唯一的把关机制，因此它可以被反证单独证伪）\n  await clearPending();',
+    from: '  // 已正经收尾：先等在途写入落定，再清快照——避免"清理之后才落地的写入"把它复活\n  await drainPendingWrites();\n  await clearPending();',
     to: '  // reverted',
     expectFail: ['正常收尾后清除 pending'],
   },
@@ -307,7 +307,7 @@ const cases = [
   {
     name: 'clearUndoPoints 不再真的清空（隐私承诺落空）',
     file: 'src/lib/undo/recorder.ts',
-    from: '  lastWriteError = null;\n  // 递增纪元：在途的 pending 写入落地时会发现纪元已变，自行补偿删除\n  // （否则它会在清空之后把快照复活，下次启动又变成撤销点）\n  txEpoch += 1;\n  await chrome.storage.local.remove(UNDO_STORAGE_KEY);',
+    from: '  lastWriteError = null;\n  // 先等在途写入落定再删：否则一条在路上的 pending 写入会在清空之后把它复活\n  await drainPendingWrites();\n  await chrome.storage.local.remove(UNDO_STORAGE_KEY);',
     to: '  lastWriteError = null;',
     expectFail: ['clearUndoPoints 真的清空撤销记录'],
   },

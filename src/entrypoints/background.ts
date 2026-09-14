@@ -9,6 +9,7 @@
 import { runAgentTurn } from '@/lib/ai/agent';
 import { ChatError, testConnection } from '@/lib/ai/client';
 import { ensureRoots } from '@/lib/ai/tools';
+import { recoverInterruptedTransaction } from '@/lib/undo/recorder';
 import { executeDeletions as runDeletions } from '@/lib/ai/deletion-executor';
 import { normalizeBaseUrl, resolveConfig } from '@/lib/providers';
 import { CONFIG_STORAGE_KEY } from '@/stores/configStore';
@@ -24,6 +25,13 @@ import type {
 } from '@/lib/ai/types';
 
 export default defineBackground(() => {
+  // ── 0. 收尾上一轮被中断的事务 ──
+  // 只有在**启动**时机才能安全地做这件事：此刻能看到的 pending 快照必然来自已经死掉的
+  // 进程（当前进程还没开始任何轮次），因此不会误提升正在进行中的事务——这也是本方案
+  // 不需要额外"存活心跳标记"的原因。恢复出来的操作会变成一个正常的撤销点，
+  // 并带一条"上一轮被中断"的提示。
+  void recoverInterruptedTransaction();
+
   // ── 1. 浏览器原生书签右键菜单 ──
   // 注：'bookmark' 上下文是较新的 Chrome API，@types/chrome 尚未收录，通过断言助手创建
   // 只在安装/更新时注册（onInstalled），避免 SW 重启后重复 id 报错；重复注册兜底吞错

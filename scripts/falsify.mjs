@@ -25,6 +25,41 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: '增量落盘被移除（回到"只在轮次结束才写"）',
+    file: 'src/lib/undo/recorder.ts',
+    from: '  active?.ops.push(op);\n  void persistPending();',
+    to: '  active?.ops.push(op);',
+    expectFail: ['过了节流窗口后快照会追上', '事务进行中就有增量快照', '被中断的轮次会被提升为可撤销点'],
+  },
+  {
+    name: '尾随补写被移除（停下来之后快照就停在旧值）',
+    file: 'src/lib/undo/recorder.ts',
+    from: '    // 本次跳过写入：安排尾随补写，保证"停下来"之后快照也能追上\n    scheduleTrailingFlush();\n    return;',
+    to: '    return;',
+    expectFail: ['过了节流窗口后快照会追上'],
+  },
+  {
+    name: '正常收尾后不清 pending（下次启动会重复提升）',
+    file: 'src/lib/undo/recorder.ts',
+    from: '  // 已正经收尾：清掉进行中的快照，避免下次启动把它当成"被中断的轮次"重复提升\n  await clearPending();',
+    to: '  // reverted',
+    expectFail: ['正常收尾后清除 pending'],
+  },
+  {
+    name: '启动时不恢复被中断的轮次',
+    file: 'src/lib/undo/recorder.ts',
+    from: '  if (!pending || !Array.isArray(pending.ops) || pending.ops.length === 0) return null;',
+    to: '  if (true) return null;',
+    expectFail: ['被中断的轮次会被提升为可撤销点'],
+  },
+  {
+    name: 'SW 启动不再调用恢复（接线断了）',
+    file: 'src/entrypoints/background.ts',
+    from: '  void recoverInterruptedTransaction();',
+    to: '  // reverted',
+    expectFail: ['Service Worker 启动时确实调用了恢复'],
+  },
+  {
     name: 'cleanup_sweep 预览也执行删除（dryRun 失效）',
     file: 'src/lib/ai/tools.ts',
     from: '  if (dryRun) {\n    return {\n      result: JSON.stringify({\n        dryRun: true,\n        total: collected.length,',

@@ -3467,6 +3467,153 @@ function ok(name: string, fn: () => void) {
     storageMap.delete('markai.config');
   }
 
+  /* ── T34: 被中断的轮次也能撤销（增量落盘 + 启动恢复） ── */
+  console.log('\n[T34] 被中断的轮次');
+  {
+    const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const {
+      UNDO_STORAGE_KEY,
+      UNDO_PENDING_KEY,
+      beginUndoTransaction,
+      endUndoTransaction,
+      ensureOrderCheckpoint,
+      recoverInterruptedTransaction,
+      readUndoState,
+      readUndoPoints,
+      resetUndoTransactionForTest,
+      dropActiveForTest,
+    } = await import('../src/lib/undo/recorder');
+    const { jRemove } = await import('../src/lib/undo/mutations');
+    const { applyUndo } = await import('../src/lib/undo/apply');
+    const { undoReadiness } = await import('../src/lib/undo/journal');
+
+    const mkTree = async () => {
+      const folder = (await mockBookmarks.create({ parentId: '1', title: 'T34-FOLDER' })).id;
+      const kids: string[] = [];
+      for (const t of ['a', 'b', 'c', 'd']) {
+        kids.push((await mockBookmarks.create({ parentId: folder, title: t, url: `https://t34.test/${t}` })).id);
+      }
+      return { folder, kids };
+    };
+
+    // ── A. 事务进行中：pending 快照已落盘（不是等到轮次结束才写） ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+    const fx = await mkTree();
+    const before = await snapshotTreeObj();
+    await beginUndoTransaction('run-t34');
+    await ensureOrderCheckpoint(fx.folder);
+    await jRemove(fx.kids[1]!); // 删中间那条，顺序问题才看得出来
+    const pendingMid = storageMap.get(UNDO_PENDING_KEY) as
+      | { runId: string; ops: { kind: string }[]; orderCheckpoints: { parentId: string }[] }
+      | undefined;
+    ok('事务进行中就有增量快照，且最多落后 5 条（不是等到轮次结束才写）', () => {
+      assert.ok(pendingMid, '轮次进行中应存在 pending 快照');
+      assert.equal(pendingMid!.runId, 'run-t34');
+      assert.equal(pendingMid!.orderCheckpoints[0]!.parentId, fx.folder, '顺序检查点也要在快照里');
+      assert.equal(storageMap.has(UNDO_STORAGE_KEY), false, '此时还不该有正式撤销点');
+      // 快照必须是"已记录操作的前缀"（不能凭空多出、也不能乱序），且落后不超过阈值
+      assert.ok(pendingMid!.ops.length <= 1, '快照不能比已记录的还多');
+      assert.ok(1 - pendingMid!.ops.length <= 5, '落后不得超过 5 条');
+    });
+    // 按"时间"那一半的节流：等过阈值后，快照应追上全部已记录操作
+    await new Promise((r) => setTimeout(r, 300));
+    const pendingCaughtUp = storageMap.get(UNDO_PENDING_KEY) as { ops: { kind: string }[] } | undefined;
+    ok('过了节流窗口后快照会追上（时间那一半也生效）', () => {
+      assert.equal(pendingCaughtUp?.ops.length, 1, '等待后应包含已记录的删除');
+      assert.equal(pendingCaughtUp!.ops[0]!.kind, 'delete');
+    });
+
+    // ── B. 正常收尾后 pending 被清除（不会被重复提升） ──
+    const ended = await endUndoTransaction();
+    ok('正常收尾后清除 pending（不会下次启动被重复提升）', () => {
+      assert.ok(ended, '正常收尾应产生撤销点');
+      assert.equal(storageMap.has(UNDO_PENDING_KEY), false, 'pending 应被清除');
+      assert.equal((storageMap.get(UNDO_STORAGE_KEY) as { points: unknown[] }).points.length, 1);
+    });
+    await applyUndo(); // 收拾干净
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+
+    // ── C. 模拟"进程被杀"：不调 end，直接恢复 → 仍然可撤销且顺序正确 ──
+    const fx2 = await mkTree();
+    const before2 = await snapshotTreeObj();
+    await beginUndoTransaction('run-t34-killed');
+    await ensureOrderCheckpoint(fx2.folder);
+    await jRemove(fx2.kids[2]!);
+    await jRemove(fx2.kids[0]!);
+    await new Promise((r) => setTimeout(r, 300)); // 让节流窗口过去，快照追上全部操作
+    dropActiveForTest(); // ← 等价于 SW 被杀：内存没了，pending 还在
+    const recovered = await recoverInterruptedTransaction();
+    const afterRecover = await readUndoState();
+    const midTree = await snapshotTreeObj();
+    const undoRes = await applyUndo();
+    const after2 = await snapshotTreeObj();
+
+    ok('被中断的轮次会被提升为可撤销点（这是本目标的核心）', () => {
+      assert.ok(recovered, '应恢复出一个撤销点');
+      assert.equal(recovered!.ops.length, 2, '两条删除都应在里面');
+      assert.equal(afterRecover.points.length, 1);
+      assert.notEqual(firstTreeDiff(before2, midTree), null, '被杀之前确实改动了书签');
+    });
+    ok('被中断的轮次恢复后能撤销回原状（含顺序）', () => {
+      assert.ok(undoRes.ok, `撤销应成功，实际 ${JSON.stringify(undoRes)}`);
+      const diff = firstTreeDiff(before2, after2, '', { ignoreIds: true });
+      assert.equal(diff, null, `第一处差异：${diff ?? ''}`);
+    });
+    ok('恢复会如实告知用户"上一轮被中断"', () => {
+      assert.match(afterRecover.notice ?? '', /被中断/);
+      assert.ok(afterRecover.noticeAt, '应带时间戳，供界面只提示一次');
+    });
+    ok('恢复是一次性的：pending 已消费，再调用是空操作', async () => {
+      const again = await recoverInterruptedTransaction();
+      assert.equal(again, null);
+    });
+
+    // ── D. 没有 pending 时恢复是空操作 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+    const noneRecovered = await recoverInterruptedTransaction();
+    const noneState = await readUndoState();
+    ok('没有 pending 时恢复不产生任何撤销点', () => {
+      assert.equal(noneRecovered, null);
+      assert.equal(noneState.points.length, 0);
+    });
+
+    // ── E. 兼容性：pending 里是旧式无快照删除时，恢复后仍如实拒绝 ──
+    const { recordOp, markDelete } = await import('../src/lib/undo/recorder');
+    await beginUndoTransaction('run-t34-legacy');
+    recordOp({ kind: 'delete', id: 'legacy-1', title: '旧删除' });
+    markDelete();
+    await new Promise((r) => setTimeout(r, 300));
+    dropActiveForTest();
+    const legacyRecovered = await recoverInterruptedTransaction();
+    const legacyReady = undoReadiness(legacyRecovered);
+    ok('恢复出来的旧式删除仍按既有规则拒绝整轮撤销（不假装能撤）', () => {
+      assert.ok(legacyRecovered);
+      assert.equal(legacyReady.undoable, false);
+      assert.match(legacyReady.reason ?? '', /没有快照/);
+    });
+
+    ok('Service Worker 启动时确实调用了恢复（接线被守住）', () => {
+      const bg = readFileSync(resolve(rootDir, 'src/entrypoints/background.ts'), 'utf8');
+      assert.match(
+        bg,
+        /recoverInterruptedTransaction\(\)/,
+        'SW 启动必须调用 recoverInterruptedTransaction()，否则被中断的轮次仍然不可撤销',
+      );
+    });
+
+    // 收尾：clearAll 相关状态
+    storageMap.delete('markai.config');
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

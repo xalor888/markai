@@ -25,6 +25,20 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: '手工删除不再记日志（回到裸 removeTree，即不可撤销）',
+    file: 'src/lib/ai/deletion-executor.ts',
+    from: '        await jRemove(id, { tree: true });\n      } catch {\n        // 瞬时失败（限流/竞态）重试一次',
+    to: '        await chrome.bookmarks.removeTree(id);\n      } catch {\n        // 瞬时失败（限流/竞态）重试一次',
+    expectFail: ['手工确认删除会自己产生一个撤销点'],
+  },
+  {
+    name: '手工删除无条件自开事务（会把 Agent 轮次的日志切成两段）',
+    file: 'src/lib/ai/deletion-executor.ts',
+    from: '  const ownsTransaction = !isRecording();',
+    to: '  const ownsTransaction = true;',
+    expectFail: ['Agent 轮次进行中的手工删除并入该轮'],
+  },
+  {
     name: 'clearUndoPoints 不再真的清空（隐私承诺落空）',
     file: 'src/lib/undo/recorder.ts',
     from: '  await chrome.storage.local.remove(UNDO_STORAGE_KEY);\n}\n\n/** 取出并移除一个撤销点',

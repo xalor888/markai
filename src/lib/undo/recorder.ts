@@ -204,8 +204,10 @@ export async function takeUndoPoint(id?: string): Promise<UndoPoint | null> {
   const points = state.points;
   const idx = id ? points.findIndex((p) => p.id === id) : 0;
   if (idx < 0 || idx >= points.length) return null;
-  const [point] = points.splice(idx, 1);
+  const point = points[idx] ?? null;
+  // 不原地改读取到的数组：真实 storage 给的是副本，但"读到的值就地改"本身就是坏习惯
+  const remaining = points.filter((_, i) => i !== idx);
   // 保留原有 notice：消费一个点不该抹掉"曾丢弃过更早点"的记录
-  await writeUndoPoints(points, state.notice);
-  return point ?? null;
+  await writeUndoPoints(remaining, state.notice);
+  return point;
 }

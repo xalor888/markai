@@ -2,13 +2,14 @@
  * ── MarkAI background Service Worker ──
  * 职责：
  *  1. 浏览器原生书签右键菜单（contextMenus）→ 打开侧边栏并注入种子指令
- *  2. 一次性消息：AI 连接测试 / 删除执行（removeTree 唯一执行点）/ 侧边栏打开 / 种子消费
+ *  2. 一次性消息：AI 连接测试 / 删除执行（转交 deletion-executor，会记入操作日志因此可撤销）/ 侧边栏打开 / 种子消费
  *  3. 聊天长连接 Port：Agent 流式代理（工具调用循环在后台闭环，UI 零 CORS 压力）
  */
 
 import { runAgentTurn } from '@/lib/ai/agent';
 import { ChatError, testConnection } from '@/lib/ai/client';
 import { ensureRoots } from '@/lib/ai/tools';
+import { executeDeletions as runDeletions } from '@/lib/ai/deletion-executor';
 import { normalizeBaseUrl, resolveConfig } from '@/lib/providers';
 import { CONFIG_STORAGE_KEY } from '@/stores/configStore';
 import { applyUndo } from '@/lib/undo/apply';
@@ -334,86 +335,11 @@ async function handleOneShot(msg: OneShotInbound): Promise<OneShotOutbound> {
   }
 }
 
-/** ── 删除执行（UI 确认后唯一删除入口；支持"删除全部"特殊提议） ── */
+/** ── 删除执行：实现在 src/lib/ai/deletion-executor.ts（可单测，且会记入操作日志） ── */
 async function executeDeletions(
   items: { proposalId: string; bookmarkId: string; all?: boolean }[],
 ): Promise<OneShotOutbound> {
-  await ensureRoots();
-  let count = 0;
-  const failed: { proposalId: string; error: string }[] = [];
-
-  // 普通条目并发池 10（Chrome bookmarks API 对高频调用有限流，20 并发易触发批量失败；
-  // 失败重试一次再上报）。批量清理 750 条从 ~10s 降到 ~1.5s
-  const normal = items.filter((it) => it.bookmarkId !== 'markai:all');
-  let cursor = 0;
-  const runOne = async (it: { proposalId: string; bookmarkId: string; all?: boolean }) => {
-    try {
-      if (it.all) throw new Error('非"删除全部"提议携带了多余标志');
-      const nodes = await chrome.bookmarks.get(it.bookmarkId).catch(() => []);
-      const node = nodes[0];
-      if (!node) {
-        // 书签已不存在（如其他窗口已删）：视为目标已达成，避免 UI 卡在可重试的 pending 死循环
-        count++;
-        return;
-      }
-      // 双保险：根文件夹（parentId '0'）与元根永远不可删
-      if (node.parentId === undefined || node.parentId === '0') throw new Error('根文件夹不可删除');
-      try {
-        await chrome.bookmarks.removeTree(it.bookmarkId);
-      } catch {
-        // 瞬时失败（限流/竞态）重试一次
-        await chrome.bookmarks.removeTree(it.bookmarkId);
-      }
-      count++;
-    } catch (e) {
-      failed.push({ proposalId: it.proposalId, error: e instanceof Error ? e.message : String(e) });
-    }
-  };
-  const workers = Array.from({ length: Math.min(10, Math.max(1, normal.length)) }, async () => {
-    while (cursor < normal.length) {
-      const it = normal[cursor++]!;
-      await runOne(it);
-    }
-  });
-  await Promise.all(workers);
-
-  // "删除全部"特殊提议：清空各根目录的子项（根文件夹保留），失败逐项上报
-  const allItem = items.find((it) => it.bookmarkId === 'markai:all');
-  if (allItem) {
-    try {
-      // 纵深防御：'markai:all' 特殊值必须携带 all 标志（防止 storage 脏数据/旧版本误触发清空）
-      if (!allItem.all) throw new Error('缺少删除全部授权标志');
-      const tree = await chrome.bookmarks.getTree();
-      const roots = tree[0]?.children ?? [];
-      const targets: { id: string; title: string }[] = [];
-      for (const root of roots) {
-        for (const child of root.children ?? []) targets.push({ id: child.id, title: child.title || child.id });
-      }
-      let tcursor = 0;
-      const allWorkers = Array.from({ length: Math.min(10, Math.max(1, targets.length)) }, async () => {
-        while (tcursor < targets.length) {
-          const t = targets[tcursor++]!;
-          try {
-            try {
-              await chrome.bookmarks.removeTree(t.id);
-            } catch {
-              await chrome.bookmarks.removeTree(t.id); // 瞬时失败重试一次
-            }
-            count++;
-          } catch (e) {
-            // 单项失败上报（同一 proposalId），UI 侧据此提示部分未删除
-            failed.push({
-              proposalId: allItem.proposalId,
-              error: `删除 ${t.title} 失败：${e instanceof Error ? e.message : String(e)}`,
-            });
-          }
-        }
-      });
-      await Promise.all(allWorkers);
-    } catch (e) {
-      failed.push({ proposalId: allItem.proposalId, error: e instanceof Error ? e.message : String(e) });
-    }
-  }
+  const { count, failed } = await runDeletions(items);
   return { type: 'deletions:result', count, failed };
 }
 

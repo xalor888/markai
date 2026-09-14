@@ -233,11 +233,13 @@ const mockBookmarks = {
         } else {
           for (const k of want) if (storageMap.has(k)) out[k] = storageMap.get(k);
         }
-        return out;
+        // 真实 chrome.storage 会做结构化克隆：读出来的是副本，改它不会影响"存储里的值"。
+        // 替身若返回活引用，就会造出真实环境不存在的串扰（曾让一条断言看到被后续步骤改空的数组）。
+        return structuredClone(out);
       },
       set: async (obj: Record<string, unknown>) => {
         if (storageSetFail) throw new Error('QUOTA_BYTES quota exceeded');
-        for (const [k, v] of Object.entries(obj)) storageMap.set(k, v);
+        for (const [k, v] of Object.entries(obj)) storageMap.set(k, structuredClone(v));
       },
       remove: async (keys: string | string[]) => {
         for (const k of Array.isArray(keys) ? keys : [keys]) storageMap.delete(k);
@@ -2916,6 +2918,147 @@ function ok(name: string, fn: () => void) {
         'Firefox 从未在真实 Firefox 里验证过，不该继续作为发布产物（见 docs/release.md）',
       );
     });
+  }
+
+  /* ── T30: 手工确认的删除也可撤销（删除执行器） ── */
+  console.log('\n[T30] 手工删除可撤销');
+  {
+    const { executeDeletions } = await import('../src/lib/ai/deletion-executor');
+    const { applyUndo } = await import('../src/lib/undo/apply');
+    const {
+      UNDO_STORAGE_KEY,
+      beginUndoTransaction,
+      endUndoTransaction,
+      readUndoPoints,
+      resetUndoTransactionForTest,
+    } = await import('../src/lib/undo/recorder');
+    const { jCreate } = await import('../src/lib/undo/mutations');
+    type UndoOp = import('../src/lib/undo/types').UndoOp;
+
+    const mkFixture = async () => {
+      const folder = (await mockBookmarks.create({ parentId: '1', title: 'T30-FOLDER' })).id;
+      const kids: string[] = [];
+      for (const t of ['k1', 'k2', 'k3']) {
+        kids.push((await mockBookmarks.create({ parentId: folder, title: t, url: `https://t30.test/${t}` })).id);
+      }
+      // 错落的一批顶层书签（与文件夹交替，制造非连续删除）
+      const loose: string[] = [];
+      for (let i = 0; i < 6; i++) {
+        const id = String(nextId++);
+        store.push({
+          id,
+          parentId: '1',
+          title: `T30-loose-${i}`,
+          url: `https://t30.test/loose/${i}`,
+          dateAdded: 40_000 + i,
+        });
+        loose.push(id);
+      }
+      return { folder, kids, loose };
+    };
+
+    // ── A. 确认删除一批（文件夹 + 错落书签）→ 撤销 → 整棵树含顺序复原 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    const fx = await mkFixture();
+    const beforeA = await snapshotTreeObj();
+    const items = [
+      { proposalId: 'p-folder', bookmarkId: fx.folder },
+      ...fx.loose.filter((_, i) => i % 2 === 0).map((id, i) => ({ proposalId: `p-l${i}`, bookmarkId: id })),
+    ];
+    const outA = await executeDeletions(items);
+    const pointsA = await readUndoPoints();
+    const midA = await snapshotTreeObj();
+    const undoA = await applyUndo();
+    const afterA = await snapshotTreeObj();
+
+    ok('手工确认删除会自己产生一个撤销点（不再是永久删除）', () => {
+      assert.equal(outA.count, 4, `应删掉 4 项（1 文件夹 + 3 个错落书签），实际 ${outA.count}`);
+      assert.equal(outA.failed.length, 0);
+      assert.equal(pointsA.length, 1, '应落盘一个撤销点');
+      assert.notEqual(firstTreeDiff(beforeA, midA), null, '这一轮确实删掉了东西');
+    });
+    ok('手工删除后撤销：整棵树含顺序逐节点复原（含被删文件夹的子树）', () => {
+      assert.ok(undoA.ok, `撤销应成功，实际 ${JSON.stringify(undoA)}`);
+      assert.equal(undoA.failures.length, 0);
+      const diff = firstTreeDiff(beforeA, afterA, '', { ignoreIds: true });
+      assert.equal(diff, null, `第一处差异：${diff ?? ''}`);
+    });
+
+    // ── B. 「删除全部」特殊提议同样可撤销 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    const savedStore = [...store];
+    let outcomeB: { count: number; failed: { proposalId: string; error: string }[] } | null = null;
+    let beforeB: TreeNorm[] = [];
+    let afterB: TreeNorm[] = [];
+    let undoB: Awaited<ReturnType<typeof applyUndo>> | null = null;
+    let errB: string | null = null;
+    try {
+      store.length = 0;
+      store.push({ id: '0', title: '', dateAdded: 0 });
+      store.push({ id: '1', title: '书签栏', parentId: '0', dateAdded: 1 });
+      store.push({ id: '2', title: '其他书签', parentId: '0', dateAdded: 1 });
+      store.push({ id: 'B-F1', parentId: '1', title: 'B-F1', dateAdded: 2 });
+      store.push({ id: 'B-c1', parentId: 'B-F1', title: 'B-c1', url: 'https://t30.test/b1', dateAdded: 3 });
+      store.push({ id: 'B-b2', parentId: '1', title: 'B-b2', url: 'https://t30.test/b2', dateAdded: 4 });
+      store.push({ id: 'B-b3', parentId: '2', title: 'B-b3', url: 'https://t30.test/b3', dateAdded: 5 });
+      beforeB = await snapshotTreeObj();
+      outcomeB = await executeDeletions([{ proposalId: 'p-all', bookmarkId: 'markai:all', all: true }]);
+      undoB = await applyUndo();
+      afterB = await snapshotTreeObj();
+    } catch (e) {
+      errB = e instanceof Error ? e.message : String(e);
+    } finally {
+      store.length = 0;
+      store.push(...savedStore);
+    }
+    ok('「删除全部」提议也走同一条可撤销路径', () => {
+      assert.equal(errB, null, `不应抛错：${errB}`);
+      assert.equal(outcomeB!.count, 3, '书签栏 2 项 + 其他书签 1 项');
+      assert.ok(undoB?.ok, `撤销应成功，实际 ${JSON.stringify(undoB)}`);
+      const diff = firstTreeDiff(beforeB, afterB, '', { ignoreIds: true });
+      assert.equal(diff, null, `第一处差异：${diff ?? ''}`);
+    });
+
+    // ── C. 语义不变：根保护 / 已不存在视为达成 / 无删除不产生撤销点 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    const rootOut = await executeDeletions([{ proposalId: 'p-root', bookmarkId: '1' }]);
+    const ghostOut = await executeDeletions([{ proposalId: 'p-ghost', bookmarkId: 'no-such-id' }]);
+    const pointsC = await readUndoPoints();
+    ok('根保护与"已不存在视为达成"语义保持不变', () => {
+      assert.equal(rootOut.count, 0, '根文件夹不可删');
+      assert.equal(rootOut.failed.length, 1);
+      assert.match(rootOut.failed[0]!.error, /根文件夹不可删除/);
+      assert.equal(ghostOut.count, 1, '不存在的条目视为已达成（不报错）');
+      assert.equal(ghostOut.failed.length, 0);
+    });
+    ok('没有实际删除时不产生撤销点（沿用只读轮次的原则）', () => assert.equal(pointsC.length, 0));
+
+    // ── D. Agent 轮次进行中做手工删除：并入那一轮，不切成两段 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    const agentMade = await jCreate({ parentId: '1', title: 'T30-AGENT', url: 'https://t30.test/agent' });
+    void agentMade;
+    await beginUndoTransaction('run-agent-inflight');
+    await jCreate({ parentId: '1', title: 'T30-AGENT-2', url: 'https://t30.test/agent2' });
+    const inside = await executeDeletions([{ proposalId: 'p-inside', bookmarkId: fx.loose[1]! }]);
+    const stillActive = await readUndoPoints(); // 事务未结束 → 还没落盘
+    const onePoint = await endUndoTransaction();
+    const pointsD = await readUndoPoints();
+    ok('Agent 轮次进行中的手工删除并入该轮，不另开也不结束事务', () => {
+      assert.equal(inside.count, 1, '删除本身照常执行');
+      assert.equal(stillActive.length, 0, '不该在轮次中途落盘（否则日志被切成两段）');
+      assert.equal(pointsD.length, 1, '轮次结束后只应有一个撤销点');
+      assert.ok(
+        (onePoint?.ops ?? []).some((o: UndoOp) => o.kind === 'delete'),
+        '该点里应包含手工删除的操作',
+      );
+    });
+
+    resetUndoTransactionForTest();
+    storageMap.delete(UNDO_STORAGE_KEY);
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

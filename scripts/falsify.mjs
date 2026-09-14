@@ -25,6 +25,13 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: '成功路径不再用真实占用核对（估算偏低就当没看见）',
+    file: 'src/stores/aiStore.ts',
+    from: '          if (actual > chatBudgetBytes) {',
+    to: '          if (false) {',
+    expectFail: ['成功写入但真实占用仍超预算时'],
+  },
+  {
     name: '对话写盘失败回到空 catch（没保存成功却装作正常）',
     file: 'src/stores/aiStore.ts',
     from: '        set({ persistError: { message, at } });',
@@ -41,7 +48,7 @@ const cases = [
   {
     name: '对话历史不做预算裁剪（超配额就整段写不进去）',
     file: 'src/stores/aiStore.ts',
-    from: '              const trim = trimConversationsToBudget(capped, CHAT_BUDGET_BYTES);',
+    from: '              const trim = trimConversationsToBudget(capped, chatBudgetBytes);',
     to: '              const trim = { kept: capped, droppedMessages: 0, droppedConversations: 0 };',
     expectFail: ['超预算时先裁剪再落盘'],
   },

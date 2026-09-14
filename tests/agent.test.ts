@@ -3762,6 +3762,32 @@ function ok(name: string, fn: () => void) {
       assert.equal(bytesFromApi, JSON.stringify(storageMap.get(AI_STORAGE_KEY)).length);
     });
 
+    // ── F2. 成功路径也要用真实占用核对估算（估算达标但浏览器说超标 → 如实告知） ──
+    const { setChatBudgetBytes } = await import('../src/stores/aiStore');
+    useAIStore.setState({ persistError: null, persistNotice: null });
+    storageMap.delete(AI_STORAGE_KEY);
+    setChatBudgetBytes(1); // 极端预算：无论怎么裁剪都不可能达标（activeId/墓碑等零碎字段仍在）
+    useAIStore.setState({
+      conversations: [conv('cross', 1, [msg('8', '一点点内容')])],
+      messages: [msg('8', '一点点内容')],
+      activeId: 'cross',
+      deletedIds: ['tomb-1', 'tomb-2'],
+    });
+    await useAIStore.getState()._persist(true);
+    const crossNotice = useAIStore.getState().persistNotice;
+    const crossErr = useAIStore.getState().persistError;
+    const crossStored = storageMap.has(AI_STORAGE_KEY);
+    const crossActual = await chrome.storage.local.getBytesInUse(AI_STORAGE_KEY);
+    setChatBudgetBytes(CHAT_BUDGET_BYTES);
+    ok('成功写入但真实占用仍超预算时，如实告知（估算与浏览器计量有差距）', () => {
+      assert.equal(crossErr, null, '这一次是写成功的');
+      assert.ok(crossStored, '内容确实写进去了');
+      assert.ok(crossActual > 1, '浏览器报告的占用确实超了那个极端预算');
+      assert.ok(crossNotice, '应留下如实提示');
+      assert.match(crossNotice!, /真实占用/);
+      assert.match(crossNotice!, /超过了对话预算/);
+    });
+
     // ── G. 正常路径：不产生任何提示 ──
     useAIStore.setState({ persistError: null, persistNotice: null });
     storageMap.delete(AI_STORAGE_KEY);

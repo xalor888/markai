@@ -31,7 +31,7 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
-| 测试 | `npm test` | **233 项全绿**（… → 205 → 206 → 212 → 222 → 233） |
+| 测试 | `npm test` | **234 项全绿**（… → 205 → 206 → 212 → 222 → 233 → 234） |
 | 构建 | `npm run build` | 通过，`.output/chrome-mv3` 788.17 kB |
 | 版本 | `package.json` | **0.2.10（已发版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
@@ -172,8 +172,9 @@ Chromium 的 `index` 是「移除源之前」坐标，而我们要的是「移�
   提示文案写明"这段对话没有保存成功"并附上 `getBytesInUse()` 读到的**真实占用**；
 - UI 上是一条**常驻警示条**（不是一闪而过的 toast），可手动关闭。
 
-至此 `chrome.storage.local` 里的两坨主要数据都有如实护栏；顺带把一直没用起来的 `getBytesInUse()` 用上了
-（替身也补了这个 API，按 JSON 字节数建模）。
+至此 `chrome.storage.local` 里的两坨主要数据都有如实护栏；`getBytesInUse()` 也用上了两处：失败时说清
+**真实占用**，成功时再用它**核对我们的估算**（估算达标但浏览器说超标 → 同样如实告知，因为"写成功"不等于"占用合理"）。
+替身补了这个 API（按 JSON 字节数建模），预算另有测试缝（`setChatBudgetBytes`）以便确定性地验证这条路径。
 
 **被中断的轮次也能撤销（2026-09-14 修）**：原先 `endUndoTransaction` 是**唯一**落盘点——
 操作只存在内存里。MV3 的 Service Worker 在轮次跑到一半被杀（长任务，或用户关掉侧边栏导致保活

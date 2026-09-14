@@ -28,6 +28,14 @@ export const AI_STORAGE_KEY = 'markai.ai';
  */
 export const CHAT_BUDGET_BYTES = 6 * 1024 * 1024;
 
+/** 当前生效的预算（测试可调，用来确定性地验证"真实占用超标"这条路径） */
+let chatBudgetBytes = CHAT_BUDGET_BYTES;
+
+/** 仅测试用：替换对话预算 */
+export function setChatBudgetBytes(bytes: number): void {
+  chatBudgetBytes = bytes;
+}
+
 /** 消息条数上限（持久化时裁剪） */
 const MAX_MESSAGES = 60;
 /** 发送给模型的历史条数 */
@@ -880,7 +888,7 @@ export const useAIStore = create<AIState>((set, get) => ({
               const capped = conversations.map((c) => ({ ...c, messages: (c.messages ?? []).slice(-MAX_MESSAGES) }));
               // 容量护栏：会话数量没有上限，超预算时丢最旧的（先把消息丢空，再丢整个会话），
               // 并把丢弃的事实如实记下来——不静默降级。
-              const trim = trimConversationsToBudget(capped, CHAT_BUDGET_BYTES);
+              const trim = trimConversationsToBudget(capped, chatBudgetBytes);
               if (trim.droppedMessages > 0 || trim.droppedConversations > 0) {
                 const what = describeChatTrim(trim) ?? '';
                 set({ persistNotice: `对话记录已超出本地存储预算，为了保存最近的对话，已丢弃${what}。` });
@@ -896,6 +904,19 @@ export const useAIStore = create<AIState>((set, get) => ({
         });
         // 写入成功：清掉上一次的失败状态（提示是一次性的，不该长期挂着）
         if (get().persistError) set({ persistError: null });
+        // 成功也要用**真实占用**核对一次估算：我们的预算是按 JSON 长度估的，
+        // 若浏览器报告的占用仍然超过预算（估算偏低、或墓碑等零碎字段撑大了体积），
+        // 就如实告知——"写成功了"不等于"占用合理"。
+        try {
+          const actual = await chrome.storage.local.getBytesInUse(AI_STORAGE_KEY);
+          if (actual > chatBudgetBytes) {
+            set({
+              persistNotice: `本地存储的真实占用（约 ${(actual / 1024 / 1024).toFixed(1)} MiB）超过了对话预算（约 ${(chatBudgetBytes / 1024 / 1024).toFixed(1)} MiB）：估算与浏览器计量存在差距。建议清空更早的对话。`,
+            });
+          }
+        } catch {
+          // 拿不到占用就不做这项核对（不影响这次写入本身）
+        }
       } catch (e) {
         // 原先这里是空 catch，注释说"下次写入会重试"——但超配额时之后**每次**都会失败，
         // 而界面照常显示历史，等于把"没保存成功"呈现成"好好的"。现在如实上报，

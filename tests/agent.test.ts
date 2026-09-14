@@ -2888,6 +2888,27 @@ function ok(name: string, fn: () => void) {
       assert.match(privacyDoc, /明文/, '要如实说明 API Key 是明文存储');
     });
 
+    // 隐私说明向用户承诺「设置页可以清除撤销记录」——这句话必须有测试兜着，
+    // 否则它只是一句架构描述（原先该行为写在 React 处理函数里，无从验证）。
+    const { clearUndoPoints, UNDO_STORAGE_KEY: UNDO_KEY } = await import('../src/lib/undo/recorder');
+    storageMap.set(UNDO_KEY, {
+      points: [{ id: 'p-clear', runId: 'r', createdAt: 1, ops: [], containsDelete: false }],
+    });
+    await clearUndoPoints();
+    const clearedAfter = storageMap.has(UNDO_KEY);
+    ok('clearUndoPoints 真的清空撤销记录（隐私说明的承诺可核对）', () =>
+      assert.equal(clearedAfter, false, '清空后存储里不该还有 markai.undo'),
+    );
+
+    ok('设置页的清空动作确实调用了 clearUndoPoints（接线也被守住）', () => {
+      const cfg = readFileSync(resolve(rootDir, 'src/components/options/config-form.tsx'), 'utf8');
+      assert.match(
+        cfg,
+        /clearUndoPoints\(/,
+        '设置页必须调用 clearUndoPoints()，否则隐私说明里的"可以清除"就是假话',
+      );
+    });
+
     ok('release workflow 不再发布未验证的 Firefox 产物', () => {
       const rel = readFileSync(resolve(rootDir, '.github/workflows/release.yml'), 'utf8');
       assert.ok(

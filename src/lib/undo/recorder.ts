@@ -186,6 +186,18 @@ export async function writeUndoPoints(points: UndoPoint[], notice?: string): Pro
   }
 }
 
+/**
+ * 清空全部撤销记录（设置页「清空本地数据」用）。
+ *
+ * 撤销记录里存着**被删书签的子树快照**，属于书签数据的一部分——用户必须有一个入口能删掉它，
+ * 否则 docs/privacy.md 里"如何清除"就只能写"清不掉"。**不吞错**：清不掉要让调用方的
+ * try/catch 如实提示，而不是显示"已清空"。
+ */
+export async function clearUndoPoints(): Promise<void> {
+  lastWriteError = null;
+  await chrome.storage.local.remove(UNDO_STORAGE_KEY);
+}
+
 /** 取出并移除一个撤销点（不指定 id 时取最新的） */
 export async function takeUndoPoint(id?: string): Promise<UndoPoint | null> {
   const state = await readUndoState();

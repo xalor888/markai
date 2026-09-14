@@ -2,7 +2,7 @@ import { CheckCircle2, Database, Eye, EyeOff, Loader2, Monitor, Moon, Palette, P
 import { useEffect, useRef, useState } from 'react';
 import { useConfigStore } from '@/stores/configStore';
 import { useAIStore, AI_STORAGE_KEY } from '@/stores/aiStore';
-import { UNDO_STORAGE_KEY } from '@/lib/undo/recorder';
+import { clearUndoPoints } from '@/lib/undo/recorder';
 import { useThemeStore, type Theme } from '@/stores/themeStore';
 import { PROVIDERS, getPreset } from '@/lib/providers';
 import type { OneShotOutbound } from '@/lib/ai/types';
@@ -189,7 +189,7 @@ export function ConfigForm() {
       await chrome.storage.local.remove(AI_STORAGE_KEY);
       // 撤销记录里存着被删书签的子树快照（也是书签数据），「清空本地数据」必须一并清掉，
       // 否则用户没有任何入口能删除它——隐私说明里也就只能写"清不掉"。
-      await chrome.storage.local.remove(UNDO_STORAGE_KEY);
+      await clearUndoPoints();
       await useAIStore.getState().refreshUndo();
       // 3) 重建：墓碑 + 新空会话一起写回（remove 后其他窗口合并时墓碑仍在）
       useAIStore.setState({ messages: [], pendingDeletions: [], conversations: [], activeId: null });

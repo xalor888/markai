@@ -25,6 +25,20 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: 'clearUndoPoints 不再真的清空（隐私承诺落空）',
+    file: 'src/lib/undo/recorder.ts',
+    from: '  await chrome.storage.local.remove(UNDO_STORAGE_KEY);\n}\n\n/** 取出并移除一个撤销点',
+    to: '  // reverted\n}\n\n/** 取出并移除一个撤销点',
+    expectFail: ['clearUndoPoints 真的清空撤销记录'],
+  },
+  {
+    name: '设置页不再调用 clearUndoPoints（接线断了）',
+    file: 'src/components/options/config-form.tsx',
+    from: '      await clearUndoPoints();',
+    to: '      // reverted',
+    expectFail: ['设置页的清空动作确实调用了 clearUndoPoints'],
+  },
+  {
     name: '权限文档与 manifest 漂移（文档少列一项）',
     file: 'docs/permissions.md',
     from: 'manifest-permissions: bookmarks, storage, tabs, tabGroups, contextMenus, sidePanel',

@@ -33,7 +33,7 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
 | 测试 | `npm test` | **212 项全绿**（95 → 118 → 140 → 145 → 157 → 164 → 166 → 177 → 181 → 183 → 189 → 194 → 205 → 206 → 212） |
 | 构建 | `npm run build` | 通过，`.output/chrome-mv3` 788.17 kB |
-| 版本 | `package.json` | **0.2.8（已发版）** |
+| 版本 | `package.json` | **0.2.9（已发版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
 | 发布 | `.github/workflows/release.yml` | `v*` tag → 构建 + Release |
 
@@ -254,6 +254,7 @@ sort_folder + merge_folders 再撤销）抓出**并发批量移动**的坑——
 > 版本节奏（已执行）：P0 的修复没有单独发版，与 P1（撤销）一起打成 **v0.2.2**（头部功能才值得一个版本号）；
 > P2 修掉的撤销缺陷在 v0.2.2 里**已经发布**，因此单独发了补丁版 **v0.2.3**（含说明"修了什么、是否该升级"的发布说明）。
 > **v0.2.4** 收了「撤销覆盖删除」与容量护栏两块（发布说明里写明了升级须知：v0.2.3 及更早写下的旧撤销点没有删除快照，会被如实拒绝整轮撤销）。
+> **v0.2.9** 把 dryRun 预览扩到 cleanup_sweep 与 auto_categorize（三个批量工具齐）。
 > **v0.2.8** 收了「一键去重」（确定保留规则 + dryRun 预览，工具数 30 → 31）。
 > **v0.2.7** 收了「撤销历史面板」（撤销从"盲点一次"变成可跳选的可控回退）。
 > **v0.2.6** 收了「手工确认的删除也可撤销」（此前那一步是永久的）。

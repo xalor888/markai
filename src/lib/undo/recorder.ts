@@ -5,6 +5,7 @@
  * MV3 下 Service Worker 随时可能被回收，所以撤销点必须落盘（chrome.storage.local），
  * 否则「撤销刚才那一步」会在 SW 重启后变成一个空承诺。
  */
+import { UNDO_BUDGET_BYTES, describeUndoTrim, trimPointsToBudget } from './journal';
 import type { UndoOp, UndoPoint } from './types';
 
 export const UNDO_STORAGE_KEY = 'markai.undo';
@@ -93,9 +94,13 @@ export async function endUndoTransaction(): Promise<UndoPoint | null> {
       : {}),
     containsDelete: tx.containsDelete,
   };
-  const points = await readUndoPoints();
-  points.unshift(point);
-  await writeUndoPoints(points.slice(0, MAX_UNDO_POINTS));
+  const state = await readUndoState();
+  // 先按条数上限收敛，再按字节预算裁剪：超配额时**丢最旧的并如实告知**，
+  // 而不是让整块写入失败、把「写不进去」显示成「没有可撤销的操作」。
+  const candidates = [point, ...state.points].slice(0, MAX_UNDO_POINTS);
+  const trim = trimPointsToBudget(candidates, budgetBytes);
+  const notice = describeUndoTrim(trim) ?? state.notice;
+  await writeUndoPoints(trim.kept, notice);
   return point;
 }
 
@@ -104,30 +109,91 @@ export function resetUndoTransactionForTest(): void {
   active = null;
 }
 
-export async function readUndoPoints(): Promise<UndoPoint[]> {
-  try {
-    const data = await chrome.storage.local.get(UNDO_STORAGE_KEY);
-    const raw = data[UNDO_STORAGE_KEY] as { points?: UndoPoint[] } | undefined;
-    return Array.isArray(raw?.points) ? raw.points : [];
-  } catch {
-    return [];
-  }
+/** 存储结构（v2 起带 notice/noticeAt；v1 只有 points，读取时兼容） */
+interface StoredUndo {
+  points?: UndoPoint[];
+  /** 上一次落盘时的裁剪/失败说明（给用户看的实话） */
+  notice?: string;
+  noticeAt?: number;
 }
 
-export async function writeUndoPoints(points: UndoPoint[]): Promise<void> {
+export interface UndoState {
+  points: UndoPoint[];
+  /** 裁剪或写入异常的人话说明；没有异常时为 undefined */
+  notice?: string;
+  /** notice 产生的时间（UI 据此只提示一次） */
+  noticeAt?: number;
+}
+
+/** 最近一次**写入失败**（原文 + 发生时间）。SW 内存态：重启即丢（那时也没人会看到旧提示） */
+let lastWriteError: { message: string; at: number } | null = null;
+
+/**
+ * 撤销点预算。默认取 UNDO_BUDGET_BYTES（依据 chrome.storage.local 的 10 MiB 配额）。
+ * 留成可变是为了测试能注入极小预算来验证裁剪逻辑，而不必造出几 MB 的假数据。
+ */
+let budgetBytes = UNDO_BUDGET_BYTES;
+export function setUndoBudgetBytes(bytes: number): void {
+  budgetBytes = bytes;
+}
+
+export async function readUndoPoints(): Promise<UndoPoint[]> {
+  return (await readUndoState()).points;
+}
+
+/** 读撤销点 + 如实状态（notice 可能来自历史落盘，也可能来自本次写入失败） */
+export async function readUndoState(): Promise<UndoState> {
+  let raw: StoredUndo | undefined;
   try {
-    await chrome.storage.local.set({ [UNDO_STORAGE_KEY]: { points } });
+    const data = await chrome.storage.local.get(UNDO_STORAGE_KEY);
+    raw = data[UNDO_STORAGE_KEY] as StoredUndo | undefined;
   } catch {
-    // 写不进存储不应影响书签操作本身
+    // 读不出来：既没有点，也不能假装一切正常
+    return lastWriteError
+      ? { points: [], notice: lastWriteError.message, noticeAt: lastWriteError.at }
+      : { points: [], notice: '读取撤销记录失败', noticeAt: 0 };
+  }
+  const points = Array.isArray(raw?.points) ? raw.points : [];
+  if (lastWriteError) {
+    // noticeAt 用错误发生的时间（而不是"现在"），否则每次刷新都算新提示、反复打扰
+    return { points, notice: lastWriteError.message, noticeAt: lastWriteError.at };
+  }
+  return {
+    points,
+    ...(raw?.notice ? { notice: raw.notice } : {}),
+    ...(raw?.noticeAt ? { noticeAt: raw.noticeAt } : {}),
+  };
+}
+
+/**
+ * 落盘。**不再吞掉错误**：写失败必须能被上层看见（否则超配额时表现为
+ * 「没有可撤销的操作」，把失败说成了「本来就没有」）。
+ * 仍然不向调用方抛错——写不进存储不该让书签操作本身失败。
+ */
+export async function writeUndoPoints(points: UndoPoint[], notice?: string): Promise<{ ok: boolean; error?: string }> {
+  const payload: StoredUndo = {
+    points,
+    ...(notice ? { notice, noticeAt: Date.now() } : {}),
+  };
+  try {
+    await chrome.storage.local.set({ [UNDO_STORAGE_KEY]: payload });
+    lastWriteError = null;
+    return { ok: true };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    lastWriteError = { message: `撤销记录写入失败（${msg}），本次操作将无法撤销`, at: Date.now() };
+    return { ok: false, error: msg };
   }
 }
 
 /** 取出并移除一个撤销点（不指定 id 时取最新的） */
 export async function takeUndoPoint(id?: string): Promise<UndoPoint | null> {
-  const points = await readUndoPoints();
+  const state = await readUndoState();
+  const points = state.points;
   const idx = id ? points.findIndex((p) => p.id === id) : 0;
   if (idx < 0 || idx >= points.length) return null;
   const [point] = points.splice(idx, 1);
-  await writeUndoPoints(points);
+  // 保留原有 notice：消费一个点不该抹掉"曾丢弃过更早点"的记录
+  await writeUndoPoints(points, state.notice);
   return point ?? null;
 }

@@ -31,7 +31,7 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
-| 测试 | `npm test` | **166 项全绿**（95 → 118 → 140 → 145 → 157 → 164 → 166） |
+| 测试 | `npm test` | **177 项全绿**（95 → 118 → 140 → 145 → 157 → 164 → 166 → 177） |
 | 构建 | `npm run build` | 通过，`.output/chrome-mv3` 788.17 kB |
 | 版本 | `package.json` | **0.2.3（已发版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
@@ -158,6 +158,14 @@ Chromium 的 `index` 是「移除源之前」坐标，而我们要的是「移�
 
 位置信息有两级：**检查点**（精确，工具负责在动手前取）+ 逐条 `index`（兜底，仅在缺少检查点时用，
 并发下不可靠）。这条契约写在 `mutations.ts` 的 `jRemove` 注释里，调用方必须遵守。
+
+**容量护栏（删除快照带来的新问题，已修）**：删除快照让撤销点可能很大。`chrome.storage.local`
+的配额是 **10485760 字节（10 MiB）**（来源：Chromium `extensions/common/api/storage.json` 的
+`local.QUOTA_BYTES`；只有申请 `unlimitedStorage` 才被忽略，本扩展没申请），且**超限时写入直接失败**。
+原先 `writeUndoPoints` 把这个错误 catch 掉了——于是超配额会表现为「没有可撤销的操作」，
+把失败说成了「本来就没有」。现在：撤销点按 **4 MiB** 预算裁剪（余下留给聊天与配置），
+**新的优先、丢最旧的**；单点过大则**单独跳过**（不牵连其他点）；两种丢弃都写进存疑说明并在界面提示一次。
+落盘失败也不再静默，`readUndoState()` 会把它作为 notice 上报。
 
 **边界（别夸大这条能力）**：撤销覆盖的是 **Agent 轮次内**的写操作。用户在「待删清单」里
 **手工确认执行**的删除走的是 `background.executeDeletions`，它不在任何 Agent 事务里，

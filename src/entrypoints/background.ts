@@ -12,7 +12,7 @@ import { ensureRoots } from '@/lib/ai/tools';
 import { normalizeBaseUrl, resolveConfig } from '@/lib/providers';
 import { CONFIG_STORAGE_KEY } from '@/stores/configStore';
 import { applyUndo } from '@/lib/undo/apply';
-import { readUndoPoints } from '@/lib/undo/recorder';
+import { readUndoState } from '@/lib/undo/recorder';
 import type {
   AIConfig,
   ChatInbound,
@@ -91,7 +91,7 @@ export default defineBackground(() => {
           }
           if (msg.type === 'undo:list') {
             // 读不到就当作没有撤销点，UI 显示按钮为不可用即可
-            sendResponse({ type: 'undo:list:result', points: [] } satisfies OneShotOutbound);
+            sendResponse({ type: 'undo:list:result', points: [], notice: '读取撤销记录失败' } satisfies OneShotOutbound);
             return;
           }
           if (msg.type === 'undo:apply') {
@@ -311,7 +311,14 @@ async function handleOneShot(msg: OneShotInbound): Promise<OneShotOutbound> {
     }
 
     case 'undo:list': {
-      return { type: 'undo:list:result', points: await readUndoPoints() };
+      // 连同 notice 一起回传：撤销点被裁剪/写失败时必须让 UI 能说出实话
+      const state = await readUndoState();
+      return {
+        type: 'undo:list:result',
+        points: state.points,
+        ...(state.notice ? { notice: state.notice } : {}),
+        ...(state.noticeAt ? { noticeAt: state.noticeAt } : {}),
+      };
     }
 
     case 'undo:apply': {

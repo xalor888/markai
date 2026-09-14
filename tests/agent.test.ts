@@ -236,6 +236,7 @@ const mockBookmarks = {
         return out;
       },
       set: async (obj: Record<string, unknown>) => {
+        if (storageSetFail) throw new Error('QUOTA_BYTES quota exceeded');
         for (const [k, v] of Object.entries(obj)) storageMap.set(k, v);
       },
       remove: async (keys: string | string[]) => {
@@ -268,6 +269,9 @@ const mockBookmarks = {
 
 /** 注入 chrome.runtime.sendMessage 的响应；测试按需覆盖 */
 let sendMessageMock: (msg: unknown) => unknown = () => undefined;
+
+/** 故障注入：模拟 chrome.storage.local.set 失败（超配额） */
+let storageSetFail = false;
 
 /** 测试期清单版本：默认取 package.json（与 WXT 注入一致），用例可临时覆盖 */
 const pkgVersion = (
@@ -2637,6 +2641,196 @@ function ok(name: string, fn: () => void) {
     resetUndoTransactionForTest();
     storageMap.delete(UNDO_STORAGE_KEY);
     storageMap.delete('markai.config');
+  }
+
+  /* ── T28: 撤销点的容量护栏与丢弃透明化 ── */
+  console.log('\n[T28] 撤销点容量护栏');
+  {
+    const { pointBytes, trimPointsToBudget, describeUndoTrim, UNDO_BUDGET_BYTES } = await import(
+      '../src/lib/undo/journal'
+    );
+    const {
+      UNDO_STORAGE_KEY,
+      beginUndoTransaction,
+      endUndoTransaction,
+      readUndoState,
+      resetUndoTransactionForTest,
+      setUndoBudgetBytes,
+    } = await import('../src/lib/undo/recorder');
+    const { useAIStore } = await import('../src/stores/aiStore');
+    const { useToastStore } = await import('../src/lib/toast');
+    type UndoPointT = import('../src/lib/undo/types').UndoPoint;
+
+    const mkPoint = (id: string, urlLen = 10): UndoPointT => ({
+      id,
+      runId: `r-${id}`,
+      createdAt: Date.now(),
+      containsDelete: false,
+      ops: [
+        {
+          kind: 'create',
+          id: `n-${id}`,
+          title: id,
+          isFolder: false,
+          ...(urlLen > 0 ? {} : {}),
+        },
+        { kind: 'update', id: `u-${id}`, title: id, before: { url: 'x'.repeat(urlLen) } },
+      ],
+    });
+
+    ok('pointBytes 按 JSON 序列化长度计量（与 storage 配额口径一致）', () => {
+      const p1 = mkPoint('a');
+      assert.equal(pointBytes(p1), JSON.stringify(p1).length);
+      assert.ok(pointBytes(mkPoint('b', 5000)) > pointBytes(p1), '内容越大，字节数越大');
+    });
+
+    ok('预算内按新→旧保留，超出预算丢最旧的', () => {
+      const pts = [mkPoint('1', 4000), mkPoint('2', 4000), mkPoint('3', 4000)];
+      const budget = pointBytes(pts[0]!) + pointBytes(pts[1]!) + 10; // 只装得下两个
+      const r = trimPointsToBudget(pts, budget);
+      assert.deepEqual(
+        r.kept.map((p) => p.id),
+        ['1', '2'],
+        '新的在前，保留最新的两个',
+      );
+      assert.deepEqual(
+        r.droppedNoRoom.map((p) => p.id),
+        ['3'],
+        '最旧的被挤出',
+      );
+      assert.equal(r.droppedTooLarge.length, 0);
+    });
+
+    ok('单点超预算时只跳过它，不牵连其他撤销点', () => {
+      const huge = mkPoint('huge', 8000);
+      const budget = Math.floor(pointBytes(huge) / 2);
+      const small = mkPoint('small', 10);
+      const r = trimPointsToBudget([huge, small], budget);
+      assert.deepEqual(r.droppedTooLarge.map((p) => p.id), ['huge']);
+      assert.deepEqual(
+        r.kept.map((p) => p.id),
+        ['small'],
+        '超大点不该把还能用的旧点一起清空',
+      );
+    });
+
+    ok('describeUndoTrim 把人话说明写全（两种丢弃都提）', () => {
+      const huge = mkPoint('huge', 8000);
+      const budget = Math.floor(pointBytes(huge) / 2);
+      const text = describeUndoTrim(trimPointsToBudget([huge, mkPoint('a', 10), mkPoint('b', 10)], budget));
+      assert.match(text ?? '', /过大/);
+      assert.match(text ?? '', /未保留撤销记录/);
+      assert.equal(describeUndoTrim({ kept: [], droppedTooLarge: [], droppedNoRoom: [] }), undefined);
+    });
+
+    ok('默认预算按 chrome.storage.local 配额留出余量（4 MiB / 10 MiB）', () => {
+      assert.equal(UNDO_BUDGET_BYTES, 4 * 1024 * 1024);
+      assert.ok(UNDO_BUDGET_BYTES < 10 * 1024 * 1024, '必须小于 storage.local 的 10 MiB 配额');
+    });
+
+    // ── 落盘层：超预算丢最旧并留下 notice ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    setUndoBudgetBytes(2000); // 极小预算，逼出裁剪
+    // 让撤销点的体量真的随 payLen 变化：create 操作只记新建 id（很小），
+    // 而 update 操作会记下**改动前的旧值**——所以先建个长 URL，再改一次。
+    const mkTinyTx = async (runId: string, payLen: number) => {
+      await beginUndoTransaction(runId);
+      const { jCreate, jUpdate } = await import('../src/lib/undo/mutations');
+      const node = await jCreate({
+        parentId: '2',
+        title: `T28-${runId}`,
+        url: `https://t28.test/${'x'.repeat(payLen)}`,
+      });
+      await jUpdate(node.id, { url: `https://t28.test/${runId}-new` });
+      return endUndoTransaction();
+    };
+    await mkTinyTx('r1', 10);
+    await mkTinyTx('r2', 700);
+    await mkTinyTx('r3', 700);
+    const st = await readUndoState();
+    ok('超预算时丢最旧的、并留下如实 notice（不再静默）', () => {
+      assert.ok(st.points.length >= 1, '至少保留最新的点');
+      assert.ok(st.points.length < 3, `应丢掉了旧点，实际 ${st.points.length}`);
+      assert.match(st.notice ?? '', /丢弃了/, `应有丢弃说明，实际「${st.notice}」`);
+      assert.ok((st.noticeAt ?? 0) > 0, 'notice 应带时间戳供 UI 只提示一次');
+    });
+
+    // ── 单点过大：不保留，并说明"未保留撤销记录" ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    setUndoBudgetBytes(300);
+    await mkTinyTx('huge', 5000);
+    const stHuge = await readUndoState();
+    ok('单点超过预算时不保留，并说明原因（而不是假装没发生）', () => {
+      assert.equal(stHuge.points.length, 0, '放不下的点不该硬写');
+      assert.match(stHuge.notice ?? '', /过大|未保留/, `应说明未保留，实际「${stHuge.notice}」`);
+    });
+
+    // ── 写入失败：不再吞错，readUndoState 如实上报 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    setUndoBudgetBytes(UNDO_BUDGET_BYTES);
+    storageSetFail = true;
+    await mkTinyTx('fail', 10);
+    storageSetFail = false;
+    const stFail = await readUndoState();
+    ok('写入失败不再被吞掉，能如实上报', () => {
+      assert.match(stFail.notice ?? '', /写入失败/, `应上报写入失败，实际「${stFail.notice}」`);
+    });
+
+    // ── 兼容性：旧结构（只有 points）仍能读 ──
+    storageMap.set(UNDO_STORAGE_KEY, { points: [mkPoint('legacy')] });
+    const stLegacy = await readUndoState();
+    ok('兼容旧存储结构（只有 points、没有 notice）', () => {
+      assert.equal(stLegacy.points.length, 1);
+      assert.equal(stLegacy.points[0]!.id, 'legacy');
+    });
+
+    // ── Store 层：notice 呈现给用户，且同一条只提示一次 ──
+    const noticePoint = mkPoint('np');
+    let listedNotice: string | undefined = '撤销记录空间已满，丢弃了 2 个更早的撤销点';
+    let listedAt = 111;
+    sendMessageMock = (msg) => {
+      const m = msg as { type?: string };
+      if (m.type === 'undo:list') {
+        return {
+          type: 'undo:list:result',
+          points: [noticePoint],
+          ...(listedNotice ? { notice: listedNotice } : {}),
+          ...(listedAt ? { noticeAt: listedAt } : {}),
+        };
+      }
+      return undefined;
+    };
+    useToastStore.setState({ toasts: [] });
+    useAIStore.setState({ undoNotice: null, undoNoticeAt: null });
+    // 数"提示动作"而不是数 toast 列表：toast store 自带同内容去重，
+    // 数列表会让"根本没做去重"也看起来只提示了一次（这条测试第一版就是这样假绿的）。
+    const origPush = useToastStore.getState().push;
+    const notices: string[] = [];
+    useToastStore.setState({
+      push: (t) => {
+        if (t.title === '撤销记录有变更') notices.push(t.description ?? '');
+        return origPush(t);
+      },
+    });
+    await useAIStore.getState().refreshUndo();
+    ok('notice 会呈现给用户（store 保存 + 提示一次）', () => {
+      assert.equal(useAIStore.getState().undoNotice, listedNotice);
+      assert.equal(notices.length, 1, `应提示一次，实际 ${notices.length}`);
+    });
+    await useAIStore.getState().refreshUndo(); // 同一条 noticeAt：不该重复提示
+    ok('同一条 notice 不重复打扰（noticeAt 相同只提示一次）', () =>
+      assert.equal(notices.length, 1, `不应重复提示，实际 ${notices.length}`),
+    );
+    useToastStore.setState({ push: origPush });
+
+    sendMessageMock = () => undefined;
+    useToastStore.setState({ toasts: [] });
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    setUndoBudgetBytes(UNDO_BUDGET_BYTES);
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

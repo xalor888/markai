@@ -91,3 +91,78 @@ export function undoReadiness(point: UndoPoint | null | undefined): UndoReadines
 export function describeUndoPoint(point: UndoPoint): string {
   return summarizeOps(point.ops);
 }
+
+/**
+ * 撤销点占用的字节数。
+ * 与 chrome.storage 的计量方式一致：对值做 JSON 序列化后的长度
+ * （extensions/common/api/storage.json：local 的 QUOTA_BYTES = 10485760，
+ * 「as measured by the JSON stringification of every value plus every key's length」）。
+ */
+export function pointBytes(point: UndoPoint): number {
+  return JSON.stringify(point).length;
+}
+
+/**
+ * 撤销点存储的总预算。
+ *
+ * 依据：`chrome.storage.local.QUOTA_BYTES = 10485760`（10 MiB，来自 Chromium 的
+ * extensions/common/api/storage.json；只有申请 `unlimitedStorage` 才被忽略，
+ * 而本扩展没申请）。`markai.undo` 与聊天记录（`markai.ai`）、配置共用这 10 MiB，
+ * 所以给撤销点划 4 MiB，余下留给聊天与配置。
+ */
+export const UNDO_BUDGET_BYTES = 4 * 1024 * 1024;
+
+export interface UndoTrimResult {
+  kept: UndoPoint[];
+  /** 单点就超过预算、根本放不下（硬留会让整块存储写失败） */
+  droppedTooLarge: UndoPoint[];
+  /** 预算被更新的点占满而挤出的（新的在前） */
+  droppedNoRoom: UndoPoint[];
+}
+
+/**
+ * 按字节预算裁剪撤销点（**新的在前**）。
+ *
+ * 规则刻意区分两种丢弃：
+ * - 单点超过预算：**跳过它**，但不牵连其他点（否则一次超大操作会把所有撤销能力一起清空）；
+ * - 预算不足：丢最旧的。
+ * 调用方必须把丢弃如实告知用户——静默丢弃等于让「没有可撤销的操作」变成假话。
+ */
+export function trimPointsToBudget(
+  points: UndoPoint[],
+  budgetBytes: number = UNDO_BUDGET_BYTES,
+): UndoTrimResult {
+  const kept: UndoPoint[] = [];
+  const droppedTooLarge: UndoPoint[] = [];
+  const droppedNoRoom: UndoPoint[] = [];
+  let total = 0;
+  for (const p of points) {
+    const size = pointBytes(p);
+    if (size > budgetBytes) {
+      droppedTooLarge.push(p);
+      continue;
+    }
+    if (total + size <= budgetBytes) {
+      kept.push(p);
+      total += size;
+    } else {
+      droppedNoRoom.push(p);
+    }
+  }
+  return { kept, droppedTooLarge, droppedNoRoom };
+}
+
+/** 把裁剪结果写成给用户看的一句话（无可说时返回 undefined） */
+export function describeUndoTrim(result: UndoTrimResult): string | undefined {
+  const parts: string[] = [];
+  if (result.droppedTooLarge.length > 0) {
+    const biggest = Math.max(...result.droppedTooLarge.map(pointBytes));
+    parts.push(
+      `有 ${result.droppedTooLarge.length} 次操作过大（约 ${(biggest / (1024 * 1024)).toFixed(1)} MB），未保留撤销记录`,
+    );
+  }
+  if (result.droppedNoRoom.length > 0) {
+    parts.push(`撤销记录空间已满，丢弃了 ${result.droppedNoRoom.length} 个更早的撤销点`);
+  }
+  return parts.length > 0 ? parts.join('；') : undefined;
+}

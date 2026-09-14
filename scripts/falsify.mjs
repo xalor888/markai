@@ -25,6 +25,48 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: '预算裁剪失效（超预算不再丢最旧）',
+    file: 'src/lib/undo/journal.ts',
+    from: '    if (total + size <= budgetBytes) {',
+    to: '    if (true) {',
+    expectFail: ['预算内按新→旧保留，超出预算丢最旧的', '超预算时丢最旧的'],
+  },
+  {
+    name: '单点过大时不再单独跳过（会牵连其他点）',
+    file: 'src/lib/undo/journal.ts',
+    from: '      droppedTooLarge.push(p);\n      continue;',
+    to: '      droppedNoRoom.push(p);\n      continue;',
+    expectFail: ['单点超预算时只跳过它'],
+  },
+  {
+    name: '丢弃说明不再生成（静默丢弃）',
+    file: 'src/lib/undo/journal.ts',
+    from: "  return parts.length > 0 ? parts.join('；') : undefined;",
+    to: '  return undefined;',
+    expectFail: ['describeUndoTrim 把人话说明写全'],
+  },
+  {
+    name: '写失败又被静默吞掉',
+    file: 'src/lib/undo/recorder.ts',
+    from: '    lastWriteError = { message: `撤销记录写入失败（${msg}），本次操作将无法撤销`, at: Date.now() };',
+    to: '    lastWriteError = null;',
+    expectFail: ['写入失败不再被吞掉'],
+  },
+  {
+    name: 'notice 不再呈现给用户',
+    file: 'src/stores/aiStore.ts',
+    from: '        undoNotice: res.notice ?? null,',
+    to: '        undoNotice: null,',
+    expectFail: ['notice 会呈现给用户'],
+  },
+  {
+    name: '同一条 notice 反复打扰（不去重）',
+    file: 'src/stores/aiStore.ts',
+    from: '      if (res.notice && res.noticeAt && res.noticeAt !== prevAt) {',
+    to: '      if (res.notice) {',
+    expectFail: ['同一条 notice 不重复打扰'],
+  },
+  {
     name: '删除不再记子树快照（回到"删除不可逆"）',
     file: 'src/lib/undo/mutations.ts',
     from: '    ...(captured?.snapshot ? { snapshot: captured.snapshot } : {}),',
@@ -136,8 +178,8 @@ const cases = [
   {
     name: 'refreshUndo 忽略 background 返回的撤销点',
     file: 'src/stores/aiStore.ts',
-    from: "      set({ undoPoints: res?.type === 'undo:list:result' ? res.points : [] });",
-    to: "      set({ undoPoints: [] });",
+    from: '        undoPoints: res.points,',
+    to: '        undoPoints: [],',
     expectFail: ['store 里的含删除撤销点被判定为不可撤销'],
   },
   {

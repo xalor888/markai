@@ -60,6 +60,9 @@ interface AIState {
   pendingDeletions: DeletionProposal[];
   /** 最新在前的撤销点（操作日志：一轮 Agent = 一个撤销点） */
   undoPoints: UndoPoint[];
+  /** 撤销记录的如实提示（裁剪/写入失败）；noticeAt 变化时 UI 提示一次 */
+  undoNotice: string | null;
+  undoNoticeAt: number | null;
   streaming: boolean;
   streamingMessageId: string | null;
   port: chrome.runtime.Port | null;
@@ -218,6 +221,8 @@ export const useAIStore = create<AIState>((set, get) => ({
   clearedIds: [],
   pendingDeletions: [],
   undoPoints: [],
+  undoNotice: null,
+  undoNoticeAt: null,
   streaming: false,
   streamingMessageId: null,
   port: null,
@@ -673,10 +678,23 @@ export const useAIStore = create<AIState>((set, get) => ({
   async refreshUndo() {
     try {
       const res = (await chrome.runtime.sendMessage({ type: 'undo:list' })) as OneShotOutbound | undefined;
-      set({ undoPoints: res?.type === 'undo:list:result' ? res.points : [] });
+      if (res?.type !== 'undo:list:result') {
+        set({ undoPoints: [], undoNotice: null, undoNoticeAt: null });
+        return;
+      }
+      const prevAt = get().undoNoticeAt;
+      set({
+        undoPoints: res.points,
+        undoNotice: res.notice ?? null,
+        undoNoticeAt: res.noticeAt ?? null,
+      });
+      // noticeAt 变了才提示：同一条提示不重复打扰
+      if (res.notice && res.noticeAt && res.noticeAt !== prevAt) {
+        pushToast('撤销记录有变更', { description: res.notice, variant: 'destructive' });
+      }
     } catch {
       // SW 已回收等情况：当作没有撤销点，不打扰用户
-      set({ undoPoints: [] });
+      set({ undoPoints: [], undoNotice: null, undoNoticeAt: null });
     }
   },
 

@@ -113,7 +113,7 @@ export type OneShotOutbound =
   | { type: 'deletions:result'; count: number; failed: { proposalId: string; error: string }[] }
   | { type: 'sidepanel:opened'; ok: boolean }
   | { type: 'seed:value'; text?: string; folderId?: string; notice?: string }
-  | { type: 'undo:list:result'; points: UndoPoint[] }
+  | { type: 'undo:list:result'; points: UndoPoint[]; notice?: string; noticeAt?: number }
   | { type: 'undo:apply:result'; result: UndoApplyResult }
   | { type: 'task:status:result'; running: boolean };
 

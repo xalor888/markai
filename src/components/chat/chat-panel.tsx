@@ -78,15 +78,18 @@ export function ChatPanel({
   const renameConversation = useAIStore((s) => s.renameConversation);
   const deleteConversation = useAIStore((s) => s.deleteConversation);
   const undoPoints = useAIStore((s) => s.undoPoints);
+  const undoNotice = useAIStore((s) => s.undoNotice);
   const undoLast = useAIStore((s) => s.undoLast);
   // 撤销：最新一轮的写操作。含删除的轮次会返回不可撤销 + 原因（不假装成功）
   const undoPoint = undoPoints[0];
   const undoReady = undoReadiness(undoPoint);
-  const undoTitle = !undoPoint
+  const baseUndoTitle = !undoPoint
     ? '暂无可撤销的操作'
     : undoReady.undoable
       ? `撤销本次操作（${summarizeOps(undoPoint.ops)}）`
       : `无法撤销：${undoReady.reason}`;
+  // 撤销记录被裁剪 / 写入失败时，把原因一并说清楚，别让"没有可撤销的操作"变成假话
+  const undoTitle = undoNotice ? `${baseUndoTitle}\n${undoNotice}` : baseUndoTitle;
   const roots = useBookmarkStore((s) => s.roots);
   const selectedFolderId = useBookmarkStore((s) => s.selectedFolderId);
   const config = useConfigStore((s) => s.config);

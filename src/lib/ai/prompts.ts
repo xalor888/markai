@@ -255,6 +255,8 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: 'auto_categorize',
       description:
+        '先用 dryRun=true 出计划（不创建文件夹、不移动书签），用户确认后再执行。' +
+        
         '【大库专用】对某个文件夹执行自动分类：工具内部按注册域名聚类 → 批量创建分类文件夹 → 批量移动书签，一次调用完成全量整理，结果与书签数量无关（适合几百上千条的大文件夹）。已有子文件夹不受影响，数量不足 minGroupSize 的书签留在原地。用户要求"把这个文件夹分类/整理/归类"时优先使用。',
       parameters: {
         type: 'object',
@@ -274,6 +276,8 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     function: {
       name: 'cleanup_sweep',
       description:
+        '先用 dryRun=true 出计划（不改动任何书签、不生成提议），用户确认后再用 dryRun=false 执行。' +
+        
         '【一键清理】扫描→分类→实测存活→删除，一次调用完成整文件夹清理。按收藏年份（beforeYear）与页面类型（keepOnly）筛选，对保留候选实测可访问性。确认模式下其余全部生成删除提议（理由含具体类型/HTTP 状态）；「无需确认」模式下直接删除（生成"已删除"卡片）。适合「只保留 2026 年前主页面且可访问」这类任务——不要自己分页拉清单，直接调用本工具，一次处理最多 1000 条，超出用返回的 remaining/offset 继续。',
       parameters: {
         type: 'object',

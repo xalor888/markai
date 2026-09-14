@@ -3330,6 +3330,143 @@ function ok(name: string, fn: () => void) {
     storageMap.delete('markai.config');
   }
 
+  /* ── T33: 批量工具的 dryRun 预览（cleanup_sweep / auto_categorize） ── */
+  console.log('\n[T33] 批量工具的预览');
+  {
+    const { UNDO_STORAGE_KEY, resetUndoTransactionForTest, readUndoPoints } = await import('../src/lib/undo/recorder');
+
+    // ── A. cleanup_sweep：预览不改库、不给提议，且计数与真实执行一致 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    storageMap.delete('markai.config');
+    const sweepFolder = (await mockBookmarks.create({ parentId: '1', title: 'T33-SWEEP' })).id;
+    for (let i = 0; i < 8; i++) {
+      const id = String(nextId++);
+      store.push({
+        id,
+        parentId: sweepFolder,
+        title: `t33-${String(i).padStart(2, '0')}`,
+        url: `https://t33-sweep-${i}.test/docs/article/${i}`, // deep → keepOnly=page 时在清理范围
+        dateAdded: Date.UTC(2025, 6, 1),
+      });
+    }
+    const beforeSweepDry = await snapshotTreeObj();
+    const sweepDry = JSON.parse(
+      (
+        await executeTool(
+          'cleanup_sweep',
+          JSON.stringify({ folderId: sweepFolder, beforeYear: 2026, checkReachable: false, dryRun: true }),
+        )
+      ).result,
+    ) as { dryRun: boolean; toDelete: number; sample: unknown[] };
+    const afterSweepDry = await snapshotTreeObj();
+    const sweepDryProposals = await executeTool(
+      'cleanup_sweep',
+      JSON.stringify({ folderId: sweepFolder, beforeYear: 2026, checkReachable: false, dryRun: true }),
+    );
+    const sweepReal = JSON.parse(
+      (
+        await executeTool(
+          'cleanup_sweep',
+          JSON.stringify({ folderId: sweepFolder, beforeYear: 2026, checkReachable: false }),
+        )
+      ).result,
+    ) as { toDelete: number; submitted: number };
+
+    ok('cleanup_sweep 预览：dryRun 标记、不改动书签、不产生提议', () => {
+      assert.equal(sweepDry.dryRun, true);
+      assert.equal(sweepDry.toDelete, 8);
+      assert.equal(firstTreeDiff(beforeSweepDry, afterSweepDry), null, '预览不得改动书签库');
+      assert.ok(!sweepDryProposals.deletions, '预览不得产生删除提议');
+    });
+    ok('cleanup_sweep 预览不说谎：计数与随后真实执行一致', () => {
+      assert.equal(sweepReal.toDelete, sweepDry.toDelete, '预览的将删条数必须等于真实执行的目标数');
+      assert.equal(sweepReal.submitted, sweepDry.toDelete, '确认为模式下真实执行应提交同样数量的提议');
+    });
+
+    // ── B. auto_categorize：预览不建不搬，且计划与真实执行一致 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    const catFolder = (await mockBookmarks.create({ parentId: '1', title: 'T33-CAT' })).id;
+    for (let i = 0; i < 24; i++) {
+      const id = String(nextId++);
+      store.push({
+        id,
+        parentId: catFolder,
+        title: `t33c-${i}`,
+        url: `https://d${i % 3}.example/page/${i}`,
+        dateAdded: 50_000 + i,
+      });
+    }
+    const beforeCatDry = await snapshotTreeObj();
+    const catDry = JSON.parse(
+      (
+        await executeTool(
+          'auto_categorize',
+          JSON.stringify({ folderId: catFolder, minGroupSize: 2, dryRun: true }),
+        )
+      ).result,
+    ) as { dryRun: boolean; toCreate: number; toMove: number; groups: { name: string; count: number }[] };
+    const afterCatDry = await snapshotTreeObj();
+    const catReal = JSON.parse(
+      (
+        await executeTool('auto_categorize', JSON.stringify({ folderId: catFolder, minGroupSize: 2 }))
+      ).result,
+    ) as { created: number; moved: number };
+
+    ok('auto_categorize 预览：dryRun 标记、不创建文件夹也不移动书签', () => {
+      assert.equal(catDry.dryRun, true);
+      assert.equal(catDry.toCreate, 3, '3 个域名分组');
+      assert.equal(catDry.toMove, 24);
+      assert.equal(catDry.groups.length, 3);
+      assert.equal(firstTreeDiff(beforeCatDry, afterCatDry), null, '预览不得改动书签库');
+    });
+    ok('auto_categorize 预览不说谎：计划数等于真实执行的创建/移动数', () => {
+      assert.equal(catReal.created, catDry.toCreate);
+      assert.equal(catReal.moved, catDry.toMove);
+    });
+
+    // ── C. 预览不产生撤销点（它是只读的） ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    await executeTool(
+      'auto_categorize',
+      JSON.stringify({ folderId: catFolder, minGroupSize: 2, dryRun: true }),
+    );
+    await executeTool(
+      'cleanup_sweep',
+      JSON.stringify({ folderId: sweepFolder, beforeYear: 2026, checkReachable: false, dryRun: true }),
+    );
+    const pointsAfterDry = await readUndoPoints();
+    ok('纯预览不产生撤销点（没有写操作就不该留下撤销记录）', () => assert.equal(pointsAfterDry.length, 0));
+
+    // ── D. 空范围：预览也给出一致的空计划 ──
+    const emptyFolder = (await mockBookmarks.create({ parentId: '1', title: 'T33-EMPTY' })).id;
+    // 空/子项不足时工具走的是"提前返回"那条路径，形状与常规计划不同（created/moved 而非 toCreate/toMove），
+    // 但也必须带上 dryRun 标记，调用方才能确认"什么都没做"
+    const emptyDry = JSON.parse(
+      (await executeTool('auto_categorize', JSON.stringify({ folderId: emptyFolder, dryRun: true }))).result,
+    ) as { dryRun?: boolean; created: number; moved: number; note: string };
+    const emptySweepDry = JSON.parse(
+      (
+        await executeTool(
+          'cleanup_sweep',
+          JSON.stringify({ folderId: emptyFolder, checkReachable: false, dryRun: true }),
+        )
+      ).result,
+    ) as { dryRun: boolean; toDelete: number };
+    ok('空文件夹的预览也是一致的空计划（不报错、不虚构）', () => {
+      assert.equal(emptyDry.dryRun, true, '提前返回也要标出这是预览');
+      assert.equal(emptyDry.created, 0);
+      assert.equal(emptyDry.moved, 0);
+      assert.equal(emptySweepDry.toDelete, 0);
+    });
+
+    resetUndoTransactionForTest();
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete('markai.config');
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

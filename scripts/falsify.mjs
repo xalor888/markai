@@ -25,6 +25,20 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: 'cleanup_sweep 预览也执行删除（dryRun 失效）',
+    file: 'src/lib/ai/tools.ts',
+    from: '  if (dryRun) {\n    return {\n      result: JSON.stringify({\n        dryRun: true,\n        total: collected.length,',
+    to: '  if (false) {\n    return {\n      result: JSON.stringify({\n        dryRun: true,\n        total: collected.length,',
+    expectFail: ['cleanup_sweep 预览：dryRun 标记、不改动书签、不产生提议'],
+  },
+  {
+    name: 'auto_categorize 预览也真的建文件夹并移动',
+    file: 'src/lib/ai/tools.ts',
+    from: '  if (dryRun) {\n    return {\n      result: JSON.stringify({\n        dryRun: true,\n        total: bookmarks.length,',
+    to: '  if (false) {\n    return {\n      result: JSON.stringify({\n        dryRun: true,\n        total: bookmarks.length,',
+    expectFail: ['auto_categorize 预览：dryRun 标记、不创建文件夹也不移动书签'],
+  },
+  {
     name: '去重忽略 limit（一次提交上千条提议）',
     file: 'src/lib/ai/tools.ts',
     from: '  const groups = buildDuplicateGroups(roots as unknown as DupeNode[]).slice(0, limit);',

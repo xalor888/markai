@@ -567,6 +567,8 @@ const autoCategorizeSchema = z.object({
   maxGroups: z.number().int().min(1).max(100).optional(),
   // 是否把溢出组（数量超过 maxGroups 的部分）并入「其他」文件夹（默认 false：留在原地）
   foldOverflow: z.boolean().optional(),
+  // 只出计划、不创建文件夹也不移动（建议先预览）
+  dryRun: z.boolean().optional(),
 });
 
 /**
@@ -578,7 +580,7 @@ async function autoCategorize(
   args: unknown,
   onProgress?: (text: string) => void,
 ): Promise<ToolOutput> {
-  const { folderId, folderPath, minGroupSize = 2, maxGroups = 25, foldOverflow = false } =
+  const { folderId, folderPath, minGroupSize = 2, maxGroups = 25, foldOverflow = false, dryRun = false } =
     autoCategorizeSchema.parse(args);
   await ensureRoots();
 
@@ -598,6 +600,8 @@ async function autoCategorize(
   if (bookmarks.length < 2) {
     return {
       result: JSON.stringify({
+        // 提前返回也要带上 dryRun 标记：调用方用 dryRun 预览时应能一眼看出"什么都没做"
+        ...(dryRun ? { dryRun: true } : {}),
         total: bookmarks.length,
         created: 0,
         moved: 0,
@@ -626,6 +630,22 @@ async function autoCategorize(
   const overflow = foldOverflow ? big.slice(maxGroups) : [];
   const overflowIds = overflow.flatMap((g) => g.ids);
   const uncategorized = bookmarks.length - picked.reduce((a, g) => a + g.ids.length, 0) - overflowIds.length;
+
+  // 预览：先把「会建哪些文件夹、各放多少条」摊开，不创建、不移动、不产生撤销点
+  if (dryRun) {
+    return {
+      result: JSON.stringify({
+        dryRun: true,
+        total: bookmarks.length,
+        toCreate: picked.length + (overflowIds.length > 0 ? 1 : 0),
+        toMove: picked.reduce((a, g) => a + g.ids.length, 0) + overflowIds.length,
+        uncategorized,
+        groups: picked.map((g) => ({ name: g.domain, count: g.ids.length })),
+        overflow: foldOverflow && overflow.length > 0 ? overflow.map((g) => ({ name: g.domain, count: g.ids.length })) : [],
+        note: `计划创建 ${picked.length + (overflowIds.length > 0 ? 1 : 0)} 个文件夹、移动 ${picked.reduce((a, g) => a + g.ids.length, 0) + overflowIds.length} 条书签，${uncategorized} 条留在原地（数量不足或无法解析域名）。这是预览，没有创建任何文件夹、也没有移动书签；确认后再调用一次（dryRun=false）即可执行。`,
+      }),
+    };
+  }
 
   // 建文件夹 + 移动（并发池 10：同一目标文件夹顺序无关，Chrome API 内部串行化；
   // 万条书签从逐条串行 ~50s 降到 ~5s；组粒度上报进度）
@@ -702,6 +722,8 @@ const cleanupSweepSchema = z.object({
   limit: z.number().int().min(1).max(1000).optional(),
   // 跳过前 N 条（按 dateAdded 升序的稳定顺序），配合 limit 分页
   offset: z.number().int().min(0).optional(),
+  // 只出计划、不生成提议也不删除（建议先预览）
+  dryRun: z.boolean().optional(),
 });
 
 /**
@@ -723,6 +745,7 @@ async function cleanupSweep(
     recursive = true,
     limit = 1000,
     offset = 0,
+    dryRun = false,
   } = cleanupSweepSchema.parse(args);
   await ensureRoots();
 
@@ -839,6 +862,35 @@ async function cleanupSweep(
   }
   for (const d of deadMain) targets.push({ id: d.id, title: d.title, reason: d.reason, parentId: d.parentId });
 
+  const remaining = sorted.length - (offset + page.length);
+  const byType = classified.reduce<Record<string, number>>((acc, c) => {
+    acc[c.cls.type] = (acc[c.cls.type] ?? 0) + 1;
+    return acc;
+  }, {});
+
+  // 预览：把「会删哪些、为什么」先摊开，不生成提议、不删除、不产生撤销点。
+  // 存活检测是只读的，照常执行——计划的价值正来自它包含实测结果。
+  if (dryRun) {
+    return {
+      result: JSON.stringify({
+        dryRun: true,
+        total: collected.length,
+        inScope: inScope.length,
+        processed: page.length,
+        offset,
+        remaining: remaining > 0 ? remaining : undefined,
+        byType,
+        keptReachable: reachable.size,
+        toDelete: targets.length,
+        sample: targets.slice(0, 20).map((t) => ({ id: t.id, title: t.title, reason: t.reason })),
+        note:
+          targets.length === 0
+            ? `已扫描 ${page.length} 条${beforeYear !== undefined ? `（${beforeYear} 年前添加）` : ''}：没有需要清理的书签。`
+            : `已扫描 ${page.length} 条${beforeYear !== undefined ? `（${beforeYear} 年前添加）` : ''}：保留 ${reachable.size} 条，计划删除 ${targets.length} 条（子页面/失效主页面）。这是预览，没有生成任何删除提议、也没有改动书签；确认后再调用一次（dryRun=false）即可执行。`,
+      }),
+    };
+  }
+
   const deletions: DeletionProposal[] = [];
   let autoDeleted = 0;
   let autoFailed = 0;
@@ -902,11 +954,6 @@ async function cleanupSweep(
     }
   }
 
-  const remaining = sorted.length - (offset + page.length);
-  const byType = classified.reduce<Record<string, number>>((acc, c) => {
-    acc[c.cls.type] = (acc[c.cls.type] ?? 0) + 1;
-    return acc;
-  }, {});
   return {
     result: JSON.stringify({
       total: collected.length,

@@ -3,6 +3,7 @@ import {
   Bot,
   Download,
   FolderTree,
+  AlertTriangle,
   History,
   MessagesSquare,
   Pencil,
@@ -80,6 +81,9 @@ export function ChatPanel({
   const deleteConversation = useAIStore((s) => s.deleteConversation);
   const undoPoints = useAIStore((s) => s.undoPoints);
   const undoNotice = useAIStore((s) => s.undoNotice);
+  // 对话落盘失败/被裁剪时的如实提示：属于「你以为保存了、其实没有」，必须可见
+  const persistError = useAIStore((s) => s.persistError);
+  const persistNotice = useAIStore((s) => s.persistNotice);
   // 撤销历史（新在前）：让「撤销第几步」可控，而不是只能盲点最新那一个
   const undoHistory = describeUndoHistory(undoPoints);
   const undoLast = useAIStore((s) => s.undoLast);
@@ -366,6 +370,27 @@ export function ChatPanel({
       {/* 消息区 */}
       <div className="relative min-h-0 flex-1">
         {/* 会话管理面板（覆盖消息区） */}
+        {(persistError || persistNotice) && (
+          <div
+            className={cn(
+              'flex shrink-0 items-start gap-1.5 border-b px-2.5 py-1.5 text-[11px]',
+              persistError
+                ? 'border-destructive/40 bg-destructive/10 text-destructive'
+                : 'border-border bg-muted/40 text-muted-foreground',
+            )}
+          >
+            <AlertTriangle className="mt-[1px] h-3 w-3 shrink-0" />
+            <span className="min-w-0 flex-1">{persistError?.message ?? persistNotice}</span>
+            <button
+              type="button"
+              className="shrink-0 text-[10px] underline"
+              onClick={() => useAIStore.setState({ persistError: null, persistNotice: null })}
+            >
+              知道了
+            </button>
+          </div>
+        )}
+
         {undoHistoryOpen && (
           <div className="absolute inset-0 z-20 flex flex-col bg-card">
             <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border px-2.5">

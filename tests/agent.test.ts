@@ -244,6 +244,15 @@ const mockBookmarks = {
       remove: async (keys: string | string[]) => {
         for (const k of Array.isArray(keys) ? keys : [keys]) storageMap.delete(k);
       },
+      // 真实 API：返回这些键占用的字节数（按值的 JSON 序列化长度，与配额计量方式一致）。
+      // 之前替身没有它，于是"用真实占用把失败讲清楚"这条路径根本没法测。
+      getBytesInUse: async (keys?: string | string[] | null) => {
+        const want = keys == null ? [...storageMap.keys()] : Array.isArray(keys) ? keys : [keys];
+        return want.reduce(
+          (sum, k) => sum + (storageMap.has(k) ? JSON.stringify(storageMap.get(k)).length : 0),
+          0,
+        );
+      },
     },
     // 真实 API 是 chrome.storage.onChanged（不是 storage.local.onChanged）
     onChanged: {
@@ -3612,6 +3621,163 @@ function ok(name: string, fn: () => void) {
     storageMap.delete(UNDO_STORAGE_KEY);
     storageMap.delete(UNDO_PENDING_KEY);
     resetUndoTransactionForTest();
+  }
+
+  /* ── T35: 对话历史的容量护栏与如实失败（不再是空 catch） ── */
+  console.log('\n[T35] 对话存储护栏');
+  {
+    const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const { trimConversationsToBudget, describeChatTrim, approximateBytes } = await import('../src/lib/ai/chat-budget');
+    const { useAIStore, AI_STORAGE_KEY, CHAT_BUDGET_BYTES } = await import('../src/stores/aiStore');
+    type Conv = import('../src/lib/ai/chat-budget').ConversationLike;
+
+    const msg = (id: string, text: string) =>
+      ({ id, role: 'user' as const, content: text, createdAt: Number(id) || 1 }) as never;
+    const conv = (id: string, updatedAt: number, msgs: ReturnType<typeof msg>[]): Conv => ({
+      id,
+      title: `会话 ${id}`,
+      createdAt: updatedAt,
+      updatedAt,
+      messages: msgs,
+    });
+
+    // ── A. 纯逻辑：预算内不动 ──
+    const small = [conv('c1', 100, [msg('1', '你好')]), conv('c2', 200, [msg('2', '在的')])];
+    const untouched = trimConversationsToBudget(small, CHAT_BUDGET_BYTES);
+    ok('裁剪：预算内原样返回（不做多余的"顺手优化"）', () => {
+      assert.equal(untouched.droppedMessages, 0);
+      assert.equal(untouched.droppedConversations, 0);
+      assert.equal(untouched.kept.length, 2);
+      assert.equal(untouched.kept[0]!.messages.length, 1);
+    });
+
+    // ── B. 纯逻辑：超预算丢最旧的消息，保留最新 ──
+    const big = [
+      conv('old', 100, [msg('1', 'A'.repeat(4000)), msg('2', 'B'.repeat(4000)), msg('3', 'C'.repeat(100))]),
+      conv('new', 200, [msg('4', 'D'.repeat(200))]),
+    ];
+    const trimmed = trimConversationsToBudget(big, 3000);
+    ok('裁剪：超预算时从最旧会话丢最旧消息，且保留最新那条', () => {
+      assert.ok(trimmed.droppedMessages > 0, '应丢弃了消息');
+      assert.ok(approximateBytes(trimmed.kept) <= 3000, '裁剪后必须在预算内');
+      const newestKept = trimmed.kept.find((c) => c.id === 'new');
+      assert.equal(newestKept?.messages.length, 1, '最新会话不该被丢');
+      const oldKept = trimmed.kept.find((c) => c.id === 'old');
+      // 留下来的必须是最新的那些（尾部），不是头部
+      if (oldKept && oldKept.messages.length > 0) {
+        const last = oldKept.messages[oldKept.messages.length - 1]!;
+        assert.notEqual((last as { id: string }).id, '1', '最旧的那条不应还在');
+      }
+      assert.match(describeChatTrim(trimmed) ?? '', /消息/);
+    });
+
+    // ── C. 纯逻辑：消息丢空后丢整个最旧会话 ──
+    const manyConvs = [
+      conv('a', 1, []),
+      conv('b', 2, []),
+      conv('c', 3, []),
+      conv('d', 4, []),
+    ];
+    const padded = manyConvs.map((c) => ({ ...c, title: 'T'.repeat(500) }));
+    const byConv = trimConversationsToBudget(padded, 1200);
+    ok('裁剪：必要时整个丢弃最旧的会话，并说明丢了几个', () => {
+      assert.ok(byConv.droppedConversations > 0, '应整个丢弃了会话');
+      assert.ok(byConv.kept.length < padded.length);
+      assert.ok(approximateBytes(byConv.kept) <= 1200);
+      assert.match(describeChatTrim(byConv) ?? '', /会话/);
+      assert.equal(trimConversationsToBudget(padded, 999999).droppedConversations, 0, '预算足够时不该丢会话');
+    });
+
+    // ── D. 写盘失败不再静默：带稳定时间戳的如实错误 ──
+    const { useToastStore: toastStoreForTest } = await import('../src/lib/toast');
+    const origPush = toastStoreForTest.getState().push;
+    const attempts: string[] = [];
+    toastStoreForTest.setState({
+      push: (t) => {
+        attempts.push(t.title);
+        return origPush(t);
+      },
+    });
+    useAIStore.setState({ persistError: null, persistNotice: null });
+    storageMap.delete(AI_STORAGE_KEY);
+    storageSetFail = true;
+    await useAIStore.getState()._persist(true);
+    const err1 = useAIStore.getState().persistError;
+    const at1 = err1?.at;
+    // 必须真的隔开一点时间再写第二次：否则"每次都刷新时间戳"的实现也会因为两次同毫秒而假通过
+    // （反证脚本抓出过这条假绿）。
+    await new Promise((r) => setTimeout(r, 20));
+    await useAIStore.getState()._persist(true); // 再写一次：at 不该变（界面只提示一次）
+    const at2 = useAIStore.getState().persistError?.at;
+    storageSetFail = false;
+    ok('写盘失败不再被吞掉：留下如实说明（含"没有保存成功"与建议）', () => {
+      assert.ok(err1, '应记录 persistError');
+      assert.match(err1!.message, /没有保存成功/);
+      assert.match(err1!.message, /清空更早的对话|建议/);
+      assert.ok(at1 && at1 > 0, '应带时间戳');
+    });
+    ok('失败状态的时间戳稳定（界面据此只提示一次，不反复打扰）', () =>
+      assert.equal(at2, at1, '同一次故障不应刷新时间戳'),
+    );
+    ok('失败时会真的提示用户，且同一次故障只提示一次（不骚扰）', () => {
+      const n = attempts.filter((t) => t === '对话未能保存').length;
+      assert.ok(n >= 1, `应尝试提示，实际提示过：${attempts.join('/')}`);
+      assert.equal(n, 1, `连续两次相同的失败只该提示一次，实际 ${n} 次`);
+    });
+    ok('聊天气泡区确实会显示这条警示（可见，不是一闪而过的 toast）', () => {
+      const panel = readFileSync(resolve(rootDir, 'src/components/chat/chat-panel.tsx'), 'utf8');
+      assert.match(panel, /persistError/, '面板应读取 persistError');
+      assert.match(panel, /persistNotice/, '面板也应显示"丢弃了更早对话"的说明');
+    });
+    toastStoreForTest.setState({ push: origPush });
+
+    // ── E. 超预算：先裁剪再成功落盘，并留下如实 notice ──
+    useAIStore.setState({ persistError: null, persistNotice: null });
+    storageMap.delete(AI_STORAGE_KEY);
+    const huge = Array.from({ length: 6 }, (_, i) =>
+      conv(`big-${i}`, i + 1, Array.from({ length: 20 }, (_, j) => msg(`${i}${j}`, 'X'.repeat(60_000)))),
+    );
+    useAIStore.setState({ conversations: huge, messages: huge[5]!.messages, activeId: 'big-5' });
+    await useAIStore.getState()._persist(true);
+    const stored = storageMap.get(AI_STORAGE_KEY) as { conversations: { id: string; messages: unknown[] }[] };
+    const notice = useAIStore.getState().persistNotice;
+    const storedBytes = JSON.stringify(stored).length;
+    ok('超预算时先裁剪再落盘：写入成功且确实在预算内', () => {
+      assert.ok(stored, '应成功写入（不再因为超配额而整段丢失）');
+      assert.ok(storedBytes <= CHAT_BUDGET_BYTES, `写入体积 ${storedBytes} 应在 ${CHAT_BUDGET_BYTES} 预算内`);
+      assert.equal(useAIStore.getState().persistError, null, '裁剪后不应再报失败');
+    });
+    ok('丢弃了更早的对话就如实告知（不静默降级）', () => {
+      assert.ok(notice, '应留下 persistNotice');
+      assert.match(notice!, /超出本地存储预算|丢弃/);
+      assert.match(notice!, /消息|会话/);
+    });
+
+    // ── F. 失败提示里的占用是真实读出来的（而不是含糊其辞） ──
+    // 注意：断言必须钉在**生产代码**上。原先这条只比对替身的 API 与替身的存储，
+    // 那样无论生产代码怎么写都不会变红——等于一条不会失败的测试。
+    const bytesFromApi = await chrome.storage.local.getBytesInUse(AI_STORAGE_KEY);
+    ok('失败提示带上了真实占用（来自 getBytesInUse），且替身契约如实', () => {
+      assert.match(err1!.message, /MiB/, '失败说明里应带上真实占用，而不是只说"出错了"');
+      assert.equal(bytesFromApi, JSON.stringify(storageMap.get(AI_STORAGE_KEY)).length);
+    });
+
+    // ── G. 正常路径：不产生任何提示 ──
+    useAIStore.setState({ persistError: null, persistNotice: null });
+    storageMap.delete(AI_STORAGE_KEY);
+    useAIStore.setState({
+      conversations: [conv('ok', 1, [msg('9', '正常一条')])],
+      messages: [msg('9', '正常一条')],
+      activeId: 'ok',
+    });
+    await useAIStore.getState()._persist(true);
+    ok('正常落盘不产生失败或裁剪提示（避免狼来了）', () => {
+      assert.equal(useAIStore.getState().persistError, null);
+      assert.equal(useAIStore.getState().persistNotice, null);
+    });
+
+    storageMap.delete(AI_STORAGE_KEY);
+    storageSetFail = false;
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

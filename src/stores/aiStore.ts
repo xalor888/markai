@@ -16,10 +16,17 @@ import type {
 import type { UndoPoint } from '@/lib/undo/types';
 import { undoReadiness } from '@/lib/undo/journal';
 import { UNDO_STORAGE_KEY } from '@/lib/undo/recorder';
+import { describeChatTrim, trimConversationsToBudget } from '@/lib/ai/chat-budget';
 import { useBookmarkStore } from './bookmarkStore';
 
 /** storage key（popup 通过该 key 只读展示待删数） */
 export const AI_STORAGE_KEY = 'markai.ai';
+
+/**
+ * 对话历史的字节预算（chrome.storage.local 总配额 10 MiB）。
+ * 留出 4 MiB 给撤销记录（它同样有护栏），避免两类数据互相踩踏。
+ */
+export const CHAT_BUDGET_BYTES = 6 * 1024 * 1024;
 
 /** 消息条数上限（持久化时裁剪） */
 const MAX_MESSAGES = 60;
@@ -62,6 +69,10 @@ interface AIState {
   undoPoints: UndoPoint[];
   /** 撤销记录的如实提示（裁剪/写入失败）；noticeAt 变化时 UI 提示一次 */
   undoNotice: string | null;
+  /** 最近一次对话落盘失败的如实说明（null = 没有失败）；at 稳定，界面只提示一次 */
+  persistError: { message: string; at: number } | null;
+  /** 因为超预算而丢弃了更早的对话时的如实说明 */
+  persistNotice: string | null;
   undoNoticeAt: number | null;
   streaming: boolean;
   streamingMessageId: string | null;
@@ -222,6 +233,8 @@ export const useAIStore = create<AIState>((set, get) => ({
   pendingDeletions: [],
   undoPoints: [],
   undoNotice: null,
+  persistError: null,
+  persistNotice: null,
   undoNoticeAt: null,
   streaming: false,
   streamingMessageId: null,
@@ -863,7 +876,17 @@ export const useAIStore = create<AIState>((set, get) => ({
       try {
         await chrome.storage.local.set({
           [AI_STORAGE_KEY]: {
-            conversations: conversations.map((c) => ({ ...c, messages: (c.messages ?? []).slice(-MAX_MESSAGES) })),
+            conversations: (() => {
+              const capped = conversations.map((c) => ({ ...c, messages: (c.messages ?? []).slice(-MAX_MESSAGES) }));
+              // 容量护栏：会话数量没有上限，超预算时丢最旧的（先把消息丢空，再丢整个会话），
+              // 并把丢弃的事实如实记下来——不静默降级。
+              const trim = trimConversationsToBudget(capped, CHAT_BUDGET_BYTES);
+              if (trim.droppedMessages > 0 || trim.droppedConversations > 0) {
+                const what = describeChatTrim(trim) ?? '';
+                set({ persistNotice: `对话记录已超出本地存储预算，为了保存最近的对话，已丢弃${what}。` });
+              }
+              return trim.kept;
+            })(),
             activeId: writeActiveId,
             pendingDeletions: mergedDeletions,
             // 墓碑合并必须包含写前重读的值：否则并发窗口刚写入的墓碑会被本窗口整体覆盖丢失
@@ -871,8 +894,30 @@ export const useAIStore = create<AIState>((set, get) => ({
             clearedIds: [...new Set([...s.clearedIds, ...(latestClearedIds ?? []), ...latestCleared])],
           },
         });
-      } catch {
-        // 落盘失败静默（配额/权限异常）：下次写入会重试，不产生未捕获 rejection
+        // 写入成功：清掉上一次的失败状态（提示是一次性的，不该长期挂着）
+        if (get().persistError) set({ persistError: null });
+      } catch (e) {
+        // 原先这里是空 catch，注释说"下次写入会重试"——但超配额时之后**每次**都会失败，
+        // 而界面照常显示历史，等于把"没保存成功"呈现成"好好的"。现在如实上报，
+        // 并附上 getBytesInUse 读到的真实占用，让提示有事实依据。
+        const msg = e instanceof Error ? e.message : String(e);
+        let used = '';
+        try {
+          const bytes = await chrome.storage.local.getBytesInUse(AI_STORAGE_KEY);
+          used = `（当前该键占用约 ${(bytes / 1024 / 1024).toFixed(1)} MiB）`;
+        } catch {
+          // 拿不到占用不影响"失败"这件事本身
+        }
+        const message = `这段对话**没有保存成功**${used}：${msg}。建议清空更早的对话后重试。`;
+        // 同一次故障只算一个"事件"：流式期间 persist 会被频繁调用，若每次都刷新时间戳、
+        // 每次都弹提示，就会变成骚扰。消息内容一致时沿用原时间戳；成功落盘会清空它，
+        // 因此"恢复后再次失败"仍会作为新事件提示。
+        const prev = get().persistError;
+        const at = prev && prev.message === message ? prev.at : Date.now();
+        set({ persistError: { message, at } });
+        if (!prev || prev.message !== message) {
+          pushToast('对话未能保存', { variant: 'destructive', description: `本地存储写入失败：${msg}` });
+        }
       }
     } finally {
       crossWindowWrite.current = false;

@@ -25,6 +25,41 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: '对话写盘失败回到空 catch（没保存成功却装作正常）',
+    file: 'src/stores/aiStore.ts',
+    from: '        set({ persistError: { message, at } });',
+    to: '        // reverted',
+    expectFail: ['写盘失败不再被吞掉'],
+  },
+  {
+    name: '失败时间戳每次都刷新（流式期间会反复弹提示）',
+    file: 'src/stores/aiStore.ts',
+    from: '        const at = prev && prev.message === message ? prev.at : Date.now();',
+    to: '        const at = Date.now();',
+    expectFail: ['失败状态的时间戳稳定', '失败时会真的提示用户，且同一次故障只提示一次'],
+  },
+  {
+    name: '对话历史不做预算裁剪（超配额就整段写不进去）',
+    file: 'src/stores/aiStore.ts',
+    from: '              const trim = trimConversationsToBudget(capped, CHAT_BUDGET_BYTES);',
+    to: '              const trim = { kept: capped, droppedMessages: 0, droppedConversations: 0 };',
+    expectFail: ['超预算时先裁剪再落盘'],
+  },
+  {
+    name: '裁剪了却不告诉用户（静默降级）',
+    file: 'src/stores/aiStore.ts',
+    from: '                set({ persistNotice: `对话记录已超出本地存储预算，为了保存最近的对话，已丢弃${what}。` });',
+    to: '                void what;',
+    expectFail: ['丢弃了更早的对话就如实告知'],
+  },
+  {
+    name: '失败提示不带真实占用（含糊其辞）',
+    file: 'src/stores/aiStore.ts',
+    from: '          used = `（当前该键占用约 ${(bytes / 1024 / 1024).toFixed(1)} MiB）`;',
+    to: "          used = '';",
+    expectFail: ['失败提示带上了真实占用'],
+  },
+  {
     name: '增量落盘被移除（回到"只在轮次结束才写"）',
     file: 'src/lib/undo/recorder.ts',
     from: '  active?.ops.push(op);\n  void persistPending();',

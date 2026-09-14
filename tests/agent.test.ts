@@ -3806,6 +3806,93 @@ function ok(name: string, fn: () => void) {
     storageSetFail = false;
   }
 
+  /* ── T36: 设置保存不再静默失败（含 deleteMode 的安全风险） ── */
+  console.log('\n[T36] 设置保存');
+  {
+    const { useConfigStore } = await import('../src/stores/configStore');
+    const { useToastStore: toastStore36 } = await import('../src/lib/toast');
+    const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+    const origPush36 = toastStore36.getState().push;
+    const attempts36: string[] = [];
+    toastStore36.setState({
+      push: (t) => {
+        attempts36.push(t.title);
+        return origPush36(t);
+      },
+    });
+
+    // ── A. 普通设置保存失败：如实上报，且带 stable 时间戳与真实占用 ──
+    useConfigStore.setState({ saveError: null });
+    storageMap.delete('markai.config');
+    storageSetFail = true;
+    await useConfigStore.getState().update({ model: 'gpt-x' });
+    const err1 = useConfigStore.getState().saveError;
+    const at1 = err1?.at;
+    await new Promise((r) => setTimeout(r, 20));
+    await useConfigStore.getState().update({ model: 'gpt-y' });
+    const at2 = useConfigStore.getState().saveError?.at;
+    ok('设置保存失败不再被空 catch 吞掉（留下如实说明）', () => {
+      assert.ok(err1, '应记录 saveError');
+      assert.match(err1!.message, /设置未能保存/);
+      assert.match(err1!.message, /重启后/, '要说明后果，而不是只说"失败了"');
+    });
+    ok('失败提示带真实占用（getBytesInUse），失败时间戳稳定且只提示一次', () => {
+      assert.match(err1!.message, /KiB|MiB/, '应带上真实占用');
+      assert.equal(at2, at1, '同一次故障不应刷新时间戳');
+      assert.equal(attempts36.filter((t) => t === '设置未能保存').length, 1, '同一次故障只提示一次');
+    });
+
+    // ── B. 安全相关：删除模式保存失败必须点名风险 ──
+    useConfigStore.setState({ saveError: null });
+    storageSetFail = true;
+    await useConfigStore.getState().update({ deleteMode: 'confirm' });
+    const riskyErr = useConfigStore.getState().saveError;
+    storageSetFail = false;
+    ok('删除模式保存失败会点名安全风险（不能只说一句"保存失败"）', () => {
+      assert.ok(riskyErr);
+      assert.match(riskyErr!.message, /删除模式没有生效/);
+      assert.match(riskyErr!.message, /需要确认|直接删除/, '要说清后果');
+    });
+
+    // ── C. 保存成功会清除失败状态（提示不该长期挂着） ──
+    storageMap.delete('markai.config');
+    storageSetFail = false;
+    await useConfigStore.getState().update({ model: 'ok-model' });
+    const afterOk = useConfigStore.getState().saveError;
+    const savedCfg = storageMap.get('markai.config') as { model?: string } | undefined;
+    ok('保存成功后清除失败状态，且配置确实落盘', () => {
+      assert.equal(afterOk, null);
+      assert.equal(savedCfg?.model, 'ok-model');
+    });
+
+    // ── D. 设置页确实会显示这条警示（可见，不是只进状态） ──
+    ok('设置页渲染了保存失败警示并提供重试入口（接线被守住）', () => {
+      const form = readFileSync(resolve(rootDir, 'src/components/options/config-form.tsx'), 'utf8');
+      // 必须钉在"渲染了那条消息"上：只匹配 saveError/重试保存 这类字样的话，
+      // 即使把消息渲染删掉（留一个空 span）依然能通过——反证脚本抓到过这条假绿。
+      assert.match(form, /saveError\.message/, '页面必须把失败说明渲染出来，而不只是读取它');
+      assert.match(form, /重试保存/, '应提供重试入口');
+    });
+
+    // ── E. 错误处理清单存在，且如实写出"仍有大量 catch 未逐处审计" ──
+    ok('docs/error-handling.md 存在并如实标注未清理的部分', () => {
+      const doc = readFileSync(resolve(rootDir, 'docs/error-handling.md'), 'utf8');
+      assert.match(doc, /必须如实上报/, '要给出判定规则');
+      assert.match(doc, /catch \{/, '要如实列出仍未处理的数量级');
+      assert.match(doc, /## 3\. 仍未处理/, '必须保留"仍未处理"这一节');
+      assert.ok(
+        !/已全部清理|已经清干净|全部审计完毕/.test(doc),
+        '不得声称已经全部清理（正文里出现这类说法就说明文档在过度声明）',
+      );
+    });
+
+    toastStore36.setState({ push: origPush36 });
+    storageSetFail = false;
+    storageMap.delete('markai.config');
+    useConfigStore.setState({ saveError: null });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

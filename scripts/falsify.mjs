@@ -25,6 +25,41 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: '设置保存失败回到空 catch（UI 已显示新值却没说没保存）',
+    file: 'src/stores/configStore.ts',
+    from: '      set({ saveError: { message, at } });',
+    to: '      // reverted',
+    expectFail: ['设置保存失败不再被空 catch 吞掉'],
+  },
+  {
+    name: '删除模式保存失败不点名安全风险',
+    file: 'src/stores/configStore.ts',
+    from: '      const risky = patch.deleteMode !== undefined;',
+    to: '      const risky = false;',
+    expectFail: ['删除模式保存失败会点名安全风险'],
+  },
+  {
+    name: '保存成功后不清除失败状态（提示长期挂着）',
+    file: 'src/stores/configStore.ts',
+    from: '      if (get().saveError) set({ saveError: null });',
+    to: '      // reverted',
+    expectFail: ['保存成功后清除失败状态'],
+  },
+  {
+    name: '设置页不再显示保存失败警示',
+    file: 'src/components/options/config-form.tsx',
+    from: '          <span className="min-w-0 flex-1">{saveError.message}</span>',
+    to: '          <span className="min-w-0 flex-1" />',
+    expectFail: ['设置页渲染了保存失败警示'],
+  },
+  {
+    name: '错误处理清单谎称已全部清理',
+    file: 'docs/error-handling.md',
+    from: '## 3. 仍未处理的（如实列出，别当成已经清完）',
+    to: '## 3. 已全部清理',
+    expectFail: ['docs/error-handling.md 存在并如实标注未清理的部分'],
+  },
+  {
     name: '成功路径不再用真实占用核对（估算偏低就当没看见）',
     file: 'src/stores/aiStore.ts',
     from: '          if (actual > chatBudgetBytes) {',

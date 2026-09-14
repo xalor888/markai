@@ -1,4 +1,4 @@
-import { CheckCircle2, Database, Eye, EyeOff, Loader2, Monitor, Moon, Palette, Plug, RefreshCw, ShieldCheck, SlidersHorizontal, Sun, Trash2 } from 'lucide-react';
+import { CheckCircle2, Database, Eye, EyeOff, Loader2, Monitor, Moon, Palette, Plug, RefreshCw, ShieldCheck, SlidersHorizontal, Sun, Trash2, AlertTriangle } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useConfigStore } from '@/stores/configStore';
 import { useAIStore, AI_STORAGE_KEY } from '@/stores/aiStore';
@@ -39,6 +39,8 @@ export function ConfigForm() {
   const [fetchingModels, setFetchingModels] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [dataCounts, setDataCounts] = useState<{ messages: number; pending: number }>({ messages: 0, pending: 0 });
+  // 设置保存失败必须可见：这条路径存的是 API Key 与删除模式，静默失败会变成假象
+  const saveError = useConfigStore((s) => s.saveError);
   // 模型上下文输入：本地字符串 state（受控 value 派生 + onChange 过滤会拦截 64K/100K 等合法输入）
   // 默认 1024K：绝大多数大模型可直接用，无需手动填写
   const [ctxInput, setCtxInput] = useState(() => String(Math.round((config.contextWindow ?? 1_048_576) / 1000)));
@@ -520,6 +522,20 @@ export function ConfigForm() {
       </section>
 
       <Separator />
+
+      {saveError && (
+        <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span className="min-w-0 flex-1">{saveError.message}</span>
+          <button
+            type="button"
+            className="shrink-0 underline"
+            onClick={() => void useConfigStore.getState().update({})}
+          >
+            重试保存
+          </button>
+        </div>
+      )}
 
       {/* ── 数据管理 ── */}
       <section className="space-y-2 rounded-lg border border-border bg-card p-4">

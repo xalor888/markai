@@ -9,6 +9,13 @@
  * 例如移动的 fromIndex 必须是移动**前**在旧父目录中的下标（移动后再读就是新位置了）。
  */
 
+/** 书签子树快照（删除操作的还原依据；递归含全部后代） */
+export interface BookmarkSnapshot {
+  title: string;
+  url?: string;
+  children?: BookmarkSnapshot[];
+}
+
 /** 单条可逆写操作（按发生顺序记录；撤销时逆序执行） */
 export type UndoOp =
   | {
@@ -55,6 +62,19 @@ export type UndoOp =
       kind: 'delete';
       id: string;
       title: string;
+      /** 删除前所在父目录（撤销时重建到这里） */
+      parentId?: string;
+      /**
+       * 兜底位置。**只在没有该父目录的顺序检查点时使用**。
+       *
+       * 注意：并发删除下这个下标是**不可靠的**（每个 worker 读到的是同伴正在修改的列表，
+       * 且"抓取顺序"与"记录顺序"并不一致）。位置的正解是 UndoPoint.orderCheckpoints
+       * ——由工具在动手前对每个将失去子项的父目录取一次完整子序。这里保留 index
+       * 只是为了在缺少检查点时尽力而为。
+       */
+      index?: number;
+      /** 子树快照。**没有快照 = 历史日志点（v0.2.3 及更早写的），不可撤销** */
+      snapshot?: BookmarkSnapshot;
     };
 
 export type UndoOpKind = UndoOp['kind'];
@@ -70,6 +90,14 @@ export interface UndoPoint {
   createdAt: number;
   /** 正序记录；撤销时按逆序执行 */
   ops: UndoOp[];
+  /**
+   * 父目录顺序检查点：`parentId → 本轮第一次改动它之前的完整子序`。
+   *
+   * 删除的位置还原必须靠它：并发删除的逐条下标不可靠（抓取顺序与记录顺序不一致），
+   * 撤销最后按检查点把父目录的子序整体校正回原样，就与并发无关了。
+   * 由调用方（工具）在动手**之前**调用 `ensureOrderCheckpoint` 取。
+   */
+  orderCheckpoints?: { parentId: string; order: string[] }[];
   /** 本轮流是否包含删除（删除没有快照，无法完整撤销，需明确拒绝而不是假装成功） */
   containsDelete: boolean;
   /** 已执行过撤销的时间；存在即表示该点已消费 */

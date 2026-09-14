@@ -15,6 +15,8 @@ interface ActiveTransaction {
   runId: string;
   ops: UndoOp[];
   containsDelete: boolean;
+  /** 父目录顺序检查点（parentId → 动手前的完整子序） */
+  orderCheckpoints: Map<string, string[]>;
 }
 
 let active: ActiveTransaction | null = null;
@@ -24,7 +26,28 @@ const uid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice
 /** 开始记录一个轮次。上一轮若没正常收尾（异常/被打断），先落盘再开新的。 */
 export async function beginUndoTransaction(runId: string): Promise<void> {
   if (active) await endUndoTransaction();
-  active = { runId, ops: [], containsDelete: false };
+  active = { runId, ops: [], containsDelete: false, orderCheckpoints: new Map() };
+}
+
+/**
+ * 取一个父目录的"动手前完整子序"（每个父目录每轮只取一次）。
+ *
+ * **调用方必须在该父目录发生任何改动之前调用**，否则取到的就不是"操作前"状态了。
+ * 这是并发批量删除能精确还原顺序的唯一依据：逐条下标在并发下不可靠，
+ * 逐条的"位置锚点"也不可靠（抓取顺序 ≠ 记录顺序，实测栽过）。
+ */
+export async function ensureOrderCheckpoint(parentId: string): Promise<void> {
+  if (!active || active.orderCheckpoints.has(parentId)) return;
+  const children = await chrome.bookmarks.getChildren(parentId).catch(() => []);
+  active.orderCheckpoints.set(
+    parentId,
+    children.map((c) => c.id),
+  );
+}
+
+/** 当前事务已记录的检查点数（测试用） */
+export function activeCheckpointCount(): number {
+  return active?.orderCheckpoints.size ?? 0;
 }
 
 /** 当前是否有事务在记录（工具层据此决定是否埋点） */
@@ -60,6 +83,14 @@ export async function endUndoTransaction(): Promise<UndoPoint | null> {
     runId: tx.runId,
     createdAt: Date.now(),
     ops: tx.ops,
+    ...(tx.orderCheckpoints.size > 0
+      ? {
+          orderCheckpoints: [...tx.orderCheckpoints.entries()].map(([parentId, order]) => ({
+            parentId,
+            order,
+          })),
+        }
+      : {}),
     containsDelete: tx.containsDelete,
   };
   const points = await readUndoPoints();

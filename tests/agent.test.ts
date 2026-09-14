@@ -117,8 +117,17 @@ async function snapshotTreeObj(): Promise<TreeNorm[]> {
 /**
  * 定位两棵树的第一处差异，返回可读路径。
  * 大库用例（5000+ 节点）里直接 assert.deepEqual 会打印 40 万字符，根本看不出哪错了。
+ *
+ * `ignoreIds`：撤销删除时，被删的节点是**重新创建**的，Chrome 会分配新 id
+ * （API 不允许指定 id）。所以「删除撤销后是否复原」只能按结构比对
+ * ——标题/URL/层级/顺序一致即等价，id 变化是浏览器的限制而不是缺陷。
  */
-function firstTreeDiff(expected: TreeNorm[], actual: TreeNorm[], path = ''): string | null {
+function firstTreeDiff(
+  expected: TreeNorm[],
+  actual: TreeNorm[],
+  path = '',
+  opts: { ignoreIds?: boolean } = {},
+): string | null {
   if (expected.length !== actual.length) {
     return `${path || '(根)'}：子项数 期望 ${expected.length}，实际 ${actual.length}`;
   }
@@ -126,10 +135,10 @@ function firstTreeDiff(expected: TreeNorm[], actual: TreeNorm[], path = ''): str
     const e = expected[i]!;
     const a = actual[i]!;
     const here = `${path}/${e.title || e.id}`;
-    if (e.id !== a.id) return `${here}：id 期望 ${e.id}，实际 ${a.id}`;
+    if (!opts.ignoreIds && e.id !== a.id) return `${here}：id 期望 ${e.id}，实际 ${a.id}`;
     if (e.title !== a.title) return `${here}：标题 期望「${e.title}」，实际「${a.title}」`;
     if (e.url !== a.url) return `${here}：URL 期望「${e.url}」，实际「${a.url}」`;
-    const child = firstTreeDiff(e.children, a.children, here);
+    const child = firstTreeDiff(e.children, a.children, here, opts);
     if (child) return child;
   }
   return null;
@@ -1840,17 +1849,36 @@ function ok(name: string, fn: () => void) {
         false,
       );
     });
-    ok('undoReadiness：含删除的轮次明确拒绝并给出原因', () => {
-      const r = undoReadiness({
+    ok('undoReadiness：带快照的删除可撤（P3 起），无快照的历史点仍拒绝', () => {
+      // 新写入的删除带子树快照 → 可以还原
+      const snapDel: UndoOp = {
+        kind: 'delete',
+        id: 'd',
+        title: 'd',
+        parentId: 'p',
+        snapshot: { title: 'd', url: 'https://d' },
+      };
+      const withSnap = undoReadiness({
         id: '1',
+        runId: 'r',
+        createdAt: 0,
+        ops: [opMove('a', 0), snapDel],
+        containsDelete: true,
+      });
+      assert.equal(withSnap.undoable, true);
+      assert.equal(withSnap.count, 2, '移动 1 + 删除子树 1');
+
+      // v0.2.3 及更早写下的日志点没有快照 → 整轮如实拒绝，不做"半撤销"
+      const legacy = undoReadiness({
+        id: '2',
         runId: 'r',
         createdAt: 0,
         ops: [opMove('a', 0), opDelete('d')],
         containsDelete: true,
       });
-      assert.equal(r.undoable, false);
-      assert.match(r.reason ?? '', /包含删除/);
-      assert.equal(r.count, 1, 'count 只算真正可还原的操作');
+      assert.equal(legacy.undoable, false);
+      assert.match(legacy.reason ?? '', /没有快照/);
+      assert.equal(legacy.count, 1, 'count 只算真正可还原的操作');
     });
 
     // ── B. 端到端：一轮整理 → 撤销 → 整棵树逐节点（含顺序）与操作前一致 ──
@@ -1935,24 +1963,40 @@ function ok(name: string, fn: () => void) {
       assert.deepEqual(restoredKids, ['delta', 'alpha', 'charlie', 'bravo']),
     );
 
-    // ── D. 含删除的轮次：明确拒绝，且不产生半撤销 ──
+    // ── D. 含删除的轮次：现在可以撤销（删除带快照）──
     storageMap.delete(UNDO_STORAGE_KEY);
     resetUndoTransactionForTest();
     const doomed = (await mockBookmarks.create({ parentId: sub2, title: 'T23-DOOMED', url: 'https://t23.example/doomed' })).id;
+    const beforeDeleteTurn = await snapshotTreeObj();
+    const beforeSub2Titles = (await mockBookmarks.getChildren(sub2)).map((n) => n.title);
     await beginUndoTransaction('run-t23-del');
     await jMove(bBravo, { parentId: sub2, index: 0 });
     await jRemove(doomed);
     const delPoint = await endUndoTransaction();
-    const beforeRefuse = await snapshotTree();
-    const refused = await applyUndo();
-    const afterRefuse = await snapshotTree();
-    ok('含删除的轮次拒绝撤销并说明原因', () => {
+    const afterDeleteTurn = await snapshotTreeObj();
+    const delUndo = await applyUndo();
+    const afterDeleteUndo = await snapshotTreeObj();
+    ok('删除记录了子树快照与位置锚点', () => {
       assert.ok(delPoint?.containsDelete, '应标记含删除');
-      assert.equal(refused.ok, false);
-      assert.match(refused.reason ?? '', /包含删除/);
-      assert.equal(refused.restored, 0);
+      const del = delPoint!.ops.find((o) => o.kind === 'delete') as Extract<
+        import('../src/lib/undo/types').UndoOp,
+        { kind: 'delete' }
+      >;
+      assert.ok(del.snapshot, '删除必须带子树快照');
+      assert.equal(del.snapshot!.title, 'T23-DOOMED');
+      assert.equal(del.snapshot!.url, 'https://t23.example/doomed');
+      assert.equal(del.parentId, sub2, '应记录原父目录');
+      assert.ok(del.index !== undefined, '应记录兜底下标');
     });
-    ok('拒绝撤销时不得改动书签库（不做半撤销）', () => assert.equal(afterRefuse, beforeRefuse));
+    const sub2TitlesAfter = (await mockBookmarks.getChildren(sub2)).map((n) => n.title);
+    ok('含删除的轮次现在能撤销，且整棵树（含顺序）与操作前一致', () => {
+      assert.ok(delUndo.ok, `撤销应成功，实际 ${JSON.stringify(delUndo)}`);
+      assert.ok(firstTreeDiff(afterDeleteTurn, beforeDeleteTurn) !== null, '本轮确实改动了书签库');
+      const diff = firstTreeDiff(beforeDeleteTurn, afterDeleteUndo, '', { ignoreIds: true });
+      assert.equal(diff, null, `删除过的书签必须回到原位；第一处差异：${diff ?? ''}`);
+      // 位置也要真的对（重建的节点拿不到原 id，所以比标题序列）
+      assert.deepEqual(sub2TitlesAfter, beforeSub2Titles, '被还原的节点必须回到原来的兄弟位置');
+    });
 
     // ── E. 没有写操作的轮次不产生撤销点（避免「撤销 0 项」的空按钮） ──
     storageMap.delete(UNDO_STORAGE_KEY);
@@ -2020,11 +2064,12 @@ function ok(name: string, fn: () => void) {
     const { useToastStore } = await import('../src/lib/toast');
     type UndoPointT = import('../src/lib/undo/types').UndoPoint;
 
+    // 历史日志点：删除没有快照（v0.2.3 及更早写下的），整轮不可撤销
     const refusalPoint: UndoPointT = {
       id: 'u-refuse',
       runId: 'r1',
       createdAt: 1,
-      ops: [{ kind: 'move', id: 'x', title: 'x', fromParentId: 'p', fromIndex: 0 }],
+      ops: [{ kind: 'delete', id: 'gone', title: '旧版本删掉的书签' }],
       containsDelete: true,
     };
     const successPoint: UndoPointT = {
@@ -2058,15 +2103,15 @@ function ok(name: string, fn: () => void) {
     ok('store 里的含删除撤销点被判定为不可撤销', () => {
       assert.equal(stored.length, 1);
       assert.equal(undoReadiness(stored[0]).undoable, false);
-      assert.match(undoReadiness(stored[0]).reason ?? '', /包含删除/);
+      assert.match(undoReadiness(stored[0]).reason ?? '', /没有快照/);
     });
 
-    applyResult = { ok: false, reason: '本次操作包含删除，无法完整撤销', restored: 0, failures: [] };
+    applyResult = { ok: false, reason: '本次操作有 1 条删除发生在旧版本（没有快照），无法还原，因此整轮不撤销', restored: 0, failures: [] };
     await useAIStore.getState().undoLast();
     const refusalToasts = useToastStore.getState().toasts;
     ok('撤销被拒时如实提示原因，不得谎报成功', () => {
       assert.ok(
-        refusalToasts.some((t) => t.title === '无法撤销' && /包含删除/.test(t.description ?? '')),
+        refusalToasts.some((t) => t.title === '无法撤销' && /没有快照/.test(t.description ?? '')),
         `应有拒绝提示，实际 ${JSON.stringify(refusalToasts)}`,
       );
       assert.ok(!refusalToasts.some((t) => t.title.includes('已撤销')), '不得出现成功提示');
@@ -2376,6 +2421,155 @@ function ok(name: string, fn: () => void) {
     storageMap.delete(UNDO_STORAGE_KEY);
     sendMessageMock = () => undefined;
     useToastStore.setState({ toasts: [] });
+  }
+
+  /* ── T27: 删除可撤销（含并发删除与子树还原） ── */
+  console.log('\n[T27] 删除可撤销');
+  {
+    const {
+      UNDO_STORAGE_KEY,
+      beginUndoTransaction,
+      endUndoTransaction,
+      ensureOrderCheckpoint,
+      resetUndoTransactionForTest,
+    } = await import('../src/lib/undo/recorder');
+    const { applyUndo } = await import('../src/lib/undo/apply');
+    const { jRemove } = await import('../src/lib/undo/mutations');
+    const { opWeight, summarizeOps } = await import('../src/lib/undo/journal');
+    type UndoOp = import('../src/lib/undo/types').UndoOp;
+
+    // ── A. 并发删除（与 cleanup_sweep 的 10 路并发池同形）后撤销：顺序必须完全还原 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    const conc = (await mockBookmarks.create({ parentId: '1', title: 'T27-CONC' })).id;
+    const concIds: string[] = [];
+    for (let i = 0; i < 30; i++) {
+      const id = String(nextId++);
+      store.push({
+        id,
+        parentId: conc,
+        title: `c-${String(i).padStart(2, '0')}`,
+        url: `https://t27-conc.test/${i}`,
+        dateAdded: 30_000 + i,
+      });
+      concIds.push(id);
+    }
+    const beforeConc = await snapshotTreeObj();
+    const beforeConcTitles = concIds.map((_, i) => `c-${String(i).padStart(2, '0')}`);
+    await beginUndoTransaction('run-t27-conc');
+    // 契约：调用方必须在批量删除**之前**为每个将失去子项的父目录取顺序检查点
+    // （真实调用方是 cleanup_sweep / propose_deletions / delete_all_bookmarks）
+    await ensureOrderCheckpoint(conc);
+    // 删掉错落的一半（偶数位）+ 10 路并发：正是"并发读下标不构成一致历史"的场景
+    const targets = concIds.filter((_, i) => i % 2 === 0);
+    let cursor = 0;
+    await Promise.all(
+      Array.from({ length: 10 }, async () => {
+        while (cursor < targets.length) await jRemove(targets[cursor++]!);
+      }),
+    );
+    const concPoint = await endUndoTransaction();
+    const midConc = await snapshotTreeObj();
+    const concUndo = await applyUndo();
+    const afterConc = await snapshotTreeObj();
+
+    ok('并发删除的每条操作都带子树快照与原父目录', () => {
+      const dels = (concPoint?.ops ?? []).filter(
+        (o): o is Extract<UndoOp, { kind: 'delete' }> => o.kind === 'delete',
+      );
+      assert.equal(dels.length, 15, '删掉了 15 条');
+      assert.ok(
+        dels.every((d) => d.snapshot && d.parentId === conc),
+        '每条删除都必须有快照与原父目录，否则撤销只能靠猜',
+      );
+      assert.ok(
+        (concPoint?.orderCheckpoints ?? []).some((cp) => cp.parentId === conc),
+        '并发删除必须在动手前取父目录顺序检查点（逐条下标/锚点都不可靠）',
+      );
+    });
+    ok('并发删除后撤销：整棵树含顺序逐节点复原', () => {
+      assert.ok(concUndo.ok, `撤销应成功，实际 ${JSON.stringify(concUndo)}`);
+      assert.notEqual(firstTreeDiff(beforeConc, midConc), null, '本轮确实删掉了东西');
+      const diff = firstTreeDiff(beforeConc, afterConc, '', { ignoreIds: true });
+      assert.equal(diff, null, `第一处差异：${diff ?? ''}`);
+    });
+    const concTitlesAfter = (await mockBookmarks.getChildren(conc)).map((n) => n.title);
+    ok('并发删除撤销后兄弟顺序与原顺序一致', () => assert.deepEqual(concTitlesAfter, beforeConcTitles));
+
+    // ── B. 子树还原：删掉一个含子项的文件夹，撤销要连内容与顺序一起带回来 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    const treeParent = (await mockBookmarks.create({ parentId: '1', title: 'T27-PARENT' })).id;
+    const victim = (await mockBookmarks.create({ parentId: treeParent, title: 'T27-VICTIM' })).id;
+    for (const t of ['v1', 'v2', 'v3']) {
+      await mockBookmarks.create({ parentId: victim, title: t, url: `https://t27-victim.test/${t}` });
+    }
+    const beforeTree = await snapshotTreeObj();
+    await beginUndoTransaction('run-t27-tree');
+    await jRemove(victim, { tree: true });
+    const treePoint = await endUndoTransaction();
+    const treeUndo = await applyUndo();
+    const afterTree = await snapshotTreeObj();
+    ok('删除文件夹时快照包含整棵子树（按节点数计权重）', () => {
+      const del = (treePoint?.ops ?? []).find(
+        (o): o is Extract<UndoOp, { kind: 'delete' }> => o.kind === 'delete',
+      );
+      assert.ok(del?.snapshot, '应有快照');
+      assert.equal(opWeight(del!), 4, '文件夹 1 + 3 个子书签');
+      assert.equal(summarizeOps(treePoint!.ops), '删除 4 项');
+    });
+    ok('撤销删除文件夹：整棵子树（含顺序）回到原位', () => {
+      assert.ok(treeUndo.ok, `撤销应成功，实际 ${JSON.stringify(treeUndo)}`);
+      const diff = firstTreeDiff(beforeTree, afterTree, '', { ignoreIds: true });
+      assert.equal(diff, null, `第一处差异：${diff ?? ''}`);
+    });
+
+    // ── C. 全链路：cleanup_sweep 在「无需确认」模式下并发删除 → 撤销 → 整棵树一致 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    storageMap.set('markai.config', { deleteMode: 'auto' }); // 用户显式选择"无需确认"
+    const sweepFolder = (await mockBookmarks.create({ parentId: '1', title: 'T27-SWEEP' })).id;
+    for (let i = 0; i < 12; i++) {
+      const id = String(nextId++);
+      store.push({
+        id,
+        parentId: sweepFolder,
+        title: `s-${String(i).padStart(2, '0')}`,
+        // 3 段路径 → classify_urls 判为 deep，keepOnly=page 时不在保留范围 → 可删
+        url: `https://t27-sweep-${i}.test/docs/article/${i}`,
+        dateAdded: Date.UTC(2025, 6, 1),
+      });
+    }
+    const beforeSweep = await snapshotTreeObj();
+    await beginUndoTransaction('run-t27-sweep');
+    // checkReachable=false：不联网、不走启发式，全部 12 条都在清理范围内
+    const sweepOut = await executeTool(
+      'cleanup_sweep',
+      JSON.stringify({ folderId: sweepFolder, beforeYear: 2026, keepOnly: 'page', checkReachable: false }),
+    );
+    const sweepPoint = await endUndoTransaction();
+    const midSweep = await snapshotTreeObj();
+    const sweepUndo = await applyUndo();
+    const afterSweep = await snapshotTreeObj();
+    storageMap.delete('markai.config');
+    const sj = JSON.parse(sweepOut.result) as { toDelete: number; deleted: number; failed: number };
+    ok('cleanup_sweep 自动模式确实按并发删除了书签', () => {
+      assert.equal(sj.toDelete, 12);
+      assert.equal(sj.deleted, 12, `应删掉 12 条，实际 ${sj.deleted}`);
+      assert.equal(sj.failed, 0);
+      assert.notEqual(firstTreeDiff(beforeSweep, midSweep), null, '这一轮确实删掉了东西');
+    });
+    ok('自动清理一轮后撤销：整棵树含顺序逐节点复原（这是"后悔药"的核心场景）', () => {
+      assert.ok(sweepPoint?.containsDelete, '应标记含删除');
+      assert.ok(sweepUndo.ok, `撤销应成功，实际 ${JSON.stringify(sweepUndo)}`);
+      assert.equal(sweepUndo.failures.length, 0);
+      const diff = firstTreeDiff(beforeSweep, afterSweep, '', { ignoreIds: true });
+      assert.equal(diff, null, `第一处差异：${diff ?? ''}`);
+    });
+
+    resetUndoTransactionForTest();
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete('markai.config');
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

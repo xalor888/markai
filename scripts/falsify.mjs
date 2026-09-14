@@ -25,6 +25,41 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: '删除不再记子树快照（回到"删除不可逆"）',
+    file: 'src/lib/undo/mutations.ts',
+    from: '    ...(captured?.snapshot ? { snapshot: captured.snapshot } : {}),',
+    to: '',
+    expectFail: ['并发删除后撤销', '撤销删除文件夹', '自动清理一轮后撤销', '撤销点时删除'],
+  },
+  {
+    name: '删除还原后不做 old→new id 映射（顺序检查点对不上）',
+    file: 'src/lib/undo/apply.ts',
+    from: '        cp.order.map((id) => idMap.get(id) ?? id),',
+    to: '        cp.order,',
+    expectFail: ['并发删除后撤销', '撤销删除文件夹', '自动清理一轮后撤销'],
+  },
+  {
+    name: 'applyUndo 不执行父目录顺序检查点',
+    file: 'src/lib/undo/apply.ts',
+    from: '  for (const cp of target.orderCheckpoints ?? []) {',
+    to: '  for (const cp of [] as { parentId: string; order: string[] }[]) {',
+    expectFail: ['并发删除后撤销', '自动清理一轮后撤销'],
+  },
+  {
+    name: 'cleanup_sweep 删除前不拍顺序检查点（并发删除顺序错乱）',
+    file: 'src/lib/ai/tools.ts',
+    from: "    // 删除前先给每个会失去子项的父目录拍一次\"动手前完整子序\"：\n    // 下面是 10 路并发删除，逐条下标/锚点都无法可靠还原顺序，撤销要靠这些检查点。\n    for (const p of new Set(targets.map((t) => t.parentId).filter((x): x is string => !!x))) {\n      await ensureOrderCheckpoint(p);\n    }",
+    to: '    // reverted',
+    expectFail: ['自动清理一轮后撤销'],
+  },
+  {
+    name: '无快照的历史删除点不再被拒绝（会做"半撤销"）',
+    file: 'src/lib/undo/journal.ts',
+    from: '  return ops.filter((op) => op.kind === \'delete\' && !op.snapshot);',
+    to: '  return [];',
+    expectFail: ['undoReadiness：带快照的删除可撤', 'store 里的含删除撤销点被判定为不可撤销'],
+  },
+  {
     name: 'auto_categorize 退回逐条埋点（并发下标不构成一致历史）',
     file: 'src/lib/ai/tools.ts',
     from: '          await chrome.bookmarks.move(id, { parentId: folderId });',

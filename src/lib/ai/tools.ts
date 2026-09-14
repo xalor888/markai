@@ -5,6 +5,7 @@ import { uid } from '../format';
 import type { DeletionProposal } from './types';
 import { CONFIG_STORAGE_KEY } from '@/stores/configStore';
 import { jCreate, jMove, jRemove, jUpdate, recordMoveBatch } from '@/lib/undo/mutations';
+import { ensureOrderCheckpoint } from '@/lib/undo/recorder';
 
 /** 工具执行结果 */
 export interface ToolOutput {
@@ -765,7 +766,7 @@ async function cleanupSweep(
 
   // 存活检测（并发池，仅检测保留候选）
   let reachable = new Set<string>();
-  const deadMain: { id: string; title: string; reason: string }[] = [];
+  const deadMain: { id: string; title: string; reason: string; parentId?: string }[] = [];
   if (checkReachable && keptByType.length > 0) {
     const results: Record<string, unknown>[] = new Array(keptByType.length);
     let cursor = 0;
@@ -799,7 +800,12 @@ async function cleanupSweep(
       } else {
         // 主页面失效（404/超时/连接失败）→ 纳入删除
         const code = typeof r.code === 'number' ? `HTTP ${r.code}` : (r.status === 'timeout' ? '连接超时' : String(r.message ?? r.status));
-        deadMain.push({ id: item.node.id, title: item.node.title || item.node.url || '(未命名)', reason: `主页面失效（${code}）` });
+        deadMain.push({
+          id: item.node.id,
+          title: item.node.title || item.node.url || '(未命名)',
+          reason: `主页面失效（${code}）`,
+          parentId: item.node.parentId,
+        });
       }
     }
     reachable = keptSet;
@@ -811,7 +817,7 @@ async function cleanupSweep(
   // 删除模式：auto = "无需确认"（直接执行删除）；confirm = 生成待确认提议（默认）
   const mode = await getDeleteMode();
   // 删除目标：子页面/深层页（按类型） + 失效主页面
-  const targets: { id: string; title: string; reason: string }[] = [];
+  const targets: { id: string; title: string; reason: string; parentId?: string }[] = [];
   for (const c of classified) {
     if (reachable.has(c.node.id)) continue;
     if (deadMain.some((d) => d.id === c.node.id)) continue; // 已加入失效主页面
@@ -819,6 +825,7 @@ async function cleanupSweep(
     targets.push({
       id: c.node.id,
       title,
+      parentId: c.node.parentId,
       reason:
         c.cls.type === 'deep'
           ? '深层子页面（文章/文档页）'
@@ -829,12 +836,17 @@ async function cleanupSweep(
               : '页面类型不符合保留要求',
     });
   }
-  for (const d of deadMain) targets.push({ id: d.id, title: d.title, reason: d.reason });
+  for (const d of deadMain) targets.push({ id: d.id, title: d.title, reason: d.reason, parentId: d.parentId });
 
   const deletions: DeletionProposal[] = [];
   let autoDeleted = 0;
   let autoFailed = 0;
   if (mode === 'auto' && targets.length > 0) {
+    // 删除前先给每个会失去子项的父目录拍一次"动手前完整子序"：
+    // 下面是 10 路并发删除，逐条下标/锚点都无法可靠还原顺序，撤销要靠这些检查点。
+    for (const p of new Set(targets.map((t) => t.parentId).filter((x): x is string => !!x))) {
+      await ensureOrderCheckpoint(p);
+    }
     // 「无需确认」模式：直接删除（并发池 10，失败重试一次），生成 executed 卡片供回显
     const retryDelete = async (id: string) => {
       try {
@@ -1548,6 +1560,16 @@ async function proposeDeletions(args: unknown): Promise<ToolOutput> {
   const deletions: DeletionProposal[] = [];
   let executed = 0;
   let failed = 0;
+  if (mode === 'auto') {
+    // 删除前给每个会失去子项的父目录拍一次"动手前完整子序"（撤销按它精确还原顺序）
+    const parents = new Set<string>();
+    for (const item of items) {
+      const nodes = await chrome.bookmarks.get(item.bookmarkId).catch(() => []);
+      const pid = nodes[0]?.parentId;
+      if (pid) parents.add(pid);
+    }
+    for (const p of parents) await ensureOrderCheckpoint(p);
+  }
   for (const item of items) {
     const nodes = await chrome.bookmarks.get(item.bookmarkId).catch(() => []);
     const node = nodes[0];
@@ -1607,10 +1629,15 @@ async function deleteAllBookmarks(args: unknown): Promise<ToolOutput> {
   const tree = await chrome.bookmarks.getTree();
   const roots = tree[0]?.children ?? [];
   // 收集所有根下的直接子项（递归子树由 removeTree 处理）
-  const targets: { id: string; title: string; url?: string }[] = [];
+  const targets: { id: string; title: string; url?: string; parentId?: string }[] = [];
   for (const root of roots) {
     for (const child of root.children ?? []) {
-      targets.push({ id: child.id, title: child.title || child.url || '(未命名)', url: child.url });
+      targets.push({
+        id: child.id,
+        title: child.title || child.url || '(未命名)',
+        url: child.url,
+        parentId: child.parentId,
+      });
     }
   }
   if (targets.length === 0) {
@@ -1619,6 +1646,10 @@ async function deleteAllBookmarks(args: unknown): Promise<ToolOutput> {
 
   const mode = await getDeleteMode();
   if (mode === 'auto') {
+    // 删除前给每个会失去子项的父目录拍一次"动手前完整子序"（撤销按它精确还原顺序）
+    for (const p of new Set(targets.map((t) => t.parentId).filter((x): x is string => !!x))) {
+      await ensureOrderCheckpoint(p);
+    }
     let ok = 0;
     let fail = 0;
     for (const t of targets) {

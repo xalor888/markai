@@ -6,6 +6,7 @@
  * 这类错误在测试里表现为「撤销后顺序不对」，必须能被证伪。
  */
 import { markDelete, recordOp } from './recorder';
+import type { BookmarkSnapshot } from './types';
 
 /** 新建（文件夹或书签）：撤销 = 删掉新建出来的节点 */
 export async function jCreate(opt: {
@@ -89,18 +90,57 @@ export function recordMoveBatch(params: {
   });
 }
 
+/** 把一个节点（含全部后代）转成可持久化的快照 */
+function toSnapshot(node: chrome.bookmarks.BookmarkTreeNode): BookmarkSnapshot {
+  return {
+    title: node.title,
+    ...(node.url ? { url: node.url } : {}),
+    ...(node.children?.length ? { children: node.children.map(toSnapshot) } : {}),
+  };
+}
+
+/** 删除前要抓住的还原信息（必须在真正删除**之前**取） */
+async function captureForDelete(id: string): Promise<{
+  title: string;
+  parentId?: string;
+  index?: number;
+  snapshot?: BookmarkSnapshot;
+} | null> {
+  const sub = await chrome.bookmarks.getSubTree(id).catch(() => []);
+  const node = sub[0];
+  if (!node) return null;
+  let parentId: string | undefined;
+  let index: number | undefined;
+  if (node.parentId) {
+    parentId = node.parentId;
+    const siblings = await chrome.bookmarks.getChildren(node.parentId).catch(() => []);
+    const at = siblings.findIndex((s) => s.id === id);
+    if (at >= 0) index = at; // 仅作兜底；并发下不可靠，位置靠 orderCheckpoints
+  }
+  return { title: node.title || '(未命名)', parentId, index, snapshot: toSnapshot(node) };
+}
+
 /**
- * 删除：**不可逆**（没有子树快照）。把本轮标记为「含删除」，撤销时会明确拒绝整轮，
- * 而不是只撤一半再假装成功。
+ * 删除：**可逆**（靠删除前的子树快照还原内容，靠调用方预先取的父目录顺序检查点还原位置）。
  *
- * 顺序上刻意「先删成功、再记日志」：删除失败时不该在摘要里出现一条并不存在的删除，
- * 也不该把一整轮误判成不可撤销（调用方可能带重试）。
+ * 顺序上刻意「先抓快照 → 再删 → 成功后才记日志」：
+ * 抓不到快照就不该声称可撤销；删除失败时也不该在摘要里出现一条并不存在的删除
+ * （调用方 cleanup_sweep 带重试）。
+ *
+ * 调用方**必须**在批量删除前对每个将失去子项的父目录调用 `ensureOrderCheckpoint()`
+ * ——并发删除的逐条下标与位置锚点都不可靠（后者实测栽过）。
  */
 export async function jRemove(id: string, opts: { tree?: boolean } = {}): Promise<void> {
-  const nodes = await chrome.bookmarks.get(id).catch(() => []);
-  const title = nodes[0]?.title || '(未命名)';
+  const captured = await captureForDelete(id);
   if (opts.tree) await chrome.bookmarks.removeTree(id);
   else await chrome.bookmarks.remove(id);
   markDelete();
-  recordOp({ kind: 'delete', id, title });
+  recordOp({
+    kind: 'delete',
+    id,
+    title: captured?.title ?? '(未命名)',
+    ...(captured?.parentId ? { parentId: captured.parentId } : {}),
+    ...(captured?.index !== undefined ? { index: captured.index } : {}),
+    ...(captured?.snapshot ? { snapshot: captured.snapshot } : {}),
+  });
 }

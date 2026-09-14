@@ -9,10 +9,49 @@
  */
 import { reverseOps, undoReadiness } from './journal';
 import { readUndoPoints, takeUndoPoint } from './recorder';
-import type { UndoApplyResult, UndoOp } from './types';
+import type { BookmarkSnapshot, UndoApplyResult, UndoOp } from './types';
+
+/**
+ * 把某个父目录的子项顺序校正为 `order`：
+ * 在 `order` 里出现过的节点按原序排前面，其余（本轮新建的）留在末尾。
+ * 用于 moveBatch 与删除的顺序检查点——两者都不依赖逐条下标，因此抗并发。
+ */
+async function restoreParentOrder(parentId: string, order: string[]): Promise<void> {
+  const current = await chrome.bookmarks.getChildren(parentId).catch(() => []);
+  const orderSet = new Set(order);
+  const present = new Set(current.map((n) => n.id));
+  const target = [
+    ...order.filter((id) => present.has(id)),
+    ...current.filter((n) => !orderSet.has(n.id)).map((n) => n.id),
+  ];
+  const mirror = current.map((n) => n.id); // 本地镜像，避免每个位置都重新 getChildren
+  for (let i = 0; i < target.length; i++) {
+    const at = mirror.indexOf(target[i]!);
+    if (at < 0 || at === i) continue;
+    // Chromium 的 index 是「移除源之前」坐标：要落到第 i 位，移除源之后才是 i
+    const index = i >= at ? i + 1 : i;
+    await chrome.bookmarks.move(target[i]!, { parentId, index });
+    mirror.splice(at, 1);
+    mirror.splice(i, 0, target[i]!);
+  }
+}
+
+/** 按快照递归重建子树，返回新建节点的 id */
+async function restoreSubtree(snap: BookmarkSnapshot, parentId: string, index?: number): Promise<string> {
+  const node = await chrome.bookmarks.create({
+    parentId,
+    title: snap.title,
+    ...(snap.url ? { url: snap.url } : {}),
+    ...(index !== undefined ? { index } : {}),
+  });
+  for (const child of snap.children ?? []) {
+    await restoreSubtree(child, node.id);
+  }
+  return node.id;
+}
 
 /** 执行一条逆操作。节点已不存在视为「已还原」（用户可能已经手动删掉了）。 */
-async function applyOne(op: UndoOp): Promise<void> {
+async function applyOne(op: UndoOp, idMap: Map<string, string>): Promise<void> {
   switch (op.kind) {
     case 'create': {
       const nodes = await chrome.bookmarks.get(op.id).catch(() => []);
@@ -40,6 +79,20 @@ async function applyOne(op: UndoOp): Promise<void> {
       await chrome.bookmarks.move(op.id, { parentId: op.fromParentId, index });
       return;
     }
+    case 'delete': {
+      // 历史日志点（v0.2.3 及更早写下的）没有快照：必须如实报错，不能假装还原成功。
+      // undoReadiness 通常已经拦下这类点，这里是第二道闸。
+      if (!op.snapshot) throw new Error('该删除操作没有快照（旧版本写下的日志），无法还原');
+      if (!op.parentId) throw new Error(`找不到「${op.title}」的原文件夹，无法还原`);
+      const parent = await chrome.bookmarks.get(op.parentId).catch(() => []);
+      if (!parent[0]) throw new Error(`原文件夹已不存在，无法还原「${op.title}」`);
+      // 位置：先按兜底下标放进去；整轮的顺序最后由 orderCheckpoints 统一校正。
+      // 必须登记 old→new：删除的原节点 id 已经不存在，重建出来的是**新 id**，
+      // 而顺序检查点里存的是**旧 id**——不映射的话检查点会对不上，顺序还原直接失效。
+      const newId = await restoreSubtree(op.snapshot, op.parentId, op.index);
+      idMap.set(op.id, newId);
+      return;
+    }
     case 'moveBatch': {
       // 1) 先把这批节点全部搬回源文件夹（此刻顺序无所谓，下一步统一校正）
       for (const id of op.ids) {
@@ -50,28 +103,9 @@ async function applyOne(op: UndoOp): Promise<void> {
           await chrome.bookmarks.move(id, { parentId: op.fromParentId });
         }
       }
-      // 2) 把源文件夹的子项顺序还原成批次开始前的样子。
-      //    批次记录自带完整子序，所以这里不需要（也不能）依赖逐条下标——
-      //    这正是并发批量移动能安全撤销的原因。
-      const current = await chrome.bookmarks.getChildren(op.fromParentId).catch(() => []);
-      const orderSet = new Set(op.order);
-      const present = new Set(current.map((n) => n.id));
-      // 批次开始前就存在的节点按原序在前；本轮新建的节点（如分类文件夹）排到末尾，
-      // 稍后由它们自己的 create 逆操作删除
-      const target = [
-        ...op.order.filter((id) => present.has(id)),
-        ...current.filter((n) => !orderSet.has(n.id)).map((n) => n.id),
-      ];
-      const mirror = current.map((n) => n.id); // 本地镜像，避免每个位置都重新 getChildren
-      for (let i = 0; i < target.length; i++) {
-        const at = mirror.indexOf(target[i]!);
-        if (at < 0 || at === i) continue;
-        // 同 applyOne('move') 的换算：要落到第 i 位，Chromium 要的是「移除源之前」的坐标
-        const index = i >= at ? i + 1 : i;
-        await chrome.bookmarks.move(target[i]!, { parentId: op.fromParentId, index });
-        mirror.splice(at, 1);
-        mirror.splice(i, 0, target[i]!);
-      }
+      // 2) 把源文件夹的子项顺序还原成批次开始前的样子
+      //    （批次记录自带完整子序，所以不依赖逐条下标——这正是并发批量移动能安全撤销的原因）
+      await restoreParentOrder(op.fromParentId, op.order);
       return;
     }
     case 'update': {
@@ -80,9 +114,6 @@ async function applyOne(op: UndoOp): Promise<void> {
       await chrome.bookmarks.update(op.id, op.before);
       return;
     }
-    case 'delete':
-      // undoReadiness 已拦下含删除的轮次；真走到这里说明日志被改坏了，如实报错
-      throw new Error('删除操作没有快照，无法撤销');
   }
 }
 
@@ -110,14 +141,33 @@ export async function applyUndo(id?: string): Promise<UndoApplyResult> {
   }
 
   const failures: UndoApplyResult['failures'] = [];
+  const idMap = new Map<string, string>(); // 删除还原后的 old→new id 映射（供顺序检查点使用）
   let restored = 0;
   for (const op of reverseOps(target.ops)) {
-    if (op.kind === 'delete') continue;
     try {
-      await applyOne(op);
+      await applyOne(op, idMap);
       restored++;
     } catch (e) {
       failures.push({ op: op.kind, title: op.title, error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  // 最后按检查点校正父目录顺序：并发删除/移动期间逐条下标不可靠，
+  // 而"动手前的完整子序"是可靠的。放在所有操作还原之后——
+  // 此时本轮新建的节点已被各自的 create 逆操作删除，剩下的正好该按原序排列。
+  for (const cp of target.orderCheckpoints ?? []) {
+    try {
+      // 检查点里是**删除前**的旧 id，先翻译成本轮重建出来的新 id
+      await restoreParentOrder(
+        cp.parentId,
+        cp.order.map((id) => idMap.get(id) ?? id),
+      );
+    } catch (e) {
+      failures.push({
+        op: 'move',
+        title: `还原「${cp.parentId}」内的顺序`,
+        error: e instanceof Error ? e.message : String(e),
+      });
     }
   }
   await takeUndoPoint(target.id);

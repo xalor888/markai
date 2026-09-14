@@ -25,6 +25,27 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: '迟到写入不再自我补偿（收尾后它把 pending 复活）',
+    file: 'src/lib/undo/recorder.ts',
+    from: '    if (ok && epoch !== txEpoch) await removePendingKey();',
+    to: '    if (false && ok && epoch !== txEpoch) await removePendingKey();',
+    expectFail: ['收尾后落地的迟到写入会自我补偿'],
+  },
+  {
+    name: '清空不递增纪元（迟到写入把快照写回来）',
+    file: 'src/lib/undo/recorder.ts',
+    from: '  // 递增纪元：在途的 pending 写入落地时会发现纪元已变，自行补偿删除\n  // （否则它会在清空之后把快照复活，下次启动又变成撤销点）\n  txEpoch += 1;',
+    to: '  // reverted',
+    expectFail: ['清空后落地的迟到写入不得让 pending 复活'],
+  },
+  {
+    name: 'pending 写入不串行化（慢的旧写入覆盖新快照）',
+    file: 'src/lib/undo/recorder.ts',
+    from: '  const next = pendingIo.then(task, task);',
+    to: '  const next = task();',
+    expectFail: ['写入串行化：较慢的旧写入不得覆盖较新的快照'],
+  },
+  {
     name: '消费失败仍报成功（原点留在存储里，再点就重复回放）',
     file: 'src/lib/undo/apply.ts',
     from: '  if (!consumed.removed) {\n    appliedThisSession.add(target.id);',
@@ -181,7 +202,7 @@ const cases = [
   {
     name: '正常收尾后不清 pending（下次启动会重复提升）',
     file: 'src/lib/undo/recorder.ts',
-    from: '  // 已正经收尾：清掉进行中的快照，避免下次启动把它当成"被中断的轮次"重复提升\n  await clearPending();',
+    from: '  // 已正经收尾：清掉快照。此刻若还有**在途**写入，它落地时会发现纪元已变，自行补偿删除\n  // （这条补偿是唯一的把关机制，因此它可以被反证单独证伪）\n  await clearPending();',
     to: '  // reverted',
     expectFail: ['正常收尾后清除 pending'],
   },
@@ -286,7 +307,7 @@ const cases = [
   {
     name: 'clearUndoPoints 不再真的清空（隐私承诺落空）',
     file: 'src/lib/undo/recorder.ts',
-    from: '  lastWriteError = null;\n  await chrome.storage.local.remove(UNDO_STORAGE_KEY);',
+    from: '  lastWriteError = null;\n  // 递增纪元：在途的 pending 写入落地时会发现纪元已变，自行补偿删除\n  // （否则它会在清空之后把快照复活，下次启动又变成撤销点）\n  txEpoch += 1;\n  await chrome.storage.local.remove(UNDO_STORAGE_KEY);',
     to: '  lastWriteError = null;',
     expectFail: ['clearUndoPoints 真的清空撤销记录'],
   },

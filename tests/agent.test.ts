@@ -246,6 +246,12 @@ const mockBookmarks = {
           throw new Error(`QUOTA_BYTES quota exceeded (${keys.join(',')})`);
         }
         if (storageSetFail) throw new Error('QUOTA_BYTES quota exceeded');
+        // 可控延迟：用来复现"写入还在路上时收尾/清空已经发生"的竞态。
+        // storageSetDelaySequence 按次消费，可让**较旧的写入更慢**（验证串行化）。
+        if (keys.includes('markai.undo.pending')) {
+          const delay = storageSetDelaySequence.length > 0 ? storageSetDelaySequence.shift()! : storageSetDelayMs;
+          if (delay > 0) await new Promise((r) => setTimeout(r, delay));
+        }
         for (const [k, v] of Object.entries(obj)) storageMap.set(k, structuredClone(v));
       },
       remove: async (keys: string | string[]) => {
@@ -296,6 +302,12 @@ let storageSetFailKeys: string[] | null = null;
 
 /** 按 key 失败还要失败几次（默认无限；设 1 可验证"重试一次就成功"） */
 let storageSetFailTimes = Number.POSITIVE_INFINITY;
+
+/** 对 markai.undo.pending 的写入注入延迟（毫秒）：复现"写入在路上时收尾/清空已发生" */
+let storageSetDelayMs = 0;
+
+/** 按次消费的延迟序列：可让较旧的写入更慢，用于验证写入串行化 */
+let storageSetDelaySequence: number[] = [];
 
 /** 测试期清单版本：默认取 package.json（与 WXT 注入一致），用例可临时覆盖 */
 const pkgVersion = (
@@ -4142,6 +4154,116 @@ function ok(name: string, fn: () => void) {
       assert.equal(storageMap.has(UNDO_PENDING_KEY), false, 'pending 也必须被清掉'),
     );
 
+    storageSetFail = false;
+    storageSetFailKeys = null;
+    storageSetFailTimes = Number.POSITIVE_INFINITY;
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+  }
+
+  /* ── T39: pending 写入竞态（迟到写入不得复活快照） ── */
+  console.log('\n[T39] pending 写入竞态');
+  {
+    const {
+      UNDO_STORAGE_KEY,
+      UNDO_PENDING_KEY,
+      beginUndoTransaction,
+      endUndoTransaction,
+      ensureOrderCheckpoint,
+      clearUndoPoints,
+      readUndoState,
+      resetUndoTransactionForTest,
+      recoverInterruptedTransaction,
+      dropActiveForTest,
+      markDelete,
+    } = await import('../src/lib/undo/recorder');
+    const { jCreate } = await import('../src/lib/undo/mutations');
+    const pendingOf = () => storageMap.get(UNDO_PENDING_KEY) as { runId?: string; ops?: unknown[] } | undefined;
+
+    // ── A. 慢速 pending 写入进行中收尾：最终必须"点在、pending 不在" ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+    await beginUndoTransaction('race-end');
+    await ensureOrderCheckpoint('1');
+    storageSetDelayMs = 300; // pending 写入变慢
+    await jCreate({ parentId: '1', title: 'T39-RACE', url: 'https://t39.test/race' });
+    // 等尾随补写真的发出（节流窗口 250ms），此刻那条慢写入正在路上
+    await new Promise((r) => setTimeout(r, 320));
+    // 前置条件：带本次操作的慢写入还没落地（此时存储里的快照只有检查点、没有 op）
+    const inFlight = (pendingOf()?.ops ?? []).length === 0;
+    const endP = endUndoTransaction(); // 收尾时那条写入仍在路上
+    const endPoint = await endP;
+    await new Promise((r) => setTimeout(r, 500)); // 给迟到写入充分落地的机会
+    storageSetDelayMs = 0;
+    const raceState = await readUndoState();
+    ok('收尾后落地的迟到写入会自我补偿：pending 不得残留', () => {
+      assert.ok(inFlight, '前置条件：收尾时那条带操作的 pending 写入应仍在路上');
+      assert.ok(endPoint, '正常收尾应产生撤销点');
+      assert.equal(raceState.points.length, 1, '应恰好一个撤销点');
+      assert.equal(pendingOf(), undefined, '收尾之后 pending 不得残留在存储里');
+    });
+
+    // ── B. 慢速写入进行中清空：pending 不得被迟到写入复活 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+    await beginUndoTransaction('race-clear');
+    await ensureOrderCheckpoint('1');
+    storageSetDelayMs = 300;
+    await jCreate({ parentId: '1', title: 'T39-CLEAR', url: 'https://t39.test/clear' });
+    await new Promise((r) => setTimeout(r, 320)); // 让慢写入真的上路
+    const clearInFlight = (pendingOf()?.ops ?? []).length === 0;
+    await clearUndoPoints();
+    await new Promise((r) => setTimeout(r, 500));
+    storageSetDelayMs = 0;
+    ok('清空后落地的迟到写入不得让 pending 复活', () => {
+      assert.ok(clearInFlight, '前置条件：清空时那条带操作的 pending 写入应仍在路上');
+      assert.equal(pendingOf(), undefined, '清空后 pending 必须仍然不存在');
+    });
+
+    // ── C. 同一事务的多次写入保持发起顺序（新快照不被旧快照覆盖） ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+    await beginUndoTransaction('race-order');
+    await ensureOrderCheckpoint('1'); // 第 1 次写入（即刻完成）
+    await jCreate({ parentId: '1', title: 'T39-A', url: 'https://t39.test/a' });
+    // 第 2 次写入：带 1 条操作，**很慢**（300ms）
+    // 第 3 次写入：带 2 条操作，**很快**（0ms）
+    // 串行化时第 3 次会排队等第 2 次 → 最终是新快照；不串行化时慢的旧写入最后落地 → 快照回退
+    storageSetDelaySequence = [300, 0];
+    await markDelete();
+    await jCreate({ parentId: '1', title: 'T39-B', url: 'https://t39.test/b' });
+    await markDelete();
+    await new Promise((r) => setTimeout(r, 600));
+    storageSetDelaySequence = [];
+    const snapshotOps = (pendingOf()?.ops ?? []).length;
+    dropActiveForTest();
+    ok('写入串行化：较慢的旧写入不得覆盖较新的快照', () => {
+      assert.equal(snapshotOps, 2, `快照应是较新的那次（2 条操作），实际 ${snapshotOps}`);
+    });
+
+    // ── D. 正常路径：恢复成功后 pending 清干净 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+    storageMap.set(UNDO_PENDING_KEY, {
+      runId: 'race-ok',
+      ops: [{ kind: 'create', id: 'ok-1', title: 'x', isFolder: false }],
+      containsDelete: false,
+      orderCheckpoints: [],
+      updatedAt: Date.now(),
+    });
+    const okRecover = await recoverInterruptedTransaction();
+    ok('正常恢复路径不回归：成功提升且 pending 清掉', () => {
+      assert.ok(okRecover);
+      assert.equal(pendingOf(), undefined);
+    });
+
+    storageSetDelayMs = 0;
+    storageSetDelaySequence = [];
     storageSetFail = false;
     storageSetFailKeys = null;
     storageSetFailTimes = Number.POSITIVE_INFINITY;

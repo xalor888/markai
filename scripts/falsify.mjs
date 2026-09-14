@@ -25,6 +25,13 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: '去重忽略 limit（一次提交上千条提议）',
+    file: 'src/lib/ai/tools.ts',
+    from: '  const groups = buildDuplicateGroups(roots as unknown as DupeNode[]).slice(0, limit);',
+    to: '  const groups = buildDuplicateGroups(roots as unknown as DupeNode[]);',
+    expectFail: ['limit 生效'],
+  },
+  {
     name: '去重保留规则不再优先自定义标题',
     file: 'src/lib/ai/dedupe.ts',
     from: '    const custom = Number(hasCustomTitle(b)) - Number(hasCustomTitle(a));',
@@ -50,7 +57,7 @@ const cases = [
     file: 'src/lib/ai/tools.ts',
     from: '    for (const p of plans) {\n      for (const r of p.remove) {\n        deletions.push({\n          id: uid(),\n          bookmarkId: r.id,\n          title: r.title || r.url || \'(未命名)\',\n          url: r.url,\n          reason: `重复书签（保留「${p.keep.title || p.keep.url}」：${p.reason}）`,',
     to: '    for (const p of plans) {\n      for (const r of [p.keep, ...p.remove]) {\n        deletions.push({\n          id: uid(),\n          bookmarkId: r.id,\n          title: r.title || r.url || \'(未命名)\',\n          url: r.url,\n          reason: `重复书签（保留「${p.keep.title || p.keep.url}」：${p.reason}）`,',
-    expectFail: ['默认（需确认）模式：提交的提议恰好是非保留项'],
+    expectFail: ['默认（需确认）模式：提交的提议恰好是非保留项', 'limit 生效'],
   },
   {
     name: '撤销历史不再标出可撤销性（点了才知道撤不了）',

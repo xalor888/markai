@@ -3244,6 +3244,39 @@ function ok(name: string, fn: () => void) {
       assert.ok(!dryOut.deletions, '预览不得产生删除提议');
     });
 
+    // ── limit 生效：按"组"截断，且优先处理重复最多的组 ──
+    const fLimit = (await mockBookmarks.create({ parentId: '2', title: 'T32-LIMIT' })).id;
+    const mkCopies = async (host: string, copies: number) => {
+      for (let i = 0; i < copies; i++) {
+        await mockBookmarks.create({ parentId: fLimit, title: `c-${host}-${i}`, url: `https://${host}/x` });
+      }
+    };
+    await mkCopies('a-limit.test', 3); // 最大组：3 条 → 删 2
+    await mkCopies('b-limit.test', 2); // → 删 1
+    await mkCopies('c-limit.test', 2); // → 删 1
+    const limitOne = JSON.parse(
+      (await executeTool('dedupe_bookmarks', JSON.stringify({ folderIds: [fLimit], dryRun: true, limit: 1 }))).result,
+    ) as { groups: number; duplicates: number; sample: { url: string }[] };
+    const limitTwo = JSON.parse(
+      (await executeTool('dedupe_bookmarks', JSON.stringify({ folderIds: [fLimit], dryRun: true, limit: 2 }))).result,
+    ) as { groups: number; duplicates: number };
+    const limitConfirm = await executeTool(
+      'dedupe_bookmarks',
+      JSON.stringify({ folderIds: [fLimit], limit: 1 }),
+    );
+    const limitConfirmJ = JSON.parse(limitConfirm.result) as { groups: number; submitted: number };
+    storageMap.delete('markai.config');
+    ok('limit 生效：按组截断、优先处理重复最多的组，并同样约束实际提议数', () => {
+      assert.equal(limitOne.groups, 1, '只处理 1 组');
+      assert.equal(limitOne.duplicates, 2, '最大的一组 3 条 → 删 2');
+      assert.match(limitOne.sample[0]!.url, /a-limit\.test/, '优先处理重复最多的组');
+      assert.equal(limitTwo.groups, 2, 'limit=2 处理两组');
+      assert.equal(limitTwo.duplicates, 3, '3 条组删 2 + 2 条组删 1');
+      assert.equal(limitConfirmJ.groups, 1);
+      assert.equal(limitConfirmJ.submitted, 2, 'limit 也要约束真正提交的提议数');
+      assert.equal((limitConfirm.deletions ?? []).length, 2);
+    });
+
     const confirmOut = await executeTool('dedupe_bookmarks', JSON.stringify({ folderIds: [f1.folder] }));
     const cj = JSON.parse(confirmOut.result) as { mode: string; submitted: number; duplicates: number };
     const proposedIds = (confirmOut.deletions ?? []).map((d) => d.bookmarkId).sort();

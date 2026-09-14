@@ -31,7 +31,7 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
-| 测试 | `npm test` | **177 项全绿**（95 → 118 → 140 → 145 → 157 → 164 → 166 → 177） |
+| 测试 | `npm test` | **181 项全绿**（95 → 118 → 140 → 145 → 157 → 164 → 166 → 177 → 181） |
 | 构建 | `npm run build` | 通过，`.output/chrome-mv3` 788.17 kB |
 | 版本 | `package.json` | **0.2.4（已发版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
@@ -216,8 +216,23 @@ sort_folder + merge_folders 再撤销）抓出**并发批量移动**的坑——
 | **P1** ✅ | 操作日志 + 撤销（主线 A） | 最大产品空洞：只有删除可逆（已完成，见 §4A） |
 | **P2** ✅ | 撤销的边界与规模：真实大库（5000+ 节点）下的撤销正确性与耗时、撤销栈的跨窗口一致性、排序/合并/自动分类的专项反证（主线 B/C） | 让 P1 的边界也被证明（已完成，见 §4A 末段：抓出并发批量移动的顺序 bug） |
 | **P2+** ✅ | 删除可撤销（快照 + 顺序检查点，闭合最后一块不可逆，见 §4A 末） | 用户最可能后悔的场景就是自动清理，此前它整轮不可撤 |
-| **P3** | 真浏览器端到端验证（加载 `.output/chrome-mv3`，跑一次真实整理任务 + 点一次撤销） | 单测看不见 UI 与真实 API 的差异；**无人值守下做不完整**，能做的是把可自动化的部分（产物校验/静态检查）做完并如实标注缺口 |
+| **P3** ⛔（环境受限，已定性） | 真浏览器端到端验证（加载 `.output/chrome-mv3`，跑一次真实整理任务 + 点一次撤销） | 见下方「P3 为什么做不到」——不是"没时间"，是**本环境没有能带扩展启动的浏览器**；解除条件已写清 |
 | **P4** | 分发就绪（权限最小化、隐私说明、上架材料） | 无人值守下无法完成商店审核，只能把可自动化的部分做完 |
+
+**P3 为什么做不到（实测，2026-09-14）**：本环境能用的浏览器自动化是 **ego-browser 0.5.0.32
+（Chromium 152）**，它是 **CDP 附着的封装**——skill 明确要求"不要启动另一个浏览器"，
+因此无法用 `--load-extension` / `--disable-extensions-except` 启动。三条实测证据：
+
+1. `task.cdp(...)` 只接受 `Target.` 与 `Browser.` 域 → 拒绝 `Extensions.loadUnpacked`；
+2. `page.cdp("Extensions.loadUnpacked", …)` → **`Method not available.`**
+   （该域要求浏览器以 `--enable-unsafe-extension-debugging` 启动）；
+3. Chrome 的"加载已解压扩展"走的是**原生目录选择器**，不是 `<input type=file>`，无法用
+   `setInputFiles` 绕过。
+
+**解除条件（谁能做、怎么做）**：在一个能自行启动 Chromium 的环境里，
+用 `--disable-extensions-except=<repo>/.output/chrome-mv3 --load-extension=…` 启动，
+再跑「自动清理 → 撤销」「两个窗口各点一次撤销」两条路径。
+在那之前，README 与发布说明都只声明"经替身测试与产物校验"，不声明真机验证。
 
 > 规模结论的适用边界（别过度解读）：替身的 `getChildren` 是 **O(全库)**，而真实 API 是
 > O(该文件夹子项)，所以 5000 节点用例里的耗时（一轮 ~6-11s、撤销 ~6-7s）是**悲观上界**，

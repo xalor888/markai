@@ -38,8 +38,8 @@ jobs:
       - name: 打包 Chrome zip
         run: npm run zip
 
-      - name: 打包 Firefox zip
-        run: npm run zip:firefox
+      # 不再发布 Firefox 产物：它从未在真实 Firefox 里验证过（见 docs/release.md）。
+      # 重新纳入的条件写在同处：先在 Firefox 里装一次并跑通核心路径，再加回这一步。
 
       - name: 上传构建产物
         uses: actions/upload-artifact@v5

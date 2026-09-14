@@ -25,6 +25,34 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: '权限文档与 manifest 漂移（文档少列一项）',
+    file: 'docs/permissions.md',
+    from: 'manifest-permissions: bookmarks, storage, tabs, tabGroups, contextMenus, sidePanel',
+    to: 'manifest-permissions: bookmarks, storage, tabGroups, contextMenus, sidePanel',
+    expectFail: ['docs/permissions.md 的权限清单与 wxt.config.ts 完全一致'],
+  },
+  {
+    name: 'manifest 偷偷多加一项权限（文档没写）',
+    file: 'wxt.config.ts',
+    from: "    permissions: ['bookmarks', 'storage', 'tabs', 'tabGroups', 'contextMenus', 'sidePanel'],",
+    to: "    permissions: ['bookmarks', 'storage', 'tabs', 'tabGroups', 'contextMenus', 'sidePanel', 'history'],",
+    expectFail: ['docs/permissions.md 的权限清单与 wxt.config.ts 完全一致'],
+  },
+  {
+    name: '隐私说明不再披露死链检测会联系书签站点',
+    file: 'docs/privacy.md',
+    from: '会**直接向书签指向的 URL 发 HEAD 请求**',
+    to: '会联系书签站点',
+    expectFail: ['隐私说明覆盖了三件必须说的事'],
+  },
+  {
+    name: 'release workflow 又发未验证的 Firefox 产物',
+    file: '.github/workflows/release.yml',
+    from: '      - name: 打包 Chrome zip',
+    to: '      - name: 打包 Firefox zip\n        run: npm run zip:firefox\n\n      - name: 打包 Chrome zip',
+    expectFail: ['release workflow 不再发布未验证的 Firefox 产物'],
+  },
+  {
     name: '预算裁剪失效（超预算不再丢最旧）',
     file: 'src/lib/undo/journal.ts',
     from: '    if (total + size <= budgetBytes) {',

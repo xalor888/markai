@@ -2833,6 +2833,70 @@ function ok(name: string, fn: () => void) {
     setUndoBudgetBytes(UNDO_BUDGET_BYTES);
   }
 
+  /* ── T29: 权限文档与 manifest 不许漂移 + 隐私承诺可核对 ── */
+  console.log('\n[T29] 权限/隐私文档守卫');
+  {
+    const docsDir = resolve(dirname(fileURLToPath(import.meta.url)), '../docs');
+    const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const wxt = readFileSync(resolve(rootDir, 'wxt.config.ts'), 'utf8');
+    const permDoc = readFileSync(resolve(docsDir, 'permissions.md'), 'utf8');
+    const privacyDoc = readFileSync(resolve(docsDir, 'privacy.md'), 'utf8');
+
+    // wxt.config.ts 里的 permissions 数组
+    const manifestPerms = (() => {
+      const m = wxt.match(/permissions:\s*\[([^\]]*)\]/);
+      assert.ok(m, 'wxt.config.ts 应能解析出 permissions 数组');
+      return m![1]!
+        .split(',')
+        .map((x) => x.trim().replace(/^['"]|['"]$/g, ''))
+        .filter(Boolean)
+        .sort();
+    })();
+    // 文档里的机器可读清单
+    const docPerms = (() => {
+      const m = permDoc.match(/^manifest-permissions:\s*(.+)$/m);
+      assert.ok(m, 'permissions.md 应有 manifest-permissions 行（机器可读清单）');
+      return m![1]!
+        .split(',')
+        .map((x) => x.trim())
+        .filter(Boolean)
+        .sort();
+    })();
+
+    ok('docs/permissions.md 的权限清单与 wxt.config.ts 完全一致', () =>
+      assert.deepEqual(
+        docPerms,
+        manifestPerms,
+        `文档与 manifest 漂移了：文档 ${docPerms.join('/')} vs manifest ${manifestPerms.join('/')}`,
+      ),
+    );
+
+    ok('README 只声称已发布的平台（不声称 Firefox）', () => {
+      const readme = readFileSync(resolve(rootDir, 'README.md'), 'utf8');
+      assert.match(readme, /Chrome \/ Edge/, 'README 应声称 Chrome / Edge');
+      assert.ok(
+        !/支持\s*Firefox|Firefox\s*\/\s*Chrome/.test(readme),
+        'README 不该声称支持 Firefox（未验证，且已停止发布 Firefox 产物）',
+      );
+    });
+
+    ok('隐私说明覆盖了三件必须说的事（本地存储/外发对象/如何清除）', () => {
+      assert.match(privacyDoc, /chrome\.storage\.local/, '要说明数据存在哪');
+      assert.match(privacyDoc, /Base URL/, '要说明内容发给谁');
+      assert.match(privacyDoc, /HEAD/, '要披露死链检测会联系书签站点');
+      assert.match(privacyDoc, /清空本地数据/, '要给出清除入口');
+      assert.match(privacyDoc, /明文/, '要如实说明 API Key 是明文存储');
+    });
+
+    ok('release workflow 不再发布未验证的 Firefox 产物', () => {
+      const rel = readFileSync(resolve(rootDir, '.github/workflows/release.yml'), 'utf8');
+      assert.ok(
+        !/zip:firefox|build:firefox/.test(rel),
+        'Firefox 从未在真实 Firefox 里验证过，不该继续作为发布产物（见 docs/release.md）',
+      );
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

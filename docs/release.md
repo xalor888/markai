@@ -102,6 +102,22 @@ git tag -d v0.2.2
 修好问题后重新打 tag。**已经在用户浏览器里加载的旧 zip 不受影响**——
 扩展不发版也能继续用，这是它比服务端安全的地方。
 
+## 4.5 为什么不再发布 Firefox 产物（v0.2.5 起）
+
+从 v0.2.0 到 v0.2.4，每次发版都会产出并附上 `markai-*-firefox.zip`，但**它从未在真实 Firefox 里
+装过一次**。按本项目"不发没人验证过的产物"的标准，这属于**发布了没有依据的东西**——
+README 声称的平台本来也只有 Chrome / Edge。
+
+因此 release workflow 里移除了 `npm run zip:firefox` 这一步（构建与打包逻辑本身保留在
+`package.json`，谁都可以本地跑）。
+
+**重新纳入的条件**（缺一不可）：
+
+1. 在真实 Firefox 里 `about:debugging` → 临时载入 `.output/firefox-mv2`（或 MV3）并启动；
+2. 跑通核心路径：侧边栏打开、书签树渲染、一次对话 + 一次工具调用（移动/新建）、一次撤销；
+3. 确认 `chrome.bookmarks` / `sidePanel`（Firefox 用 `sidebar_action`）在目标版本上的差异已被处理；
+4. 把结论写进本文件，再把这一步加回 workflow，并在 README 的平台声明里写上 Firefox。
+
 ## 5. CI 里的一个已修陷阱（别再踩）
 
 `actions/upload-artifact@v4.4+` / `v5` **默认不上传隐藏目录里的文件**

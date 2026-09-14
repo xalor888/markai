@@ -492,6 +492,27 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'dedupe_bookmarks',
+      description:
+        '一键去重：按归一化 URL（忽略片段/查询参数/www/尾斜杠，http 与 https 视为不同）找出重复书签，每组保留 1 条、删除其余。' +
+        '保留规则确定且可解释：自定义标题优先 → 最近使用 → 最早收藏 → 按 id 稳定排序。' +
+        '先用 dryRun=true 出计划（不改动任何书签），用户确认后再用 dryRun=false 执行；' +
+        '「无需确认」模式下直接删除（可一键撤销），否则提交删除提议等待用户确认。',
+      parameters: {
+        type: 'object',
+        properties: {
+          folderIds: { type: 'array', items: { type: 'string' }, description: '只在这些文件夹里查重（不传 = 全库）' },
+          limit: { type: 'integer', description: '最多处理多少组，默认 100，最大 500' },
+          dryRun: { type: 'boolean', description: 'true = 只出计划、不改动书签（建议先预览）' },
+        },
+        required: [],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'sort_folder',
       description:
         '对指定文件夹内的子项排序（文件夹置顶），写入真实顺序。by 支持 title（名称，自然数字排序）、url（地址）、dateAdded（添加时间升序）、dateLastUsed（最近使用降序）。',

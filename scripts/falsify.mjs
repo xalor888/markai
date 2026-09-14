@@ -25,6 +25,34 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const cases = [
   {
+    name: '去重保留规则不再优先自定义标题',
+    file: 'src/lib/ai/dedupe.ts',
+    from: '    const custom = Number(hasCustomTitle(b)) - Number(hasCustomTitle(a));',
+    to: '    const custom = 0;',
+    expectFail: ['保留规则：自定义标题优先'],
+  },
+  {
+    name: '去重保留规则丢掉 id 稳定排序（结果随输入顺序变）',
+    file: 'src/lib/ai/dedupe.ts',
+    from: '    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;',
+    to: '    return 0;',
+    expectFail: ['保留规则：其余条件相同则按 id 稳定排序'],
+  },
+  {
+    name: 'dryRun 仍然写库（预览会真的删东西）',
+    file: 'src/lib/ai/tools.ts',
+    from: '  if (dryRun || toRemove.length === 0) {',
+    to: '  if (toRemove.length === 0) {',
+    expectFail: ['dryRun 只出计划'],
+  },
+  {
+    name: 'confirm 模式把保留项也提交删除',
+    file: 'src/lib/ai/tools.ts',
+    from: '    for (const p of plans) {\n      for (const r of p.remove) {\n        deletions.push({\n          id: uid(),\n          bookmarkId: r.id,\n          title: r.title || r.url || \'(未命名)\',\n          url: r.url,\n          reason: `重复书签（保留「${p.keep.title || p.keep.url}」：${p.reason}）`,',
+    to: '    for (const p of plans) {\n      for (const r of [p.keep, ...p.remove]) {\n        deletions.push({\n          id: uid(),\n          bookmarkId: r.id,\n          title: r.title || r.url || \'(未命名)\',\n          url: r.url,\n          reason: `重复书签（保留「${p.keep.title || p.keep.url}」：${p.reason}）`,',
+    expectFail: ['默认（需确认）模式：提交的提议恰好是非保留项'],
+  },
+  {
     name: '撤销历史不再标出可撤销性（点了才知道撤不了）',
     file: 'src/lib/undo/journal.ts',
     from: '      undoable: ready.undoable,',

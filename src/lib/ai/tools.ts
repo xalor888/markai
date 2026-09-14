@@ -5,6 +5,7 @@ import { uid } from '../format';
 import type { DeletionProposal } from './types';
 import { CONFIG_STORAGE_KEY } from '@/stores/configStore';
 import { jCreate, jMove, jRemove, jUpdate, recordMoveBatch } from '@/lib/undo/mutations';
+import { buildDuplicateGroups, normalizeUrl, pickDuplicateKeeper, type DupeNode } from './dedupe';
 import { ensureOrderCheckpoint } from '@/lib/undo/recorder';
 
 /** 工具执行结果 */
@@ -1013,26 +1014,6 @@ async function stats(args: unknown): Promise<ToolOutput> {
   };
 }
 
-/** URL 归一化：去协议、www、查询参数与片段、尾斜杠，小写（用于重复检测） */
-function normalizeUrl(u: string): string {
-  try {
-    const parsed = new URL(u.trim());
-    parsed.hash = '';
-    parsed.search = '';
-    if (parsed.hostname.startsWith('www.')) parsed.hostname = parsed.hostname.slice(4);
-    return parsed.toString().replace(/\/$/, '');
-  } catch {
-    // 非标准 URL（如缺失协议）：尽力剥离常见噪声
-    return u
-      .trim()
-      .toLowerCase()
-      .replace(/^https?:\/\//, '')
-      .replace(/^www\./, '')
-      .replace(/[?#].*$/, '')
-      .replace(/\/+$/, '');
-  }
-}
-
 const findDuplicatesSchema = z.object({ limit: z.number().int().min(1).max(500).optional() });
 
 /** 查找重复书签（URL 归一化后相同的为一组，重复最多的在前） */
@@ -1068,6 +1049,119 @@ async function findDuplicates(args: unknown): Promise<ToolOutput> {
       note: '重复组按数量降序；如需清理请用 propose_deletions 提交删除提议（保留其中一个）。',
       items,
     }),
+  };
+}
+
+const dedupeSchema = z.object({
+  // 只在这些文件夹里查重（不传 = 全库）
+  folderIds: z.array(z.string()).max(50).optional(),
+  // 最多处理多少组（默认 100，防止一次提交上千条提议）
+  limit: z.number().int().min(1).max(500).optional(),
+  // 只出计划、不动任何东西（也不产生提议）
+  dryRun: z.boolean().optional(),
+});
+
+/**
+ * 一键去重：确定性地产出「每组留哪条、删哪些」的计划，并按既有安全闸门执行。
+ *
+ * 与 find_duplicates 的分工：后者只报告，清理要靠模型把 id 抄进 propose_deletions（易错且费 token）；
+ * 这里把「保留谁」固化成可解释规则（见 dedupe.ts），dryRun=true 时只出计划、不落盘。
+ */
+async function dedupeBookmarks(args: unknown): Promise<ToolOutput> {
+  const { folderIds, limit = 100, dryRun = false } = dedupeSchema.parse(args);
+  await ensureRoots();
+  const tree = await chrome.bookmarks.getTree();
+  const scope = folderIds?.length
+    ? await Promise.all(
+        folderIds.map((id) => chrome.bookmarks.getSubTree(id).then((n) => n[0]).catch(() => undefined)),
+      )
+    : tree;
+  const roots = scope.filter((n): n is chrome.bookmarks.BookmarkTreeNode => !!n);
+  const groups = buildDuplicateGroups(roots as unknown as DupeNode[]).slice(0, limit);
+
+  const plans = groups.map((g) => {
+    const { keep, remove, reason } = pickDuplicateKeeper(g.items);
+    return { key: g.key, keep, remove, reason };
+  });
+  const toRemove = plans.flatMap((p) => p.remove);
+
+  if (dryRun || toRemove.length === 0) {
+    return {
+      result: JSON.stringify({
+        dryRun: true,
+        groups: plans.length,
+        duplicates: toRemove.length,
+        sample: plans.slice(0, 20).map((p) => ({
+          url: p.key,
+          keep: { id: p.keep.id, title: p.keep.title },
+          why: p.reason,
+          remove: p.remove.map((r) => ({ id: r.id, title: r.title })),
+        })),
+        note:
+          plans.length === 0
+            ? '没有发现重复书签（按归一化 URL 判重：忽略片段、查询参数、www 与尾斜杠；http/https 视为不同）。'
+            : `发现 ${plans.length} 组重复，计划删除 ${toRemove.length} 条、每组保留 1 条（保留规则：自定义标题优先 → 最近使用 → 最早收藏 → 按 id 稳定排序）。这是预览，没有改动任何书签；确认后再调用一次（dryRun=false）即可执行。`,
+      }),
+    };
+  }
+
+  const mode = await getDeleteMode();
+  const deletions: DeletionProposal[] = [];
+  let executed = 0;
+  if (mode === 'auto') {
+    for (const r of toRemove) {
+      try {
+        await jRemove(r.id);
+        executed++;
+        deletions.push({
+          id: uid(),
+          bookmarkId: r.id,
+          title: r.title || r.url || '(未命名)',
+          url: r.url,
+          reason: `重复书签（保留「${plans.find((p) => p.remove.includes(r))!.keep.title || r.url}」）`,
+          status: 'executed',
+          createdAt: Date.now(),
+        });
+      } catch {
+        // 单条失败不中断，也不进提议（避免 UI 显示成待确认）
+      }
+    }
+  } else {
+    for (const p of plans) {
+      for (const r of p.remove) {
+        deletions.push({
+          id: uid(),
+          bookmarkId: r.id,
+          title: r.title || r.url || '(未命名)',
+          url: r.url,
+          reason: `重复书签（保留「${p.keep.title || p.keep.url}」：${p.reason}）`,
+          status: 'pending',
+          createdAt: Date.now(),
+        });
+      }
+    }
+  }
+
+  return {
+    result: JSON.stringify({
+      dryRun: false,
+      mode,
+      groups: plans.length,
+      duplicates: toRemove.length,
+      executed,
+      submitted: deletions.length,
+      sample: plans.slice(0, 10).map((p) => ({
+        url: p.key,
+        keep: p.keep.title,
+        why: p.reason,
+        remove: p.remove.length,
+      })),
+      note:
+        mode === 'auto'
+          ? `已删除 ${executed} 条重复书签（每组保留 1 条，可一键撤销）。`
+          : `已提交 ${deletions.length} 条删除提议，等你在界面确认（每组保留 1 条）。`,
+    }),
+    deletions,
   };
 }
 
@@ -1725,6 +1819,7 @@ const TOOL_MAP: Record<string, ToolEntry> = {
   cleanup_sweep: { name: 'cleanup_sweep', handler: cleanupSweep },
   stats: { name: 'stats', handler: stats },
   find_duplicates: { name: 'find_duplicates', handler: findDuplicates },
+  dedupe_bookmarks: { name: 'dedupe_bookmarks', handler: dedupeBookmarks },
   sort_folder: { name: 'sort_folder', handler: sortFolder },
   propose_deletions: { name: 'propose_deletions', handler: proposeDeletions },
   delete_all_bookmarks: { name: 'delete_all_bookmarks', handler: deleteAllBookmarks },
@@ -1798,6 +1893,7 @@ export const TOOL_META: Record<string, { label: string }> = {
   auto_categorize: { label: '自动分类' },
   stats: { label: '统计' },
   find_duplicates: { label: '查找重复' },
+  dedupe_bookmarks: { label: '一键去重' },
   sort_folder: { label: '排序' },
   propose_deletions: { label: '删除提议' },
   delete_all_bookmarks: { label: '删除全部' },

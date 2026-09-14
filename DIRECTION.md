@@ -31,7 +31,7 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
-| 测试 | `npm test` | **194 项全绿**（95 → 118 → 140 → 145 → 157 → 164 → 166 → 177 → 181 → 183 → 189 → 194） |
+| 测试 | `npm test` | **205 项全绿**（95 → 118 → 140 → 145 → 157 → 164 → 166 → 177 → 181 → 183 → 189 → 194 → 205） |
 | 构建 | `npm run build` | 通过，`.output/chrome-mv3` 788.17 kB |
 | 版本 | `package.json` | **0.2.7（已发版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
@@ -260,6 +260,17 @@ sort_folder + merge_folders 再撤销）抓出**并发批量移动**的坑——
 > 发版流程与验证方式见 `docs/release.md`（markai 不走 keepgoal 部署主机：扩展没有服务端与探针）。
 > v0.2.2 那次发版顺带发现并修掉了 CI 里一个长期存在的静默失败，见 §3 末尾（v0.2.3 的发版已复验该修复在 tag 触发的真实发版里生效）。
 
+
+### D. 能力（Capability）—— 把易错的模型链路换成确定性工具
+
+**一键去重（`dedupe_bookmarks`）**：原先 `find_duplicates` 只报告分组，清理要靠模型把每组的 id
+逐个抄进 `propose_deletions`——几百组时既费 token 又极易抄错。现在把「保留谁」固化成**确定且可解释**
+的规则（自定义标题优先 → 最近使用 → 最早收藏 → 按 id 稳定排序，`src/lib/ai/dedupe.ts` 纯逻辑），
+工具只在既有安全闸门内执行：`dryRun:true` **只出计划、不落盘**（这是"预览"在最高危操作上的第一次落地），
+确认后按 confirm/auto 模式提交提议或直接删除（删除可撤销）。
+
+这条主线后面可以继续：**整理前的整体预览（dry-run）** 需要工具层逐个支持"先出计划不落盘"，
+比去重这一处大得多，但它能把"先动手再撤销"变成"先看清再动手"。
 
 ## 6. 每个目标的完成标准（Definition of Done）
 

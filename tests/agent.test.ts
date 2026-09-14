@@ -3154,6 +3154,149 @@ function ok(name: string, fn: () => void) {
     });
   }
 
+  /* ── T32: 一键去重（确定性保留规则 + 可验证预览） ── */
+  console.log('\n[T32] 一键去重');
+  {
+    const { normalizeUrl, buildDuplicateGroups, pickDuplicateKeeper } = await import('../src/lib/ai/dedupe');
+    const { applyUndo } = await import('../src/lib/undo/apply');
+    const { UNDO_STORAGE_KEY, beginUndoTransaction, endUndoTransaction, resetUndoTransactionForTest } =
+      await import('../src/lib/undo/recorder');
+    type DupeNode = import('../src/lib/ai/dedupe').DupeNode;
+
+    const n = (id: string, url: string, extra: Partial<DupeNode> = {}): DupeNode =>
+      ({ id, url, title: url, ...extra }) as DupeNode;
+
+    ok('归一化：忽略片段/查询参数/www/尾斜杠', () => {
+      assert.equal(normalizeUrl('https://www.example.com/a/?x=1#h'), normalizeUrl('https://example.com/a'));
+      assert.notEqual(normalizeUrl('http://example.com/a'), normalizeUrl('https://example.com/a'),
+        '协议差异按设计保留（不擅自改写用户收藏的协议）');
+    });
+
+    ok('分组：只返回有重复的组，且组内多的在前', () => {
+      const groups = buildDuplicateGroups([
+        n('a', 'https://example.com/x'),
+        n('b', 'https://www.example.com/x?q=1'),
+        n('c', 'https://other.test/y'),
+        n('d', 'https://third.test/z'),
+        n('e', 'https://third.test/z#frag'),
+      ]);
+      assert.equal(groups.length, 2, '只有两组有重复');
+      assert.equal(groups[0]!.items.length, 2);
+      assert.ok(groups.every((g) => g.items.length > 1));
+    });
+
+    // ── 保留规则的四个优先级 ──
+    ok('保留规则：自定义标题优先于"最近使用/最早收藏"', () => {
+      const r = pickDuplicateKeeper([
+        n('new-used', 'https://e.test/a', { dateLastUsed: 9_000, dateAdded: 100 }),
+        n('renamed', 'https://e.test/a', { title: '我自己起的名字', dateAdded: 500 }),
+      ]);
+      assert.equal(r.keep.id, 'renamed');
+      assert.match(r.reason, /自定义标题/);
+    });
+    ok('保留规则：都没有自定义标题时，最近使用的优先', () => {
+      const r = pickDuplicateKeeper([
+        n('old', 'https://e.test/a', { dateAdded: 1, dateLastUsed: 0 }),
+        n('recent', 'https://e.test/a', { dateAdded: 900, dateLastUsed: 7_000 }),
+      ]);
+      assert.equal(r.keep.id, 'recent');
+      assert.match(r.reason, /最近被使用/);
+    });
+    ok('保留规则：都没用过时，收藏最早的优先', () => {
+      const r = pickDuplicateKeeper([
+        n('later', 'https://e.test/a', { dateAdded: 800 }),
+        n('earlier', 'https://e.test/a', { dateAdded: 200 }),
+      ]);
+      assert.equal(r.keep.id, 'earlier');
+      assert.match(r.reason, /收藏得最早/);
+    });
+    ok('保留规则：其余条件相同则按 id 稳定排序（结果可复现，不随机）', () => {
+      const r1 = pickDuplicateKeeper([n('b2', 'https://e.test/a'), n('a1', 'https://e.test/a')]);
+      const r2 = pickDuplicateKeeper([n('a1', 'https://e.test/a'), n('b2', 'https://e.test/a')]);
+      assert.equal(r1.keep.id, 'a1');
+      assert.equal(r2.keep.id, 'a1', '输入顺序不同也必须得到同一结果');
+      assert.match(r1.reason, /稳定排序/);
+    });
+
+    // ── 工具端到端 ──
+    const setupDupes = async () => {
+      const folder = (await mockBookmarks.create({ parentId: '2', title: 'T32-FOLDER' })).id;
+      const a = (await mockBookmarks.create({ parentId: folder, title: 'Example', url: 'https://example.com/dup' })).id;
+      const b = (await mockBookmarks.create({ parentId: folder, title: 'https://example.com/dup', url: 'https://www.example.com/dup?utm=1' })).id;
+      const c = (await mockBookmarks.create({ parentId: folder, title: 'Example 副本', url: 'https://example.com/dup#x' })).id;
+      const solo = (await mockBookmarks.create({ parentId: folder, title: 'Solo', url: 'https://solo.test/only' })).id;
+      return { folder, a, b, c, solo };
+    };
+
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    storageMap.delete('markai.config'); // 默认 confirm 模式
+    const f1 = await setupDupes();
+    const beforeDry = await snapshotTreeObj();
+    const dryOut = await executeTool('dedupe_bookmarks', JSON.stringify({ folderIds: [f1.folder], dryRun: true }));
+    const afterDry = await snapshotTreeObj();
+    const dj = JSON.parse(dryOut.result) as { dryRun: boolean; groups: number; duplicates: number };
+    ok('dryRun 只出计划：不改动书签、也不产生提议', () => {
+      assert.equal(dj.dryRun, true);
+      assert.equal(dj.groups, 1, '一组重复');
+      assert.equal(dj.duplicates, 2, '其余两条待删');
+      assert.equal(firstTreeDiff(beforeDry, afterDry), null, '预览不得改动书签库');
+      assert.ok(!dryOut.deletions, '预览不得产生删除提议');
+    });
+
+    const confirmOut = await executeTool('dedupe_bookmarks', JSON.stringify({ folderIds: [f1.folder] }));
+    const cj = JSON.parse(confirmOut.result) as { mode: string; submitted: number; duplicates: number };
+    const proposedIds = (confirmOut.deletions ?? []).map((d) => d.bookmarkId).sort();
+    ok('默认（需确认）模式：提交的提议恰好是非保留项，保留项不动', () => {
+      assert.equal(cj.mode, 'confirm');
+      assert.equal(cj.duplicates, 2);
+      assert.equal(cj.submitted, 2);
+      assert.deepEqual(proposedIds, [f1.b, f1.c].sort(), '保留 a（有自定义标题），提议删 b、c');
+      assert.ok((confirmOut.deletions ?? []).every((d) => d.status === 'pending'), '必须等用户确认');
+    });
+
+    // ── auto 模式：直接删且可撤销 ──
+    storageMap.delete(UNDO_STORAGE_KEY);
+    resetUndoTransactionForTest();
+    storageMap.set('markai.config', { deleteMode: 'auto' });
+    const f2 = await setupDupes();
+    const beforeAuto = await snapshotTreeObj();
+    await beginUndoTransaction('run-t32');
+    const autoOut = await executeTool('dedupe_bookmarks', JSON.stringify({ folderIds: [f2.folder] }));
+    const autoPoint = await endUndoTransaction();
+    const aj = JSON.parse(autoOut.result) as { executed: number; duplicates: number };
+    const midAuto = await snapshotTreeObj();
+    const undoAuto = await applyUndo();
+    const afterAuto = await snapshotTreeObj();
+    storageMap.delete('markai.config');
+    ok('「无需确认」模式：直接删除重复项', () => {
+      assert.equal(aj.duplicates, 2);
+      assert.equal(aj.executed, 2, `应删掉 2 条，实际 ${aj.executed}`);
+      assert.notEqual(firstTreeDiff(beforeAuto, midAuto), null, '确实删掉了东西');
+    });
+    ok('去重的删除可撤销：整棵树含顺序复原', () => {
+      assert.ok(autoPoint, '应产生撤销点');
+      assert.ok(undoAuto.ok, `撤销应成功，实际 ${JSON.stringify(undoAuto)}`);
+      const diff = firstTreeDiff(beforeAuto, afterAuto, '', { ignoreIds: true });
+      assert.equal(diff, null, `第一处差异：${diff ?? ''}`);
+    });
+
+    // ── 无重复：不产生任何提议 ──
+    const f3 = (await mockBookmarks.create({ parentId: '2', title: 'T32-NODUP' })).id;
+    await mockBookmarks.create({ parentId: f3, title: 'x', url: 'https://nodup.test/x' });
+    const noDup = await executeTool('dedupe_bookmarks', JSON.stringify({ folderIds: [f3] }));
+    const ndj = JSON.parse(noDup.result) as { groups: number; duplicates: number };
+    ok('没有重复时不产生任何提议', () => {
+      assert.equal(ndj.groups, 0);
+      assert.equal(ndj.duplicates, 0);
+      assert.ok(!noDup.deletions, '不应有提议载荷');
+    });
+
+    resetUndoTransactionForTest();
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete('markai.config');
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

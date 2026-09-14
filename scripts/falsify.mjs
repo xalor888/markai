@@ -29,7 +29,7 @@ const cases = [
     file: 'src/lib/undo/mutations.ts',
     from: '    ...(captured?.snapshot ? { snapshot: captured.snapshot } : {}),',
     to: '',
-    expectFail: ['并发删除后撤销', '撤销删除文件夹', '自动清理一轮后撤销', '撤销点时删除'],
+    expectFail: ['删除记录了子树快照与位置锚点', '并发删除后撤销', '撤销删除文件夹', '自动清理一轮后撤销'],
   },
   {
     name: '删除还原后不做 old→new id 映射（顺序检查点对不上）',
@@ -69,8 +69,8 @@ const cases = [
   {
     name: 'moveBatch 撤销时不做顺序还原（只把节点搬回去）',
     file: 'src/lib/undo/apply.ts',
-    from: '      const current = await chrome.bookmarks.getChildren(op.fromParentId).catch(() => []);',
-    to: '      return;\n      const current = await chrome.bookmarks.getChildren(op.fromParentId).catch(() => []);',
+    from: '      await restoreParentOrder(op.fromParentId, op.order);',
+    to: '      // reverted',
     expectFail: ['5000+ 节点下撤销后整棵树（含顺序）与操作前逐节点一致'],
   },
   {
@@ -151,16 +151,9 @@ const cases = [
   {
     name: 'jRemove 不标记含删除',
     file: 'src/lib/undo/mutations.ts',
-    from: '  markDelete();\n  recordOp({ kind: \'delete\', id, title });',
-    to: '  recordOp({ kind: \'delete\', id, title });',
-    expectFail: ['含删除的轮次拒绝撤销并说明原因'],
-  },
-  {
-    name: 'undoReadiness 忽略 containsDelete（会做半撤销）',
-    file: 'src/lib/undo/journal.ts',
-    from: '  if (point.containsDelete) {',
-    to: '  if (false) {',
-    expectFail: ['undoReadiness：含删除的轮次明确拒绝并给出原因', '含删除的轮次拒绝撤销并说明原因'],
+    from: '  markDelete();',
+    to: '',
+    expectFail: ['删除记录了子树快照与位置锚点', '自动清理一轮后撤销'],
   },
   {
     name: 'jCreate 不记录新建',

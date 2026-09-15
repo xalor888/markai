@@ -474,6 +474,38 @@ globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
 
 const TEST_CONFIG: AIConfig = { providerId: 'test', baseUrl: 'https://api.test.com/v1', apiKey: 'sk-test', model: 'test-model' };
 
+/** 构造一个"发出若干工具调用"的模型响应（多回次用） */
+function toolRound(calls: { id: string; name: string; args: unknown }[]): Response {
+  return sseResponse([
+    sseEvent(
+      JSON.stringify({
+        choices: [
+          {
+            delta: {
+              tool_calls: calls.map((c, index) => ({
+                index,
+                id: c.id,
+                type: 'function',
+                function: { name: c.name, arguments: JSON.stringify(c.args) },
+              })),
+            },
+          },
+        ],
+      }),
+    ),
+    sseEvent(JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] })),
+    'data: [DONE]\n\n',
+  ]);
+}
+
+/** 构造一个"给出最终回答"的模型响应 */
+function finalRound(text = '好了'): Response {
+  return sseResponse([
+    sseEvent(JSON.stringify({ choices: [{ delta: { content: text } }] })),
+    'data: [DONE]\n\n',
+  ]);
+}
+
 /** 可注入 config 与计划确认通道的 turn（第二片用） */
 function runTurnWith(
   text: string,
@@ -6013,6 +6045,150 @@ function ok(name: string, fn: () => void) {
     });
 
     useAIStore.setState({ pendingPlan: null });
+  }
+
+  /* ── T56: 轮次级预授权（一次确认覆盖整轮，未声明的仍须确认） ── */
+  console.log('\n[T56] 轮次级预授权');
+  {
+    const { UNDO_STORAGE_KEY, UNDO_PENDING_KEY, resetUndoTransactionForTest } = await import(
+      '../src/lib/undo/recorder'
+    );
+    const clear = () => {
+      storageMap.delete(UNDO_STORAGE_KEY);
+      storageMap.delete(UNDO_PENDING_KEY);
+      resetUndoTransactionForTest();
+      resetMockCalls();
+    };
+    const declared = {
+      steps: [
+        { tool: 'create_folder', summary: '新建文件夹 T56' },
+        { tool: 'create_bookmark', summary: '新建书签 T56' },
+      ],
+    };
+    /** 第 1 回次：声明整轮计划 + 建文件夹；第 2 回次：建书签（都已被声明覆盖） */
+    const twoRoundQueued = () => {
+      sseQueue = [
+        toolRound([
+          { id: 'c-declare', name: 'submit_plan', args: declared },
+          { id: 'c-folder', name: 'create_folder', args: { parentId: '1', title: 'T56-文件夹' } },
+        ]),
+        toolRound([
+          { id: 'c-bm', name: 'create_bookmark', args: { parentId: '1', title: 'T56-书签', url: 'https://t56.test/' } },
+        ]),
+        finalRound(),
+      ];
+    };
+
+    // ── A. 声明 → 批准：整轮只问一次，两次写操作都执行 ──
+    clear();
+    let planEvents = 0;
+    let approvalCount = 0;
+    let mutationsAtApproval = -1;
+    twoRoundQueued();
+    await runTurnWith('整理一下', {
+      config: { planMode: true },
+      events: (() => {
+        const ev: ChatOutbound[] = [];
+        return ev;
+      })(),
+      requestPlanApproval: async () => {
+        approvalCount += 1;
+        mutationsAtApproval = mockCalls.create;
+        return true;
+      },
+    });
+    ok('声明整轮计划后，整轮只请求一次确认（不是每回次一次）', () =>
+      assert.equal(approvalCount, 1, `应只问一次，实际 ${approvalCount}`),
+    );
+    ok('请求确认时零 mutation（声明本身不落库）', () =>
+      assert.equal(mutationsAtApproval, 0, `确认时应还没有写入，实际 ${mutationsAtApproval}`),
+    );
+    ok('批准后两个回次的写操作都执行了', () =>
+      assert.equal(mockCalls.create, 2, `应执行 2 次 create（文件夹+书签），实际 ${mockCalls.create}`),
+    );
+    ok('整轮批准后仍只产生一个撤销点，且覆盖两次写操作', () => {
+      const raw = storageMap.get(UNDO_STORAGE_KEY) as { points?: { ops: unknown[] }[] } | undefined;
+      const points = raw?.points ?? [];
+      assert.equal(points.length, 1, `应恰好一个撤销点，实际 ${points.length}`);
+      assert.equal(points[0]!.ops.length, 2, '点里应覆盖两次写操作');
+    });
+    clear();
+
+    // ── B. 声明 → 取消：整轮都被阻断（不只是第一回次） ──
+    let cancelApprovals = 0;
+    twoRoundQueued();
+    await runTurnWith('整理一下', {
+      config: { planMode: true },
+      requestPlanApproval: async () => {
+        cancelApprovals += 1;
+        return false;
+      },
+    });
+    ok('取消整轮计划后，后续回次的写操作也一律不执行', () =>
+      assert.equal(mockCalls.create, 0, `取消后整轮都应零写入，实际 ${mockCalls.create}`),
+    );
+    ok('取消之后不再重复追问（用户已经说过不要，不该被再问一次）', () =>
+      assert.equal(cancelApprovals, 1, `取消后不应再问，实际问了 ${cancelApprovals} 次`),
+    );
+    ok('取消整轮计划后不产生撤销点', () => {
+      const raw = storageMap.get(UNDO_STORAGE_KEY) as { points?: unknown[] } | undefined;
+      assert.equal((raw?.points ?? []).length, 0);
+    });
+    clear();
+
+    // ── C. 未声明的写操作：即使已批准，仍必须再次确认（安全边界） ──
+    let approvalCountC = 0;
+    sseQueue = [
+      toolRound([
+        { id: 'c-declare', name: 'submit_plan', args: { steps: [{ tool: 'create_folder', summary: '只声明了建文件夹' }] } },
+        { id: 'c-folder', name: 'create_folder', args: { parentId: '1', title: 'T56-已声明' } },
+      ]),
+      // 第二回次调用了**未声明**的工具
+      toolRound([{ id: 'c-rename', name: 'rename_bookmark', args: { bookmarkId: 'no-such-t56', title: 'x' } }]),
+      finalRound(),
+    ];
+    await runTurnWith('整理一下', {
+      config: { planMode: true },
+      requestPlanApproval: async () => {
+        approvalCountC += 1;
+        return true;
+      },
+    });
+    ok('已批准的声明之外的写操作，仍必须再次确认（不能靠模型自觉）', () =>
+      assert.equal(approvalCountC, 2, `已声明的不再问、未声明的要再问，合计 2 次，实际 ${approvalCountC}`),
+    );
+    clear();
+
+    // ── D. 没有声明时：行为与第二片一致（每回次确认，不回归） ──
+    let approvalCountD = 0;
+    sseQueue = [
+      toolRound([{ id: 'c-folder', name: 'create_folder', args: { parentId: '1', title: 'T56-无声明A' } }]),
+      toolRound([{ id: 'c-bm', name: 'create_bookmark', args: { parentId: '1', title: 'T56-无声明B', url: 'https://t56.test/b' } }]),
+      finalRound(),
+    ];
+    await runTurnWith('整理一下', {
+      config: { planMode: true },
+      requestPlanApproval: async () => {
+        approvalCountD += 1;
+        return true;
+      },
+    });
+    ok('没有声明时仍是每回次确认（既有行为不回归）', () =>
+      assert.equal(approvalCountD, 2, `两回次应问两次，实际 ${approvalCountD}`),
+    );
+    clear();
+
+    // ── E. submit_plan 自身零 mutation ──
+    resetMockCalls();
+    sseQueue = [toolRound([{ id: 'c-declare', name: 'submit_plan', args: declared }]), finalRound()];
+    await runTurnWith('先说计划', {
+      config: { planMode: true },
+      requestPlanApproval: async () => false,
+    });
+    ok('submit_plan 只声明不执行（零 mutation）', () =>
+      assert.equal(mockCalls.create, 0, '声明工具本身不得写库'),
+    );
+    clear();
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

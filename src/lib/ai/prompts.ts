@@ -376,6 +376,35 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'submit_plan',
+      description:
+        '声明本轮打算执行的写操作（仅登记，不执行、不改动任何书签）。当用户开启了「执行前先看计划」时，先用它把整轮要做的事一次说清，用户确认一次即可覆盖整轮；未在计划里的写操作仍会单独请求确认。不做任何写操作时不要调用它。',
+      parameters: {
+        type: 'object',
+        properties: {
+          steps: {
+            type: 'array',
+            description: '本轮打算执行的写操作，按执行先后排列',
+            items: {
+              type: 'object',
+              properties: {
+                tool: { type: 'string', description: '写类工具名，如 move_bookmarks / create_folder / rename_bookmark' },
+                summary: { type: 'string', description: '给人看的一句话说明' },
+                count: { type: 'integer', description: '影响条数（可选）' },
+              },
+              required: ['tool'],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ['steps'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'open_bookmark',
       description: '在浏览器新标签页中打开书签（background=true 时后台打开）。',
       parameters: {

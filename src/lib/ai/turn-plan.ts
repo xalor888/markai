@@ -16,7 +16,7 @@
  */
 import { TOOL_META } from './tools';
 
-export type ToolClass = 'read' | 'write' | 'gate' | 'unknown';
+export type ToolClass = 'read' | 'write' | 'gate' | 'declare' | 'unknown';
 
 /**
  * 读类工具：立即执行，用来把计划算出来（`agent.ts:22-37` 的同一组）。
@@ -45,8 +45,16 @@ const READ_TOOLS = new Set([
  */
 const GATE_TOOLS = new Set(['propose_deletions', 'delete_all_bookmarks']);
 
+/**
+ * 声明类工具：**只记录意图、不产生任何副作用**。
+ * `submit_plan` 让模型把整轮打算做的写操作一次说清，从而把"每回次确认"升级为"整轮一次确认"。
+ * 注意：它不是安全边界——真正的闸门仍是逐回次的（未声明的写操作照样要确认）。
+ */
+const DECLARE_TOOLS = new Set(['submit_plan']);
+
 export function classifyTool(name: string): ToolClass {
   if (READ_TOOLS.has(name)) return 'read';
+  if (DECLARE_TOOLS.has(name)) return 'declare';
   if (GATE_TOOLS.has(name)) return 'gate';
   if (TOOL_META[name]) return 'write';
   return 'unknown';

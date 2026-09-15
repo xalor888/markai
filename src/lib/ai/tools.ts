@@ -1398,6 +1398,38 @@ async function copyBookmark(args: unknown): Promise<ToolOutput> {
   };
 }
 
+const submitPlanSchema = z.object({
+  /** 整轮打算执行的写操作；tool 必须是已注册的写类工具名 */
+  steps: z
+    .array(
+      z.object({
+        tool: z.string(),
+        summary: z.string().optional(),
+        count: z.number().int().min(0).optional(),
+      }),
+    )
+    .min(1)
+    .max(50),
+});
+
+/**
+ * 【声明计划】只记录整轮意图，**不产生任何副作用**。
+ * 用途：开启「执行前先看计划」时，先把整轮要做的写操作一次说清，
+ * 让用户**一次确认覆盖整轮**，而不是每个工具回次都问一遍。
+ * 安全边界不在这里：未声明到的写操作仍然会逐个请求确认（见 agent 的计划闸门）。
+ */
+async function submitPlan(args: unknown): Promise<ToolOutput> {
+  const { steps } = submitPlanSchema.parse(args);
+  const names = steps.map((s) => s.tool);
+  return {
+    result: JSON.stringify({
+      declared: steps.length,
+      tools: names,
+      note: '计划已登记。用户确认后，本轮的这些写操作会依次执行；未在计划里的写操作仍会单独请求确认。',
+    }),
+  };
+}
+
 const openBookmarkSchema = z.object({
   bookmarkId: z.string(),
   background: z.boolean().optional(),
@@ -1873,6 +1905,7 @@ const TOOL_MAP: Record<string, ToolEntry> = {
   move_bookmarks: { name: 'move_bookmarks', handler: moveBookmarks },
   copy_bookmark: { name: 'copy_bookmark', handler: copyBookmark },
   open_bookmark: { name: 'open_bookmark', handler: openBookmark },
+  submit_plan: { name: 'submit_plan', handler: submitPlan },
   open_bookmarks: { name: 'open_bookmarks', handler: openBookmarks },
   get_folder_content: { name: 'get_folder_content', handler: getFolderContent },
   export_bookmarks: { name: 'export_bookmarks', handler: exportBookmarks },
@@ -1948,6 +1981,7 @@ export const TOOL_META: Record<string, { label: string }> = {
   move_bookmarks: { label: '批量移动' },
   copy_bookmark: { label: '复制书签' },
   open_bookmark: { label: '打开书签' },
+  submit_plan: { label: '声明计划' },
   open_bookmarks: { label: '批量打开' },
   get_folder_content: { label: '查看结构' },
   export_bookmarks: { label: '导出清单' },

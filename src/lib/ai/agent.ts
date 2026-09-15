@@ -52,6 +52,39 @@ export interface AgentTurnParams {
   requestPlanApproval?: (plan: PlannedStep[], messageId: string) => Promise<boolean>;
 }
 
+/**
+ * 从本回次的工具调用里读出模型声明的整轮计划（`submit_plan` 的参数）。
+ * 解析失败就当作"没有声明"——退回逐回次确认，绝不因为解析问题而放行。
+ */
+function parseDeclaredPlan(
+  ordered: { tc: ApiToolCall }[],
+): { tool: string; summary?: string; count?: number }[] {
+  for (const { tc } of ordered) {
+    if (tc.function.name !== 'submit_plan') continue;
+    try {
+      const raw = JSON.parse(tc.function.arguments || '{}') as {
+        steps?: { tool?: unknown; summary?: unknown; count?: unknown }[];
+      };
+      if (!Array.isArray(raw.steps)) return [];
+      const out: { tool: string; summary?: string; count?: number }[] = [];
+      for (const st of raw.steps) {
+        if (typeof st?.tool !== 'string' || !st.tool) continue;
+        // 只接受真正的写类工具名：声明读类/闸门类没有意义，也不该换来豁免
+        if (classifyTool(st.tool) !== 'write') continue;
+        out.push({
+          tool: st.tool,
+          ...(typeof st.summary === 'string' && st.summary ? { summary: st.summary } : {}),
+          ...(typeof st.count === 'number' ? { count: st.count } : {}),
+        });
+      }
+      return out;
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
 /** 提取消息纯文本 */
 function extractText(m: ChatMessage): string {
   return m.blocks
@@ -229,6 +262,15 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
   let lastCallSignature: string | null = null;
   let repeatRounds = 0;
   // 工具调用轮数无上限：只有「最终回答 / 死循环检测 / 连续失败保护」三个出口
+  /**
+   * 整轮预授权（planMode）：模型可用 `submit_plan` 先把整轮打算做的写操作说清，
+   * 用户确认一次即覆盖整轮，不必每个回次都问。
+   *
+   * **它不是安全边界**：只有"已声明且被批准"的**工具名**才免于再次确认；
+   * 未声明的写操作照样走逐回次确认（见下面的写循环）。取消则整轮零写入。
+   */
+  let turnGrant: { approved: boolean; tools: Set<string> } | null = null;
+
   for (;;) {
     let turn: { content: string; toolCalls: ApiToolCall[] };
     try {
@@ -317,13 +359,43 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
           results.set(i, await runOne(tc));
         }),
     );
-    // 计划模式：本回次的**写类**操作先收成计划、等确认后再执行。
-    // 为什么按**回次**而不是整轮：一轮里模型可能分多次提出工具调用，而"新建文件夹 → 把书签
-    // 移进去"这类链式操作依赖前一步的返回值——把整轮写操作都憋到轮末会让链式操作直接断掉。
-    // 代价是：一轮里多次回次可能多次确认（合并成整轮一次需要模型一次性给出完整计划，属后续分片）。
     const planEnabled = params.config.planMode === true;
+
+    // 声明类工具（submit_plan）只记录、零副作用，先执行它们
+    for (const { tc, i } of ordered) {
+      if (classifyTool(tc.function.name) === 'declare') {
+        results.set(i, await runOne(tc));
+      }
+    }
+
+    // 本轮（或更早回次）声明了计划，且整轮还没有决定 → 申请一次整轮授权
+    if (planEnabled && turnGrant === null) {
+      const declared = parseDeclaredPlan(ordered);
+      if (declared.length > 0) {
+        const steps = buildPlan(
+          declared.map((d) => ({ name: d.tool, args: JSON.stringify({ ...(d.count !== undefined ? { count: d.count } : {}) }) })),
+        ).map((p, idx) => ({ ...p, summary: declared[idx]?.summary ?? p.summary }));
+        safePost(onEvent, { type: 'chat:plan', messageId, steps });
+        let approved = false;
+        if (params.requestPlanApproval) {
+          try {
+            approved = await params.requestPlanApproval(steps, messageId);
+          } catch {
+            approved = false;
+          }
+        }
+        turnGrant = { approved, tools: new Set(declared.map((d) => d.tool)) };
+      }
+    }
+
+    // 已授权则按"工具名是否在声明里"豁免逐回次确认；未声明的一律仍需确认。
+    // 为什么保留逐回次确认：模型可能临时调用计划外的工具——把安全边界交给模型自觉是不行的。
     const plannedWrites = planEnabled
-      ? ordered.filter(({ tc }) => classifyTool(tc.function.name) === 'write')
+      ? ordered.filter(
+          ({ tc }) =>
+            classifyTool(tc.function.name) === 'write' &&
+            !(turnGrant?.approved && turnGrant.tools.has(tc.function.name)),
+        )
       : [];
 
     /**
@@ -367,9 +439,20 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
     let planDone = false;
     for (const { tc, i } of ordered) {
       if (READ_TOOLS.has(tc.function.name)) continue;
-      if (planEnabled && classifyTool(tc.function.name) === 'write') {
-        // 计划在第一个待执行写操作的位置整体执行，保持写操作之间的相对顺序；
-        // 闸门类（propose_deletions 等）不进计划，仍在原位执行、自带自己的确认闸门
+      if (classifyTool(tc.function.name) === 'declare') continue; // 已在上面执行过
+      const cls = classifyTool(tc.function.name);
+      if (planEnabled && cls === 'write') {
+        // 整轮计划被取消 → 本轮**所有**写操作都被阻断（不只是第一回次），并如实回填
+        if (turnGrant && !turnGrant.approved) {
+          results.set(i, { error: '用户取消了本轮计划，这一步没有执行（请勿假设它已生效）' });
+          continue;
+        }
+        // 已声明的写操作：授权已覆盖，直接执行（不再逐个确认）
+        if (turnGrant?.approved && turnGrant.tools.has(tc.function.name)) {
+          results.set(i, await runOne(tc));
+          continue;
+        }
+        // 未声明的写操作：仍在第一个待执行写操作的位置整体走逐回次确认
         if (!planDone) {
           planDone = true;
           await runPlannedWrites();

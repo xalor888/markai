@@ -632,6 +632,20 @@ const cases = [
     expectFail: ['预算记账正确时工具循环继续'],
   },
   {
+    name: '整轮预授权放行未声明的写操作（把安全边界交给模型自觉）',
+    file: 'src/lib/ai/agent.ts',
+    from: "            !(turnGrant?.approved && turnGrant.tools.has(tc.function.name)),",
+    to: '            !turnGrant?.approved,',
+    expectFail: ['已批准的声明之外的写操作，仍必须再次确认（不能靠模型自觉）'],
+  },
+  {
+    name: '取消后不再阻断整轮（用户说过不要还继续追问）',
+    file: 'src/lib/ai/agent.ts',
+    from: '        if (turnGrant && !turnGrant.approved) {',
+    to: '        if (false) {',
+    expectFail: ['取消之后不再重复追问（用户已经说过不要，不该被再问一次）'],
+  },
+  {
     name: '确认登记表断线时按"批准"结算（面板关了反而放行）',
     file: 'src/lib/ai/plan-approval.ts',
     from: '      for (const settle of all) settle(false);',
@@ -648,7 +662,7 @@ const cases = [
   {
     name: 'agent 不再走计划闸门（写操作在确认前就落库）',
     file: 'src/lib/ai/agent.ts',
-    from: "      if (planEnabled && classifyTool(tc.function.name) === 'write') {",
+    from: "      if (planEnabled && cls === 'write') {",
     to: '      if (false) {',
     expectFail: ['计划模式：发出 chat:plan 事件，且清单里是这一步的写操作'],
   },

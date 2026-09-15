@@ -21,6 +21,19 @@ import type { BookmarkSnapshot, UndoApplyResult, UndoOp, UndoPoint } from './typ
 const appliedThisSession = new Set<string>();
 
 /**
+ * **正在执行中**的撤销点（进程内）。
+ *
+ * 为什么需要：`appliedThisSession` 只在"回放结束且消费失败"之后才登记，挡不住**重叠**的请求——
+ * 两次 `applyUndo(同一个点)` 会各自 `readUndoPoints()` 拿到同一个目标、各自通过检查，
+ * 然后并发回放：删除类逆操作会把同一棵子树**重建两份**。
+ *
+ * 检查与登记之间刻意不安排任何 await：JS 单线程下这段是原子的，因此两个请求不可能同时通过。
+ * **跨进程边界不覆盖**：SW 被回收后这个集合随进程消失，重启后的重叠请求不受此保护——
+ * 这是已如实标注的残留边界，不是"已解决"。
+ */
+const inFlight = new Set<string>();
+
+/**
  * 把某个父目录的子项顺序校正为 `order`：
  * 在 `order` 里出现过的节点按原序排前面，其余（本轮新建的）留在末尾。
  * 用于 moveBatch 与删除的顺序检查点——两者都不依赖逐条下标，因此抗并发。
@@ -251,6 +264,18 @@ export async function applyUndo(id?: string): Promise<UndoApplyResult> {
     };
   }
 
+  // ── 单执行者：同一个撤销点同一时刻只允许一次回放 ──
+  // 位置刻意选在全部只读检查之后、**任何**书签/顺序/存储副作用之前；检查与登记之间没有 await。
+  if (inFlight.has(target.id)) {
+    return {
+      ok: false,
+      restored: 0,
+      failures: [],
+      reason: '这条撤销正在执行中，请稍候（重复执行会造成重复改动）。',
+    };
+  }
+  inFlight.add(target.id);
+  try {
   const failures: UndoApplyResult['failures'] = [];
   const idMap = new Map<string, string>(); // 删除还原后的 old→new id 映射（供顺序检查点使用）
   let restored = 0;
@@ -300,4 +325,8 @@ export async function applyUndo(id?: string): Promise<UndoApplyResult> {
   }
   appliedThisSession.delete(target.id); // 正常消费：解除本会话的重复保护
   return { ok: failures.length === 0, restored, failures };
+  } finally {
+    // 无论成功、失败还是抛错都要释放，否则该点会被永久锁住
+    inFlight.delete(target.id);
+  }
 }

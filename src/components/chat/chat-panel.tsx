@@ -80,6 +80,8 @@ export function ChatPanel({
   const renameConversation = useAIStore((s) => s.renameConversation);
   const deleteConversation = useAIStore((s) => s.deleteConversation);
   const undoPoints = useAIStore((s) => s.undoPoints);
+  // 撤销记录读取失败时为 true：界面必须说「状态未知」，不能说「没有可撤销的操作」
+  const undoUnknown = useAIStore((s) => s.undoUnknown);
   const undoNotice = useAIStore((s) => s.undoNotice);
   // 对话落盘失败/被裁剪时的如实提示：属于「你以为保存了、其实没有」，必须可见
   const persistError = useAIStore((s) => s.persistError);
@@ -94,7 +96,9 @@ export function ChatPanel({
     ? '暂无可撤销的操作'
     : undoReady.undoable
       ? `撤销本次操作（${summarizeOps(undoPoint.ops)}）`
-      : `无法撤销：${undoReady.reason}`;
+      : undoUnknown
+        ? '撤销记录读取失败，当前状态未知'
+        : `无法撤销：${undoReady.reason}`;
   // 撤销记录被裁剪 / 写入失败时，把原因一并说清楚，别让"没有可撤销的操作"变成假话
   const undoTitle = undoNotice ? `${baseUndoTitle}\n${undoNotice}` : baseUndoTitle;
   const roots = useBookmarkStore((s) => s.roots);
@@ -407,7 +411,11 @@ export function ChatPanel({
               <span className="text-[11px] text-muted-foreground">最近 {undoHistory.length} 步</span>
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
-              {undoHistory.length === 0 ? (
+              {undoUnknown ? (
+                <p className="px-2 py-3 text-center text-[11px] text-destructive">
+                  撤销记录读取失败，当前状态未知（这不等于「没有可撤销的操作」）。请稍后重试或重新打开面板。
+                </p>
+              ) : undoHistory.length === 0 ? (
                 <p className="px-2 py-3 text-center text-[11px] text-muted-foreground">
                   还没有可撤销的操作。Agent 每次整理（以及你手工确认的删除）都会在这里留下一步。
                 </p>

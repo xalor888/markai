@@ -79,6 +79,8 @@ interface AIState {
   undoNotice: string | null;
   /** 最近一次对话落盘失败的如实说明（null = 没有失败）；at 稳定，界面只提示一次 */
   persistError: { message: string; at: number } | null;
+  /** 撤销记录读取失败（状态未知）：界面不得把它显示成「没有可撤销的操作」 */
+  undoUnknown: boolean;
   /** 因为超预算而丢弃了更早的对话时的如实说明 */
   persistNotice: string | null;
   undoNoticeAt: number | null;
@@ -242,6 +244,7 @@ export const useAIStore = create<AIState>((set, get) => ({
   undoPoints: [],
   undoNotice: null,
   persistError: null,
+  undoUnknown: false,
   persistNotice: null,
   undoNoticeAt: null,
   streaming: false,
@@ -700,7 +703,8 @@ export const useAIStore = create<AIState>((set, get) => ({
     try {
       const res = (await chrome.runtime.sendMessage({ type: 'undo:list' })) as OneShotOutbound | undefined;
       if (res?.type !== 'undo:list:result') {
-        set({ undoPoints: [], undoNotice: null, undoNoticeAt: null });
+        // 拿不到结果 ≠ 没有撤销点。必须标出"状态未知"，否则界面会把不确定说成确定。
+        set({ undoPoints: [], undoNotice: null, undoNoticeAt: null, undoUnknown: true });
         return;
       }
       const prevAt = get().undoNoticeAt;
@@ -708,14 +712,16 @@ export const useAIStore = create<AIState>((set, get) => ({
         undoPoints: res.points,
         undoNotice: res.notice ?? null,
         undoNoticeAt: res.noticeAt ?? null,
+        undoUnknown: false,
       });
       // noticeAt 变了才提示：同一条提示不重复打扰
       if (res.notice && res.noticeAt && res.noticeAt !== prevAt) {
         pushToast('撤销记录有变更', { description: res.notice, variant: 'destructive' });
       }
     } catch {
-      // SW 已回收等情况：当作没有撤销点，不打扰用户
-      set({ undoPoints: [], undoNotice: null, undoNoticeAt: null });
+      // SW 已回收、消息通道失败等：状态未知。列表可以是空的，但必须带 unknown 标记，
+      // 让面板说"读取失败"而不是"没有可撤销的操作"。
+      set({ undoPoints: [], undoNotice: null, undoNoticeAt: null, undoUnknown: true });
     }
   },
 
@@ -738,10 +744,27 @@ export const useAIStore = create<AIState>((set, get) => ({
         return;
       }
       const r = res.result;
-      if (!r.ok && r.restored === 0) {
-        // 明确拒绝（含删除的轮次、已撤销过等）：如实说明原因，不假装成功
-        pushToast('无法撤销', { description: r.reason ?? '没有可撤销的操作', variant: 'destructive' });
+      // 顺序很重要：**先判 !ok**。消费写失败返回的是
+      // `{ok:false, restored:>0, failures:[]}`——它既不是"零还原的拒绝"，也没有 failures，
+      // 若按 failures 分支判断就会掉进成功提示，把"记录没更新、别再点"说成"已撤销"。
+      if (!r.ok) {
+        if (r.failures.length > 0) {
+          pushToast(`已还原 ${r.restored} 项，${r.failures.length} 项失败`, {
+            description: r.failures.map((f) => `${f.title}：${f.error}`).join('；'),
+            variant: 'destructive',
+          });
+        } else if (r.restored === 0) {
+          // 零还原的明确拒绝（含删除的轮次、已撤销过、非最新点、文件夹冲突等）
+          pushToast('无法撤销', { description: r.reason ?? '没有可撤销的操作', variant: 'destructive' });
+        } else {
+          // 已还原一部分、但记录没能更新（消费写失败）：必须说清现状并警告不要重复点击
+          pushToast('撤销未完成', {
+            description: `已还原 ${r.restored} 项，但${r.reason ?? '本地记录未更新'}`,
+            variant: 'destructive',
+          });
+        }
       } else if (r.failures.length > 0) {
+        // ok 但仍有条目失败：如实上报明细
         pushToast(`已还原 ${r.restored} 项，${r.failures.length} 项失败`, {
           description: r.failures.map((f) => `${f.title}：${f.error}`).join('；'),
           variant: 'destructive',

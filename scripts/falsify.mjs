@@ -520,10 +520,10 @@ const cases = [
     expectFail: ['src 下没有硬编码的三段式版本号（防再次漂移）'],
   },
   {
-    name: 'undoLast 把"拒绝"也报成成功',
+    name: 'undoLast 把"零还原的拒绝"也报成成功（不再走如实提示分支）',
     file: 'src/stores/aiStore.ts',
-    from: "      if (!r.ok && r.restored === 0) {",
-    to: "      if (false) {",
+    from: '        } else if (r.restored === 0) {',
+    to: '        } else if (false) {',
     expectFail: ['撤销被拒时如实提示原因，不得谎报成功'],
   },
   {
@@ -630,6 +630,27 @@ const cases = [
     from: '  const usedTokens = () => estimateRequestTokens(apiMessages);',
     to: '  const usedTokens = () => fixedOverheadTokens() + estimateRequestTokens(apiMessages);',
     expectFail: ['预算记账正确时工具循环继续'],
+  },
+  {
+    name: '撤销执行互斥被移除（重叠请求会各自重建一份子树）',
+    file: 'src/lib/undo/apply.ts',
+    from: '  if (inFlight.has(target.id)) {',
+    to: '  if (false) {',
+    expectFail: ['同一撤销点正在执行时，重叠的第二次请求必须被立即拒绝'],
+  },
+  {
+    name: '消费写失败重新落进成功提示（把"记录没更新"说成"已撤销"）',
+    file: 'src/stores/aiStore.ts',
+    from: '      if (!r.ok) {',
+    to: '      if (!r.ok && r.restored === 0) {',
+    expectFail: ['消费写失败必须如实告警，绝不显示成功'],
+  },
+  {
+    name: '读取撤销记录失败重新被当成"没有记录"（不确定性被说成确定）',
+    file: 'src/stores/aiStore.ts',
+    from: "      // SW 已回收、消息通道失败等：状态未知。列表可以是空的，但必须带 unknown 标记，\n      // 让面板说\"读取失败\"而不是\"没有可撤销的操作\"。\n      set({ undoPoints: [], undoNotice: null, undoNoticeAt: null, undoUnknown: true });",
+    to: '      set({ undoPoints: [], undoNotice: null, undoNoticeAt: null });',
+    expectFail: ['读取撤销记录失败时，必须标出"状态未知"而不是清成空的'],
   },
   {
     name: '文件夹逆操作退回递归 removeTree（回放中途失败会毁掉残留内容）',

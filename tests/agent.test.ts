@@ -165,6 +165,15 @@ function resetMockCalls(): void {
   for (const k of Object.keys(mockCalls) as (keyof typeof mockCalls)[]) mockCalls[k] = 0;
 }
 
+/**
+ * 测试专用的 create 闸门：让一次子树重建停在半途，用来**确定性地**构造
+ * "同一个撤销点的两次回放重叠"这一竞态（否则只能靠 sleep 猜时序）。
+ */
+const createGate: { release: Promise<void> | null; entered: (() => void) | null } = {
+  release: null,
+  entered: null,
+};
+
 const mockBookmarks = {
   getTree: async () => [toApi({ id: '0', title: '', dateAdded: 0 })],
   getSubTree: async (id: string) => {
@@ -186,6 +195,10 @@ const mockBookmarks = {
     store.filter((n) => n.title.includes(query) || (n.url ?? '').includes(query)).map((n) => toApi(n)),
   create: async (opt: { parentId?: string; title: string; url?: string; index?: number }) => {
     mockCalls.create += 1;
+    if (createGate.release) {
+      createGate.entered?.();
+      await createGate.release;
+    }
     const id = String(nextId++);
     const node: FNode = {
       id,
@@ -4775,6 +4788,233 @@ function ok(name: string, fn: () => void) {
     // 清理：F 里还有 Y，用 removeTree 明确清掉这一棵
     if (fStillThere) await mockBookmarks.removeTree(fId);
     else if (yStillThere) await mockBookmarks.remove(yId);
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+  }
+
+  /* ── T45: 失败反馈不得失真（消费写失败 + 状态未知） ── */
+  console.log('\n[T45] 撤销失败反馈');
+  {
+    const { useAIStore } = await import('../src/stores/aiStore');
+    const { useToastStore } = await import('../src/lib/toast');
+    type UndoPointT = import('../src/lib/undo/types').UndoPoint;
+
+    const point: UndoPointT = {
+      id: 't45-p',
+      runId: 't45',
+      createdAt: Date.now(),
+      ops: [{ kind: 'create', id: 'x', title: 'x', isFolder: false }],
+      containsDelete: false,
+    };
+
+    let applyResult: unknown = undefined;
+    let listResult: unknown = { type: 'undo:list:result', points: [point] };
+    let throwOnList = false;
+    sendMessageMock = (msg) => {
+      const m = msg as { type?: string };
+      if (m.type === 'undo:list') {
+        if (throwOnList) throw new Error('SW 已回收');
+        return listResult;
+      }
+      if (m.type === 'undo:apply') return { type: 'undo:apply:result', result: applyResult };
+      return undefined;
+    };
+
+    // ── A. 消费写失败：ok:false + restored>0 + 无 failures ──
+    useToastStore.setState({ toasts: [] });
+    await useAIStore.getState().refreshUndo();
+    applyResult = {
+      ok: false,
+      restored: 1,
+      failures: [],
+      reason: '撤销已执行，但本地记录没能更新（存储写入失败）：请不要重复点击这条撤销，重复执行会造成重复改动。',
+    };
+    await useAIStore.getState().undoLast(point.id);
+    const consumeFailToasts = useToastStore.getState().toasts;
+
+    ok('消费写失败必须如实告警，绝不显示成功', () => {
+      assert.ok(
+        !consumeFailToasts.some((t) => t.variant === 'success' || /已撤销/.test(t.title)),
+        `不得出现成功提示，实际 ${JSON.stringify(consumeFailToasts)}`,
+      );
+      assert.ok(
+        consumeFailToasts.some((t) => t.variant === 'destructive' && /不要重复点击|重复执行/.test(t.description ?? '')),
+        `必须把"不要重复点击"的原因带给用户，实际 ${JSON.stringify(consumeFailToasts)}`,
+      );
+    });
+    ok('消费写失败要说明已还原了多少项（用户需要知道现在的状态）', () => {
+      const joined = JSON.stringify(consumeFailToasts);
+      assert.match(joined, /1/, '提示里应包含已还原项数');
+    });
+
+    // ── B. 读取失败：不得把"状态未知"说成"没有记录" ──
+    useToastStore.setState({ toasts: [] });
+    throwOnList = true;
+    await useAIStore.getState().refreshUndo();
+    throwOnList = false;
+    const s1 = useAIStore.getState();
+
+    ok('读取撤销记录失败时，必须标出"状态未知"而不是清成空的', () => {
+      assert.equal(s1.undoUnknown, true, '读取失败应置 undoUnknown');
+    });
+    ok('状态未知时不得让界面断言"没有可撤销的操作"', () => {
+      assert.equal(
+        s1.undoPoints.length === 0 && s1.undoUnknown === true,
+        true,
+        '点列表可以为空，但必须同时标出 unknown，不能只留一个空列表',
+      );
+    });
+
+    // 恢复成功读取后，unknown 标记要清掉
+    listResult = { type: 'undo:list:result', points: [point] };
+    await useAIStore.getState().refreshUndo();
+    const s2 = useAIStore.getState();
+    ok('成功读取后清除"状态未知"标记', () => {
+      assert.equal(s2.undoUnknown, false, '成功读取应清除 undoUnknown');
+      assert.equal(s2.undoPoints.length, 1, '点列表应恢复');
+    });
+
+    // ── C. background 返回了意料之外的形状（无结果）──
+    useToastStore.setState({ toasts: [] });
+    sendMessageMock = () => undefined;
+    await useAIStore.getState().undoLast(point.id);
+    const noResultToasts = useToastStore.getState().toasts;
+    ok('撤销没有返回结果时如实提示，不谎报成功', () => {
+      assert.ok(
+        noResultToasts.some((t) => t.variant === 'destructive'),
+        `应有失败提示，实际 ${JSON.stringify(noResultToasts)}`,
+      );
+      assert.ok(!noResultToasts.some((t) => /已撤销/.test(t.title)), '不得显示成功');
+    });
+
+    ok('历史面板把「读取失败」与「没有记录」分开呈现（接线被守住）', () => {
+      const panel = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/components/chat/chat-panel.tsx'), 'utf8');
+      assert.match(panel, /undoUnknown/, '面板必须消费 undoUnknown');
+      assert.match(panel, /状态未知/, '必须如实说明状态未知');
+    });
+
+    sendMessageMock = () => undefined;
+    useToastStore.setState({ toasts: [] });
+  }
+
+  /* ── T46: 同一撤销点的重叠回放必须互斥（不能重建两份子树） ── */
+  console.log('\n[T46] 撤销执行互斥');
+  {
+    const {
+      UNDO_STORAGE_KEY,
+      UNDO_PENDING_KEY,
+      beginUndoTransaction,
+      endUndoTransaction,
+      ensureOrderCheckpoint,
+      readUndoState,
+      resetUndoTransactionForTest,
+    } = await import('../src/lib/undo/recorder');
+    const { jRemove } = await import('../src/lib/undo/mutations');
+    const { applyUndo } = await import('../src/lib/undo/apply');
+    type ApplyResult = import('../src/lib/undo/types').UndoApplyResult;
+
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+    storageSetFail = false;
+    storageSetFailKeys = null;
+    storageSetFailTimes = Number.POSITIVE_INFINITY;
+    storageSetDelayMs = 0;
+    storageSetDelaySequence = [];
+
+    // 造一个「删除」撤销点：撤销时用快照重建子树（会调用 create），是重叠回放后果最严重的一类
+    const folder = (await mockBookmarks.create({ parentId: '1', title: 'T46-FOLDER' })).id;
+    const kid = (
+      await mockBookmarks.create({ parentId: folder, title: 'T46-KID', url: 'https://t46.test/k' })
+    ).id;
+    await beginUndoTransaction('t46-race');
+    await ensureOrderCheckpoint(folder);
+    await jRemove(kid);
+    const point = await endUndoTransaction();
+    assert.ok(point, '前置条件：应产生删除撤销点');
+
+    // 装闸门：让第一次回放的重建停在 create 里（确定性构造重叠，不靠 sleep 猜时序）
+    let releaseFn!: () => void;
+    const releaseP = new Promise<void>((r) => {
+      releaseFn = r;
+    });
+    let enteredFn!: () => void;
+    const enteredP = new Promise<void>((r) => {
+      enteredFn = r;
+    });
+    createGate.release = releaseP;
+    createGate.entered = enteredFn;
+
+    const first = applyUndo(point!.id);
+    await enteredP; // 第一次已经停在「重建子树」的半途
+
+    // 先让 setup 阶段 fire-and-forget 的落盘/尾随补写全部落定，再清零计数：
+    // 否则会把"上一次异步写入迟到"误算成"第二次请求的副作用"（实测出现过这种非确定性）。
+    await new Promise((r) => setTimeout(r, 30));
+
+    // 重叠发起第二次：**不要**在放行前 await 它——没有互斥时它也会停进同一个闸门。
+    resetMockCalls();
+    let secondResult: ApplyResult | null = null;
+    const secondP = applyUndo(point!.id).then((r) => {
+      secondResult = r;
+      return r;
+    });
+    // 给它足够时间推进到分叉点：有互斥 → 立刻零副作用返回；没有 → 停进闸门并已计入 create
+    await new Promise((r) => setTimeout(r, 40));
+
+    // 必须在放行**之前**快照窗口期内的计数：放行后第一次调用自己的消费写入也会计入，
+    // 那属于它的正常收尾，不是"第二次请求的副作用"。
+    const rejectedDuringOverlap = secondResult !== null;
+    const duringOverlap = { ...mockCalls };
+
+    // 无论如何先放行，避免测试挂死
+    releaseFn();
+    const firstResult = await first;
+    const second = await secondP;
+    createGate.release = null;
+    createGate.entered = null;
+
+    ok('同一撤销点正在执行时，重叠的第二次请求必须被立即拒绝', () => {
+      assert.equal(
+        rejectedDuringOverlap,
+        true,
+        '第二次请求在第一次执行期间就应返回，而不是也进入回放',
+      );
+      assert.equal(second.ok, false, '不得并发执行同一个撤销点');
+      assert.equal(second.restored, 0, '第二次不得声称还原了任何东西');
+      assert.deepEqual(second.failures, [], '这是互斥拒绝，不是回放失败');
+      assert.match(second.reason ?? '', /正在执行|重复/, 'reason 要说明该点正在执行中');
+    });
+    ok('重叠请求在第一次执行期间不得产生任何副作用（窗口内快照）', () => {
+      assert.equal(duringOverlap.create, 0, '不得在第一次执行期间重建第二份子树');
+      assert.equal(duringOverlap.move, 0, '不得移动');
+      assert.equal(duringOverlap.remove, 0, '不得删除');
+      assert.equal(duringOverlap.storageSet, 0, '不得写存储');
+      assert.equal(duringOverlap.storageRemove, 0, '不得删存储');
+    });
+    ok('放行后第一次回放正常完成', () => {
+      assert.equal(firstResult.ok, true, `应成功，实际 ${JSON.stringify(firstResult)}`);
+    });
+    const kidsAfter = childrenOf(folder).length;
+    ok('最终只重建了一份子树（不是两份）', () =>
+      assert.equal(kidsAfter, 1, `子项数应为 1，实际 ${kidsAfter}`),
+    );
+    const after = await readUndoState();
+    ok('第一次成功后撤销点被正常消费', () =>
+      assert.equal(after.points.some((p) => p.id === point!.id), false, '点应已被消费'),
+    );
+    const afterAll = await applyUndo(point!.id);
+    ok('互斥锁已释放（结束后的再次调用是「点已不存在」，不是「正在执行」）', () =>
+      assert.match(
+        afterAll.reason ?? '',
+        /已不存在|已撤销/,
+        `不应仍是"正在执行"，实际 ${JSON.stringify(afterAll)}`,
+      ),
+    );
+
+    // 清理
+    if (nodeById(folder)) await mockBookmarks.removeTree(folder);
     storageMap.delete(UNDO_STORAGE_KEY);
     storageMap.delete(UNDO_PENDING_KEY);
     resetUndoTransactionForTest();

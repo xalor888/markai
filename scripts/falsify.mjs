@@ -299,11 +299,11 @@ const cases = [
     expectFail: ['默认（需确认）模式：提交的提议恰好是非保留项', 'limit 生效'],
   },
   {
-    name: '撤销历史不再标出可撤销性（点了才知道撤不了）',
+    name: '较早撤销记录重新变为可执行（把历史列表误导成"状态跳转")',
     file: 'src/lib/undo/journal.ts',
-    from: '      undoable: ready.undoable,',
-    to: '      undoable: true,',
-    expectFail: ['撤销历史：不可撤销的点标出来并带原因'],
+    from: '    const latestOnly = index === 0;\n    const undoable = latestOnly && ready.undoable;',
+    to: '    const latestOnly = true;\n    const undoable = ready.undoable;',
+    expectFail: ['撤销历史：只有最新一步可执行'],
   },
   {
     name: '历史面板点击不回传行 id（退回"撤销最新那个"）',
@@ -630,6 +630,13 @@ const cases = [
     from: '  const usedTokens = () => estimateRequestTokens(apiMessages);',
     to: '  const usedTokens = () => fixedOverheadTokens() + estimateRequestTokens(apiMessages);',
     expectFail: ['预算记账正确时工具循环继续'],
+  },
+  {
+    name: '后端不再拒绝非最新撤销点（会跨轮次递归删除后来移入的数据）',
+    file: 'src/lib/undo/apply.ts',
+    from: '  if (id && target.id !== points[0]?.id) {',
+    to: '  if (false) {',
+    expectFail: ['非最新撤销点被拒绝且没有任何副作用'],
   },
   {
     name: '替身 remove 重新允许删非空目录（会让「撤销新建文件夹」冲突测试假绿）',

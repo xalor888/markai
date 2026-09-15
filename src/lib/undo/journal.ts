@@ -104,15 +104,23 @@ export interface UndoHistoryRow {
  * 传入顺序即展示顺序（新在前）。
  */
 export function describeUndoHistory(points: UndoPoint[]): UndoHistoryRow[] {
-  return points.map((p) => {
+  return points.map((p, index) => {
     const ready = undoReadiness(p);
+    // 栈顶之外的记录一律**不可执行**：撤销必须从最新一步开始、按时间从新到旧依次回退。
+    // 把较早的点做成"跳到那一步之前"是错的——后端只逆转该点自己的操作，不会回退更晚的点，
+    // 而"撤销新建文件夹"是递归删除，会连带删掉后来移入的内容。
+    //
+    // 这里只是**如实展示**；真正的安全边界在 applyUndo（它会拒绝非最新点，零副作用）。
+    const latestOnly = index === 0;
+    const undoable = latestOnly && ready.undoable;
+    const reason = !latestOnly ? '请先撤销较新的操作' : ready.reason;
     return {
       id: p.id,
       summary: summarizeOps(p.ops),
       count: ready.count,
       createdAt: p.createdAt,
-      undoable: ready.undoable,
-      ...(ready.reason ? { reason: ready.reason } : {}),
+      undoable,
+      ...(reason ? { reason } : {}),
     };
   });
 }

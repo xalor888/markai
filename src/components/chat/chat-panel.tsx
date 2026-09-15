@@ -417,7 +417,7 @@ export function ChatPanel({
                     key={row.id}
                     type="button"
                     disabled={!row.undoable || streaming}
-                    title={row.undoable ? '回到这一步之前' : (row.reason ?? '无法撤销')}
+                    title={row.undoable ? '撤销最新的一步' : (row.reason ?? '无法撤销')}
                     onClick={() => {
                       setUndoHistoryOpen(false);
                       void undoLast(row.id);

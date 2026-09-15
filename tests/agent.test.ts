@@ -3197,15 +3197,25 @@ function ok(name: string, fn: () => void) {
       assert.equal(rows[1]!.count, 2);
       assert.equal(rows[2]!.count, 0, 'count 的契约是可还原条数：旧的无快照删除可还原 0 项');
     });
-    ok('撤销历史：不可撤销的点标出来并带原因（不让用户点了才知道）', () => {
-      assert.equal(rows[0]!.undoable, true);
-      assert.equal(rows[1]!.undoable, true);
-      assert.equal(rows[2]!.undoable, false, '旧的无快照删除不可撤销');
-      assert.match(rows[2]!.reason ?? '', /没有快照/);
+    ok('撤销历史：只有最新一步可执行（较早记录即便本身可还原也必须禁用）', () => {
+      assert.equal(rows[0]!.undoable, true, '栈顶可执行');
+      assert.equal(rows[1]!.undoable, false, '较早的记录不可执行——撤销只能从最新一步开始');
+      assert.match(rows[1]!.reason ?? '', /先撤销较新/, '必须说清原因，而不是让用户点了才知道');
+      assert.equal(rows[2]!.undoable, false);
+    });
+    ok('撤销历史：不可撤销的旧记录仍带自己的原因（无快照 ≠ 不是最新）', () => {
+      // legacy 同时满足"不是最新"和"没有快照"：作为非栈顶点先被拦，理由是先撤较新
+      assert.match(rows[2]!.reason ?? '', /先撤销较新/);
+    });
+    ok('撤销历史：单点列表（栈顶就是它自己）时仍按点自身的 readiness 判定', () => {
+      const onlyLegacy = describeUndoHistory([legacy]);
+      assert.equal(onlyLegacy[0]!.undoable, false, '无快照删除即使位于栈顶也不可撤销');
+      assert.match(onlyLegacy[0]!.reason ?? '', /没有快照/, '此时应给出无快照的原因');
     });
     ok('撤销历史：空列表就是空（不造占位行）', () => assert.deepEqual(describeUndoHistory([]), []));
 
-    // 跳选：点历史里的某一步，必须针对**那一步**下发（而不是"最新的那个"）
+    // 精确 id 下发（接线层契约）：即便现在只有栈顶可执行，客户端也必须把**用户真实点击的那一行**
+    // 原样下发，由后端决定接受或拒绝。绝不能退化成"那就撤最新的那个"——那是撤销了另一个操作。
     const sent: { type?: string; id?: string }[] = [];
     let listed: UndoPointT[] = [batch, movable, legacy];
     sendMessageMock = (msg) => {
@@ -3231,6 +3241,11 @@ function ok(name: string, fn: () => void) {
       assert.match(panel, /describeUndoHistory\(/, '面板应使用纯函数生成历史行');
       assert.match(panel, /undoLast\(row\.id\)/, '点击某一行必须把该行的 id 传给 undoLast');
       assert.match(panel, /undoNotice/, '容量提示也要在面板里可见（解释为何更早的点不见了）');
+      assert.ok(
+        !/回到这一步之前/.test(panel),
+        '面板不得再承诺"跳回历史状态"——后端只按顺序撤销，较早记录不可执行',
+      );
+      assert.match(panel, /撤销最新的一步/, '标题应如实描述唯一可执行的操作');
     });
   }
 
@@ -4494,6 +4509,100 @@ function ok(name: string, fn: () => void) {
       assert.equal(mockCalls.create, 1, 'create 应被计数');
       assert.equal(mockCalls.removeTree, 1, 'removeTree 应被计数');
     });
+  }
+
+  /* ── T42: 非最新撤销点必须零副作用拒绝（危险跳选的安全边界） ── */
+  console.log('\n[T42] 撤销栈顶限制');
+  {
+    const {
+      UNDO_STORAGE_KEY,
+      UNDO_PENDING_KEY,
+      beginUndoTransaction,
+      endUndoTransaction,
+      readUndoState,
+      resetUndoTransactionForTest,
+    } = await import('../src/lib/undo/recorder');
+    const { jCreate } = await import('../src/lib/undo/mutations');
+    const { applyUndo } = await import('../src/lib/undo/apply');
+
+    // 隔离：清撤销存储、丢弃活动事务、复位故障注入与延迟，避免受前面用例影响
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+    storageSetFail = false;
+    storageSetFailKeys = null;
+    storageSetFailTimes = Number.POSITIVE_INFINITY;
+    storageSetDelayMs = 0;
+    storageSetDelaySequence = [];
+
+    const beforeTree = await snapshotTree();
+
+    // older：新建文件夹 F
+    await beginUndoTransaction('t42-older');
+    const folderId = (await jCreate({ parentId: '1', title: 'T42-OLDER-FOLDER' })).id;
+    const olderPoint = await endUndoTransaction();
+    assert.ok(olderPoint, '前置条件：older 点应落盘');
+
+    // newer：在 F 里新建子书签（这就是"更晚的一轮"）
+    await beginUndoTransaction('t42-newer');
+    await jCreate({ parentId: folderId, title: 'T42-NEWER-KID', url: 'https://t42.test/kid' });
+    const newerPoint = await endUndoTransaction();
+    assert.ok(newerPoint, '前置条件：newer 点应落盘');
+
+    const setupPoints = (await readUndoState()).points;
+    ok('前置条件：撤销点列表为「新的在前」', () => {
+      assert.equal(setupPoints[0]!.id, newerPoint!.id, 'index 0 必须是最新的点');
+      assert.equal(setupPoints[1]!.id, olderPoint!.id, 'index 1 是较早的点');
+    });
+
+    // ── A. 跳选较早的 older：必须在任何副作用前被拒绝 ──
+    const treeBefore = await snapshotTree();
+    const pointsBefore = JSON.stringify((await readUndoState()).points);
+    resetMockCalls();
+    const jump = await applyUndo(olderPoint!.id);
+    const treeAfterJump = await snapshotTree();
+    const pointsAfterJump = JSON.stringify((await readUndoState()).points);
+
+    ok('非最新撤销点被拒绝且没有任何副作用', () => {
+      assert.equal(jump.ok, false, '必须拒绝，而不是执行较早的那一步');
+      assert.equal(jump.restored, 0, '不得声称还原了任何东西');
+      assert.deepEqual(jump.failures, [], '这是安全拒绝，不是回放失败');
+      assert.match(jump.reason ?? '', /较新/, 'reason 必须说清要先撤销较新的操作');
+    });
+    ok('被拒绝的跳选不得触碰书签（零 mutation、零顺序还原）', () => {
+      assert.equal(mockCalls.create, 0, '不应 create');
+      assert.equal(mockCalls.move, 0, '不应 move');
+      assert.equal(mockCalls.update, 0, '不应 update');
+      assert.equal(mockCalls.remove, 0, '不应 remove');
+      assert.equal(mockCalls.removeTree, 0, '不应 removeTree');
+      assert.equal(mockCalls.getChildren, 0, '不应做顺序还原（getChildren）');
+    });
+    ok('被拒绝的跳选不得消费或改写撤销记录（零 storage 写）', () => {
+      assert.equal(mockCalls.storageSet, 0, '不应 storage.set');
+      assert.equal(mockCalls.storageRemove, 0, '不应 storage.remove');
+      assert.equal(pointsAfterJump, pointsBefore, '撤销点列表必须逐字不变（点仍在）');
+    });
+    ok('被拒绝的跳选不得改变书签树', () => assert.equal(treeAfterJump, treeBefore));
+
+    // ── B. 唯一正确的路径：先撤 newer，再撤 older，回到初始树 ──
+    resetMockCalls();
+    const undoNewer = await applyUndo(newerPoint!.id);
+    ok('从最新点开始撤销：应被允许并成功', () => {
+      assert.equal(undoNewer.ok, true, `应成功，实际 ${JSON.stringify(undoNewer)}`);
+      assert.ok(mockCalls.removeTree + mockCalls.remove > 0, '应真的删掉了新建的节点');
+    });
+
+    const undoOlder = await applyUndo(olderPoint!.id);
+    ok('撤掉最新的之后，原来的较早点已成为最新点：应被允许', () => {
+      assert.equal(undoOlder.ok, true, `应成功，实际 ${JSON.stringify(undoOlder)}`);
+    });
+    const finalTree = await snapshotTree();
+    ok('依「最新→最旧」撤完两点后，树恢复初始状态', () => assert.equal(finalTree, beforeTree));
+
+    // 清理，避免污染后续用例
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

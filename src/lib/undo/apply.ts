@@ -163,6 +163,22 @@ export async function applyUndo(id?: string): Promise<UndoApplyResult> {
     };
   }
 
+  // ── 撤销栈只能从**最新点**往下撤（安全边界，不是 UI 便利）──
+  //
+  // 为什么必须在这里拦：把较早的点当成"历史状态跳转"是错的。本函数只逆转**该点自己的**操作，
+  // 并不会回退更晚的点；而"撤销新建文件夹"用的是 removeTree（无条件递归删除），于是
+  // 「A 新建 F → B 把已有书签 X 移入 F → 跳选撤 A」会连 X 一起删掉，而 A 的快照里没有 X。
+  // 必须在任何 chrome.bookmarks.*、顺序还原与 takeUndoPoint 之前拒绝——零副作用。
+  // 客户端禁用只是提示：手工调用、旧客户端、多窗口都能绕过 UI，所以安全边界必须在这里。
+  if (id && target.id !== points[0]?.id) {
+    return {
+      ok: false,
+      reason: '请先撤销较新的操作（撤销只能从最新一步开始，按时间从新到旧依次回退）',
+      restored: 0,
+      failures: [],
+    };
+  }
+
   const failures: UndoApplyResult['failures'] = [];
   const idMap = new Map<string, string>(); // 删除还原后的 old→new id 映射（供顺序检查点使用）
   let restored = 0;

@@ -1,3 +1,4 @@
+import { openUrl } from '@/lib/open-url';
 import {
   AlertTriangle,
   ArrowUpDown,
@@ -358,7 +359,7 @@ const mdComponents: Components = {
       href={href ?? '#'}
       onClick={(e) => {
         e.preventDefault();
-        if (href) void chrome.tabs.create({ url: href }).catch(() => {});
+        if (href) void openUrl(href);
       }}
       className="break-all text-accent underline decoration-accent/40 underline-offset-2 transition-colors hover:decoration-accent"
     >

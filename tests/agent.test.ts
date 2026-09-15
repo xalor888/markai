@@ -160,6 +160,7 @@ const mockCalls = {
   getChildren: 0,
   storageSet: 0,
   storageRemove: 0,
+  tabsCreate: 0,
 };
 function resetMockCalls(): void {
   for (const k of Object.keys(mockCalls) as (keyof typeof mockCalls)[]) mockCalls[k] = 0;
@@ -169,6 +170,9 @@ function resetMockCalls(): void {
  * 测试专用的 create 闸门：让一次子树重建停在半途，用来**确定性地**构造
  * "同一个撤销点的两次回放重叠"这一竞态（否则只能靠 sleep 猜时序）。
  */
+/** 故障注入：tabs.create 整体失败，或只让指定 URL 失败（用于批量部分失败） */
+const tabsFail: { all: boolean; urls: string[] | null } = { all: false, urls: null };
+
 const createGate: { release: Promise<void> | null; entered: (() => void) | null } = {
   release: null,
   entered: null,
@@ -274,7 +278,16 @@ const mockBookmarks = {
 
 (globalThis as Record<string, unknown>).chrome = {
   bookmarks: mockBookmarks,
-  tabs: { create: async () => ({ id: 1 }) },
+  tabs: {
+    create: async (props?: { url?: string }) => {
+      mockCalls.tabsCreate += 1;
+      if (tabsFail.all) throw new Error('Tabs cannot be edited right now (user may be dragging a tab)');
+      if (tabsFail.urls && props?.url && tabsFail.urls.includes(props.url)) {
+        throw new Error('无法打开该协议');
+      }
+      return { id: 1 };
+    },
+  },
   storage: {
     local: {
       get: async (keys: string | string[] | Record<string, unknown> | null) => {
@@ -5137,6 +5150,145 @@ function ok(name: string, fn: () => void) {
 
     clean();
     if (nodeById(folder)) await mockBookmarks.removeTree(folder);
+  }
+
+  /* ── T48: 打开链接失败必须可见，且批量提示不得撒谎 ── */
+  console.log('\n[T48] 打开链接的失败反馈');
+  {
+    const { openUrl, openUrls, describeTarget } = await import('../src/lib/open-url');
+    const { useToastStore } = await import('../src/lib/toast');
+
+    tabsFail.all = false;
+    tabsFail.urls = null;
+
+    // ── A. 单个打开失败：必须可见，且不泄漏完整 URL ──
+    useToastStore.setState({ toasts: [] });
+    tabsFail.all = true;
+    const secret = 'https://example.com/reset?token=SUPERSECRET123';
+    const okSingle = await openUrl(secret);
+    const failToasts = useToastStore.getState().toasts;
+
+    ok('单个链接打开失败必须给出可见反馈（不能点了没反应）', () => {
+      assert.equal(okSingle, false, '失败应返回 false');
+      assert.ok(
+        failToasts.some((t) => t.variant === 'destructive'),
+        `应有 destructive 提示，实际 ${JSON.stringify(failToasts)}`,
+      );
+    });
+    ok('失败提示不得把完整 URL（含查询参数/token）打进 UI', () => {
+      const joined = JSON.stringify(failToasts);
+      assert.ok(!joined.includes('SUPERSECRET123'), '不得泄漏查询参数');
+      assert.ok(!joined.includes('/reset'), '不得包含路径');
+      assert.ok(joined.includes('example.com'), '但应给出可识别的来源');
+    });
+
+    // ── B. 单个打开成功：不产生任何 destructive 提示 ──
+    useToastStore.setState({ toasts: [] });
+    tabsFail.all = false;
+    const okOk = await openUrl('https://ok.test/page');
+    ok('单个链接打开成功不打扰用户', () => {
+      assert.equal(okOk, true);
+      assert.equal(useToastStore.getState().toasts.length, 0, '成功不该弹提示');
+    });
+
+    // ── C. 批量全成功：success 提示，计数正确 ──
+    useToastStore.setState({ toasts: [] });
+    const allOk = await openUrls(['https://a.test/1', 'https://b.test/2', 'https://c.test/3']);
+    const okToasts = useToastStore.getState().toasts;
+    ok('批量全部成功时给出正确的成功计数', () => {
+      assert.deepEqual(allOk, { opened: 3, failed: 0 });
+      assert.ok(
+        okToasts.some((t) => t.variant === 'success' && /已打开 3 个/.test(t.title)),
+        `应报 3 个成功，实际 ${JSON.stringify(okToasts)}`,
+      );
+    });
+
+    // ── D. 批量部分失败：**绝不能**再谎报全部成功 ──
+    useToastStore.setState({ toasts: [] });
+    tabsFail.urls = ['https://b.test/2'];
+    const partial = await openUrls(['https://a.test/1', 'https://b.test/2', 'https://c.test/3']);
+    const partialToasts = useToastStore.getState().toasts;
+    tabsFail.urls = null;
+
+    ok('批量部分失败必须如实报出「X 个成功、Y 个失败」', () => {
+      assert.deepEqual(partial, { opened: 2, failed: 1 }, '计数必须是实际结果');
+      assert.ok(
+        partialToasts.some((t) => /已打开 2 个，1 个失败/.test(t.title)),
+        `应如实报部分失败，实际 ${JSON.stringify(partialToasts)}`,
+      );
+    });
+    ok('批量部分失败时不得出现"全部成功"式的 success 提示', () => {
+      assert.ok(
+        !partialToasts.some((t) => t.variant === 'success'),
+        `不得有成功提示，实际 ${JSON.stringify(partialToasts)}`,
+      );
+    });
+
+    // ── E. 批量全部失败 ──
+    useToastStore.setState({ toasts: [] });
+    tabsFail.all = true;
+    const allFail = await openUrls(['https://a.test/1', 'https://b.test/2']);
+    const allFailToasts = useToastStore.getState().toasts;
+    tabsFail.all = false;
+    ok('批量全部失败时如实报「打开失败」', () => {
+      assert.deepEqual(allFail, { opened: 0, failed: 2 });
+      assert.ok(
+        allFailToasts.some((t) => t.variant === 'destructive' && t.title === '打开失败'),
+        `应报打开失败，实际 ${JSON.stringify(allFailToasts)}`,
+      );
+      assert.ok(!allFailToasts.some((t) => t.variant === 'success'), '不得有成功提示');
+    });
+
+    // ── F. 空列表：不弹任何提示，也不调用 API ──
+    useToastStore.setState({ toasts: [] });
+    resetMockCalls();
+    const none = await openUrls([]);
+    ok('空列表不弹提示、不调用 tabs.create', () => {
+      assert.deepEqual(none, { opened: 0, failed: 0 });
+      assert.equal(useToastStore.getState().toasts.length, 0);
+      assert.equal(mockCalls.tabsCreate, 0);
+    });
+
+    // ── G. describeTarget 只给来源 ──
+    ok('describeTarget 只返回来源（自定义协议退化成协议名）', () => {
+      assert.equal(describeTarget('https://sub.example.com/a/b?c=d#e'), 'https://sub.example.com');
+      assert.equal(describeTarget('chrome://extensions/shortcuts'), 'chrome');
+      assert.equal(describeTarget('不是 URL'), '该链接');
+    });
+
+    // ── H. 源码守卫：UI 不得再退回"吞掉 tabs.create 失败"，弹窗必须有 toast 视口 ──
+    ok('UI 里不得再有吞掉 tabs.create 失败的写法（统一走 openUrl/openUrls）', () => {
+      const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+      const files: string[] = [];
+      const walk = (dir: string) => {
+        for (const e of readdirSync(dir, { withFileTypes: true })) {
+          const full = join(dir, e.name);
+          if (e.isDirectory()) walk(full);
+          else if (/\.tsx?$/.test(e.name)) files.push(full);
+        }
+      };
+      walk(resolve(rootDir, 'src/components'));
+      walk(resolve(rootDir, 'src/entrypoints'));
+      const offenders: string[] = [];
+      for (const f of files) {
+        const src = readFileSync(f, 'utf8');
+        // 逐行看：tabs.create 与 .catch(() => {}) 出现在同一条语句里即为吞错
+        for (const line of src.split('\n')) {
+          if (line.includes('tabs.create') && line.includes('.catch(() => {})')) {
+            offenders.push(`${f.replace(rootDir + '/', '')}: ${line.trim()}`);
+          }
+        }
+      }
+      assert.deepEqual(offenders, [], `这些地方仍在吞掉打开失败：\n${offenders.join('\n')}`);
+    });
+    ok('弹窗挂载了 toast 视口（否则那里的失败提示依然看不见）', () => {
+      const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+      const popup = readFileSync(resolve(rootDir, 'src/entrypoints/popup/main.tsx'), 'utf8');
+      assert.match(popup, /ToastViewport/, '弹窗必须挂载 ToastViewport');
+    });
+
+    useToastStore.setState({ toasts: [] });
+    resetMockCalls();
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

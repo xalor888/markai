@@ -7,6 +7,7 @@ import { copyText } from '@/lib/clipboard';
 import { formatRelativeTime, getHost } from '@/lib/format';
 import { isSelfOrDescendant, resolveDropIndex } from '@/lib/bookmark-dnd';
 import { pushToast } from '@/lib/toast';
+import { openUrl, openUrls } from '@/lib/open-url';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -247,7 +248,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
         if (!n) break;
         if (n.url) {
           // Shift+Enter：后台打开
-          void chrome.tabs.create({ url: n.url, active: !e.shiftKey }).catch(() => {});
+          void openUrl(n.url, { active: !e.shiftKey });
         } else useBookmarkStore.getState().selectFolder(n.id);
         break;
       }
@@ -319,8 +320,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
     }
     const openCount = Math.min(urls.length, 25);
     if (urls.length > 25) pushToast(`结果过多，仅打开前 25 个（共 ${urls.length} 个）`);
-    for (const url of urls.slice(0, openCount)) void chrome.tabs.create({ url }).catch(() => {});
-    pushToast(`已打开 ${openCount} 个标签页`, { variant: 'success' });
+    void openUrls(urls.slice(0, openCount));
   };
 
   /** 一键整理当前文件夹（快捷指令，与聊天 chips 同语义） */
@@ -368,8 +368,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
     }
     const openCount = Math.min(urls.length, 25);
     if (urls.length > 25) pushToast(`书签过多，仅打开前 25 个（共 ${urls.length} 个）`);
-    for (const url of urls.slice(0, openCount)) void chrome.tabs.create({ url }).catch(() => {});
-    pushToast(`已打开 ${openCount} 个标签页`, { variant: 'success' });
+    void openUrls(urls.slice(0, openCount));
     clearSelection();
   };
 
@@ -420,7 +419,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
         toggleRange(i, true);
         return;
       }
-      if (n.url) void chrome.tabs.create({ url: n.url }).catch(() => {});
+      if (n.url) void openUrl(n.url);
       else useBookmarkStore.getState().selectFolder(n.id);
     },
     [items, toggleRange],
@@ -711,7 +710,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
                   const first = (searchResults ?? items ?? [])[0];
                   if (!first) return;
                   e.preventDefault();
-                  if (first.url) void chrome.tabs.create({ url: first.url }).catch(() => {});
+                  if (first.url) void openUrl(first.url);
                   else useBookmarkStore.getState().selectFolder(first.id);
                 }
               }}
@@ -1051,7 +1050,7 @@ const BookmarkRow = memo(function BookmarkRow({
         // 中键：在新标签页打开（阻止 Windows 自动滚动；复选框等控件内不触发）
         if (e.button === 1 && !(e.target as HTMLElement).closest('button')) {
           e.preventDefault();
-          if (node.url) void chrome.tabs.create({ url: node.url }).catch(() => {});
+          if (node.url) void openUrl(node.url);
         }
       }}
       onMouseEnter={() => onActivate(index)}

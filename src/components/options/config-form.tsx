@@ -7,6 +7,7 @@ import { useThemeStore, type Theme } from '@/stores/themeStore';
 import { PROVIDERS, getPreset } from '@/lib/providers';
 import type { OneShotOutbound } from '@/lib/ai/types';
 import { pushToast } from '@/lib/toast';
+import { openUrl } from '@/lib/open-url';
 import { appVersion } from '@/lib/version';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -600,7 +601,7 @@ export function ConfigForm() {
         {' · '}
         <button
           type="button"
-          onClick={() => void chrome.tabs.create({ url: 'chrome://extensions/shortcuts' }).catch(() => {})}
+          onClick={() => void openUrl('chrome://extensions/shortcuts')}
           className="text-accent transition-colors hover:underline"
         >
           自定义快捷键

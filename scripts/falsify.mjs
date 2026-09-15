@@ -168,7 +168,7 @@ const cases = [
   {
     name: '错误处理清单谎称已全部清理',
     file: 'docs/error-handling.md',
-    from: '## 3. 仍未处理的（如实列出，别当成已经清完）',
+    from: '## 3. 仍未处理的（四个高风险类别已逐项判定，但全量枚举仍未逐处审计）',
     to: '## 3. 已全部清理',
     expectFail: ['docs/error-handling.md 存在并如实标注未清理的部分'],
   },
@@ -630,6 +630,23 @@ const cases = [
     from: '  const usedTokens = () => estimateRequestTokens(apiMessages);',
     to: '  const usedTokens = () => fixedOverheadTokens() + estimateRequestTokens(apiMessages);',
     expectFail: ['预算记账正确时工具循环继续'],
+  },
+  {
+    name: '打开链接失败又被吞掉（用户点了没反应）',
+    file: 'src/lib/open-url.ts',
+    from: "    pushToast('无法打开链接', { description: failureMessage(url, e), variant: 'destructive' });",
+    to: '    void e;',
+    expectFail: ['单个链接打开失败必须给出可见反馈'],
+  },
+  {
+    name: '批量打开又重新无条件报成功（把部分失败说成全部打开）',
+    file: 'src/lib/open-url.ts',
+    from: '  if (failed === 0) {',
+    to: '  if (true) {',
+    expectFail: [
+      '批量部分失败必须如实报出「X 个成功、Y 个失败」',
+      '批量部分失败时不得出现"全部成功"式的 success 提示',
+    ],
   },
   {
     name: '恢复时不再查 runId 终态（已消费的点会被残留 pending 复活成新点）',

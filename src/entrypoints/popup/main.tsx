@@ -6,6 +6,8 @@ import { AI_STORAGE_KEY } from '@/stores/aiStore';
 import type { AIConfig, ChatMessage, DeletionProposal } from '@/lib/ai/types';
 import { resolveConfig, PROVIDERS } from '@/lib/providers';
 import { ThemeProvider } from '@/components/theme/theme-provider';
+import { ToastViewport } from '@/components/toast/toast';
+import { openUrl } from '@/lib/open-url';
 import { appVersion } from '@/lib/version';
 import { BrandMark } from '@/components/theme/theme-provider';
 import { Badge } from '@/components/ui/badge';
@@ -113,9 +115,11 @@ function PopupApp() {
     return () => chrome.storage.onChanged.removeListener(onChanged);
   }, []);
 
-  const openFullPage = (hash = '') => {
-    void chrome.tabs.create({ url: chrome.runtime.getURL(`page.html${hash}`) }).catch(() => {});
-    window.close();
+  const openFullPage = async (hash = '') => {
+    // 打开成功才关弹窗：失败时保持打开，让下面的 ToastViewport 能把原因显示出来
+    // （弹窗原先也会被关掉且没有任何提示——用户只看到"点了没反应"）。
+    const opened = await openUrl(chrome.runtime.getURL(`page.html${hash}`));
+    if (opened) window.close();
   };
 
   const openSidePanel = async () => {
@@ -268,4 +272,10 @@ function PopupApp() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById('root')!).render(<PopupApp />);
+ReactDOM.createRoot(document.getElementById('root')!).render(
+  <>
+    <PopupApp />
+    {/* 弹窗原先没有 toast 视口：任何 pushToast 在这里都不可见（打开失败也没提示） */}
+    <ToastViewport />
+  </>,
+);

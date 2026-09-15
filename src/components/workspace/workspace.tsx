@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useAIStore } from '@/stores/aiStore';
 import { resolveTitlePath, useBookmarkStore } from '@/stores/bookmarkStore';
 import { pushToast } from '@/lib/toast';
+import { openUrl } from '@/lib/open-url';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { BrandMark, ThemeToggle } from '@/components/theme/theme-provider';
@@ -75,7 +76,7 @@ export function Workspace({ mode, initialDeletionsOpen = false }: { mode: 'compa
   }, [streaming, mode, chatOpen]);
 
   const openFullPage = () => {
-    void chrome.tabs.create({ url: chrome.runtime.getURL('page.html') }).catch(() => {});
+    void openUrl(chrome.runtime.getURL('page.html'));
   };
 
   /** 打开浏览器侧边栏（完整页用户可切回紧凑工作区） */

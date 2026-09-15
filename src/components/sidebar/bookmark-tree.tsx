@@ -30,6 +30,7 @@ import { useAIStore } from '@/stores/aiStore';
 import { copyText } from '@/lib/clipboard';
 import { isSelfOrDescendant, resolveDropIndex } from '@/lib/bookmark-dnd';
 import { pushToast } from '@/lib/toast';
+import { openUrl, openUrls } from '@/lib/open-url';
 import { cn } from '@/lib/utils';
 import { Favicon } from '@/components/common/favicon';
 import { Separator } from '@/components/ui/separator';
@@ -178,7 +179,7 @@ export function BookmarkTree({ className }: { className?: string }) {
         if (!v) break;
         if (v.node.url) {
           // Shift+Enter：后台打开（不打断当前浏览）
-          void chrome.tabs.create({ url: v.node.url, active: !e.shiftKey }).catch(() => {});
+          void openUrl(v.node.url, { active: !e.shiftKey });
         } else {
           useBookmarkStore.getState().toggleExpand(v.node.id);
           useBookmarkStore.getState().selectFolder(v.node.id);
@@ -392,7 +393,7 @@ const TreeRow = memo(function TreeRow({
       toggleExpand(node.id);
       selectFolder(node.id);
     } else if (node.url) {
-      void chrome.tabs.create({ url: node.url }).catch(() => {});
+      void openUrl(node.url);
     }
   };
 
@@ -568,7 +569,7 @@ const TreeRow = memo(function TreeRow({
         // 中键：书签在新标签页打开（阻止 Windows 自动滚动）
         if (e.button === 1) {
           e.preventDefault();
-          if (node.url) void chrome.tabs.create({ url: node.url }).catch(() => {});
+          if (node.url) void openUrl(node.url);
         }
       }}
       onMouseEnter={() => onActivate(node.id)}
@@ -705,11 +706,10 @@ export function ContextMenuOverlay() {
       }
       const list = urls.slice(0, 25);
       if (urls.length > 25) pushToast(`书签过多，仅打开前 25 个（共 ${urls.length} 个）`);
-      for (const u of list) void chrome.tabs.create({ url: u }).catch(() => {});
-      if (list.length > 0) pushToast(`已打开 ${list.length} 个标签页`, { variant: 'success' });
+      void openUrls(list);
       return;
     }
-    if (node?.url) void chrome.tabs.create({ url: node.url }).catch(() => {});
+    if (node?.url) void openUrl(node.url);
   };
   /** 后台打开：多选时批量（去重，最多 25 个） */
   const openBackgroundAction = () => {
@@ -730,11 +730,10 @@ export function ContextMenuOverlay() {
         return;
       }
       if (urls.length > 25) pushToast(`书签过多，仅打开前 25 个（共 ${urls.length} 个）`);
-      for (const u of list) void chrome.tabs.create({ url: u, active: false }).catch(() => {});
-      if (list.length > 0) pushToast(`已打开 ${list.length} 个标签页`, { variant: 'success' });
+      void openUrls(list, { active: false });
       return;
     }
-    if (node?.url) void chrome.tabs.create({ url: node.url, active: false }).catch(() => {});
+    if (node?.url) void openUrl(node.url, { active: false });
   };
   /** 新窗口打开：多选时批量（去重，最多 25 个） */
   const openWindowAction = async () => {
@@ -758,7 +757,7 @@ export function ContextMenuOverlay() {
       try {
         const win = await chrome.windows.create({ url: list[0], focused: true });
         if (win?.id !== undefined) {
-          for (const u of list.slice(1)) void chrome.tabs.create({ windowId: win.id, url: u }).catch(() => {});
+          void openUrls(list.slice(1), { windowId: win.id });
         }
       } catch {
         pushToast('打开失败', { variant: 'destructive' });
@@ -882,8 +881,7 @@ export function ContextMenuOverlay() {
     }
     const openCount = Math.min(urls.length, 25);
     if (urls.length > 25) pushToast(`书签过多，仅打开前 25 个（共 ${urls.length} 个）`);
-    for (const url of urls.slice(0, openCount)) void chrome.tabs.create({ url }).catch(() => {});
-    pushToast(`已打开 ${openCount} 个标签页`, { variant: 'success' });
+    void openUrls(urls.slice(0, openCount));
   };
 
   /** 打开文件夹内全部书签（新窗口，最多 25 个防刷屏；重复 URL 去重） */
@@ -909,7 +907,7 @@ export function ContextMenuOverlay() {
     try {
       const win = await chrome.windows.create({ url: list[0], focused: true });
       if (win?.id !== undefined) {
-        for (const url of list.slice(1)) void chrome.tabs.create({ windowId: win.id, url }).catch(() => {});
+        void openUrls(list.slice(1), { windowId: win.id });
       }
     } catch {
       pushToast('打开失败', { variant: 'destructive' });

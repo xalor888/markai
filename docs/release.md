@@ -139,4 +139,6 @@ README 声称的平台本来也只有 Chrome / Edge。
 - **没有商店渠道**：不发 Chrome Web Store，产物只挂在 GitHub Release，用户手动加载。
 - **没有真机验证**：Release 校验只能证明产物结构正确，**证明不了**扩展在真实 Chrome 里
   的行为（拖拽手感、撤销按钮、SW 回收后的存储表现）。这属于 DIRECTION 的 P3。
-- **Firefox zip 未实测**：workflow 会一起产出 `*-firefox.zip`，但从未在 Firefox 里装过。
+- **不产出 Firefox 产物**（v0.2.5 起，见 §4.5）：它从未在真实 Firefox 里装过，按本项目
+  "不发没人验证过的产物"的标准已从 workflow 移除。所以**资产列表里只应该有 chrome zip**；
+  若某次发版出现了 `*-firefox.zip`，那是流程回归，需要查而不是接受。

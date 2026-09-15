@@ -9,7 +9,7 @@
  */
 import { reverseOps, undoReadiness } from './journal';
 import { readUndoPoints, takeUndoPoint } from './recorder';
-import type { BookmarkSnapshot, UndoApplyResult, UndoOp } from './types';
+import type { BookmarkSnapshot, UndoApplyResult, UndoOp, UndoPoint } from './types';
 
 /**
  * 本 SW 会话内"已执行但未能消费掉"的撤销点 id。
@@ -59,14 +59,69 @@ async function restoreSubtree(snap: BookmarkSnapshot, parentId: string, index?: 
   return node.id;
 }
 
+/** 一个"撤销新建文件夹会顺带删掉后来内容"的冲突 */
+interface FolderRemovalConflict {
+  folderId: string;
+  title: string;
+  /** 不会被本点自己的逆操作移出、因而会被误删的子项 */
+  survivingChildIds: string[];
+}
+
+/**
+ * **只读预检**：找出那些"撤销后会把不该删的内容一起删掉"的文件夹 create 逆操作。
+ *
+ * 为什么需要：`create` 的文件夹逆操作是删除该文件夹。如果这个文件夹在**本轮之外**
+ * （用户手工、另一个窗口、或未被记账的移动）被放进了内容，删除就会连带毁掉那些内容，
+ * 而本轮的快照里根本没有它们——不可恢复。
+ *
+ * 判定：列出文件夹**当前**的子项，排除掉"本点自己的逆操作会先处理掉"的那些：
+ *   - 由本点的 `create` 创建的节点：逆序回放会先把它删掉；
+ *   - 由本点的 `move` / `moveBatch` 移出该文件夹的节点（`fromParentId !== 该文件夹`）：
+ *     逆序回放会先把它移回原处。
+ * 剩下的子项就是"来路不明、删了就没了"的内容 → 冲突，必须零副作用拒绝并**保留**撤销点。
+ *
+ * 注意：同一轮里"创建 F 再把 X 移入 F"是**正常**的，不构成冲突——X 会被本点自己的
+ * move 逆操作先移出，所以这里必须按 op 语义排除，不能简单地把"文件夹非空"当冲突。
+ *
+ * 顺序安全性：这些"会被处理掉"的子项对应的 op 必然发生在 create F **之后**（否则 F 还不存在），
+ * 因此逆序回放时它们一定排在"删除 F"**之前**——不会出现"删 F 时子项还在"的窗口。
+ */
+async function findFolderRemovalConflicts(point: UndoPoint): Promise<FolderRemovalConflict[]> {
+  const conflicts: FolderRemovalConflict[] = [];
+  for (const op of point.ops) {
+    if (op.kind !== 'create' || !op.isFolder) continue;
+    const folderId = op.id;
+    const nodes = await chrome.bookmarks.get(folderId).catch(() => []);
+    if (nodes.length === 0) continue; // 已经不存在：交给回放按幂等处理
+    const children = await chrome.bookmarks.getChildren(folderId).catch(() => []);
+    if (children.length === 0) continue;
+
+    const willBeHandled = new Set<string>();
+    for (const other of point.ops) {
+      if (other.kind === 'create') {
+        willBeHandled.add(other.id); // 回放会先把它删掉
+      } else if (other.kind === 'move' && other.fromParentId !== folderId) {
+        willBeHandled.add(other.id); // 回放会先把它移回 fromParentId
+      } else if (other.kind === 'moveBatch' && other.fromParentId !== folderId) {
+        for (const id of other.ids) willBeHandled.add(id);
+      }
+    }
+    const surviving = children.map((c) => c.id).filter((id) => !willBeHandled.has(id));
+    if (surviving.length > 0) conflicts.push({ folderId, title: op.title, survivingChildIds: surviving });
+  }
+  return conflicts;
+}
+
 /** 执行一条逆操作。节点已不存在视为「已还原」（用户可能已经手动删掉了）。 */
 async function applyOne(op: UndoOp, idMap: Map<string, string>): Promise<void> {
   switch (op.kind) {
     case 'create': {
       const nodes = await chrome.bookmarks.get(op.id).catch(() => []);
       if (nodes.length === 0) return;
-      if (op.isFolder) await chrome.bookmarks.removeTree(op.id);
-      else await chrome.bookmarks.remove(op.id);
+      // 一律用**非递归** remove：文件夹若还含子项，Chrome 会拒绝，于是它变成一条如实上报的
+      // failure，而不是把用户后来放进去的内容一起递归删掉。真正的零副作用拦截在
+      // findFolderRemovalConflicts（回放前的只读预检），这里是纵深防御。
+      await chrome.bookmarks.remove(op.id);
       return;
     }
     case 'move': {
@@ -174,6 +229,23 @@ export async function applyUndo(id?: string): Promise<UndoApplyResult> {
     return {
       ok: false,
       reason: '请先撤销较新的操作（撤销只能从最新一步开始，按时间从新到旧依次回退）',
+      restored: 0,
+      failures: [],
+    };
+  }
+
+  // ── 只读预检：撤销新建文件夹会不会顺带删掉后来放进去的内容 ──
+  //
+  // 必须在**任何**书签写入、顺序还原与消费之前。冲突时零副作用拒绝并**保留**撤销点，
+  // 让用户先把内容移走再重试——而不是递归删除，也不是把点消费掉让他失去重试机会。
+  const conflicts = await findFolderRemovalConflicts(target);
+  if (conflicts.length > 0) {
+    const detail = conflicts
+      .map((c) => `「${c.title}」里还有 ${c.survivingChildIds.length} 项内容`)
+      .join('；');
+    return {
+      ok: false,
+      reason: `${detail}。自动撤销不会连带删除这些内容，请先把它们移到别处再撤销。`,
       restored: 0,
       failures: [],
     };

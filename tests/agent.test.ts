@@ -4605,6 +4605,121 @@ function ok(name: string, fn: () => void) {
     resetUndoTransactionForTest();
   }
 
+  /* ── T43: 撤销新建文件夹不得递归删除后来移入的内容 ── */
+  console.log('\n[T43] 文件夹非空冲突预检');
+  {
+    const {
+      UNDO_STORAGE_KEY,
+      UNDO_PENDING_KEY,
+      beginUndoTransaction,
+      endUndoTransaction,
+      readUndoState,
+      resetUndoTransactionForTest,
+    } = await import('../src/lib/undo/recorder');
+    const { jCreate, jMove } = await import('../src/lib/undo/mutations');
+    const { applyUndo } = await import('../src/lib/undo/apply');
+
+    const clean = () => {
+      storageMap.delete(UNDO_STORAGE_KEY);
+      storageMap.delete(UNDO_PENDING_KEY);
+      resetUndoTransactionForTest();
+      storageSetFail = false;
+      storageSetFailKeys = null;
+      storageSetFailTimes = Number.POSITIVE_INFINITY;
+      storageSetDelayMs = 0;
+      storageSetDelaySequence = [];
+      resetMockCalls();
+    };
+
+    // ── A. 真冲突：F 被「撤销点之外」的操作放进了内容 ──
+    clean();
+    const baseTree = await snapshotTree();
+    await beginUndoTransaction('t43-conflict');
+    const fId = (await jCreate({ parentId: '1', title: 'T43-FOLDER' })).id;
+    const aPoint = await endUndoTransaction();
+    assert.ok(aPoint, '前置条件：应产生创建文件夹的撤销点');
+
+    // 未记录的操作（模拟用户手工 / 另一个窗口）：把既有书签搬进 F
+    const outsider = (
+      await mockBookmarks.create({ parentId: '1', title: 'T43-OUTSIDER', url: 'https://t43.test/x' })
+    ).id;
+    await mockBookmarks.move(outsider, { parentId: fId });
+
+    const treeBefore = await snapshotTree();
+    const pointsBefore = JSON.stringify((await readUndoState()).points);
+    resetMockCalls();
+    const refused = await applyUndo(aPoint!.id);
+    const treeAfter = await snapshotTree();
+    const pointsAfter = JSON.stringify((await readUndoState()).points);
+
+    ok('文件夹里有后来移入的内容时，撤销必须被拒绝（不能递归删掉它）', () => {
+      assert.equal(refused.ok, false, '应拒绝，而不是删除文件夹连同里面的内容');
+      assert.equal(refused.restored, 0, '不得声称还原了任何东西');
+      assert.deepEqual(refused.failures, [], '这是安全拒绝，不是回放失败');
+      assert.match(refused.reason ?? '', /移/, 'reason 要告诉用户先把内容移走');
+    });
+    ok('冲突拒绝必须零书签副作用、零存储消费，并保留撤销点', () => {
+      assert.equal(mockCalls.remove, 0, '不应 remove');
+      assert.equal(mockCalls.removeTree, 0, '不应 removeTree');
+      assert.equal(mockCalls.move, 0, '不应 move');
+      assert.equal(mockCalls.create, 0, '不应 create');
+      assert.equal(mockCalls.update, 0, '不应 update');
+      assert.equal(mockCalls.storageSet, 0, '不应 storage.set');
+      assert.equal(mockCalls.storageRemove, 0, '不应 storage.remove');
+      assert.equal(treeAfter, treeBefore, '树必须完全不变（文件夹和内容都还在）');
+      assert.equal(pointsAfter, pointsBefore, '撤销点必须保留，用户移走内容后还能重试');
+    });
+    ok('冲突时文件夹与内容都仍然存在', () => {
+      assert.ok(nodeById(fId), '文件夹不能被删');
+      assert.ok(nodeById(outsider), '后来移入的内容不能被删');
+    });
+
+    // 把内容移走后重试同一点：这次必须成功
+    await mockBookmarks.move(outsider, { parentId: '1' });
+    const retry = await applyUndo(aPoint!.id);
+    ok('把内容移走后，同一点重试应当成功', () => {
+      assert.equal(retry.ok, true, `应成功，实际 ${JSON.stringify(retry)}`);
+      assert.equal(nodeById(fId), undefined, '此时文件夹是空的，应被正常删除');
+    });
+    await mockBookmarks.remove(outsider); // 清理探针
+    const treeAfterRetry = await snapshotTree();
+    ok('冲突解除后重试成功，树恢复初始状态', () =>
+      assert.equal(treeAfterRetry, baseTree),
+    );
+
+    // ── B. 不回归：同一轮「创建 F + 把 X 移入 F」不是冲突 ──
+    clean();
+    const baseTree2 = await snapshotTree();
+    await beginUndoTransaction('t43-same-point');
+    const f2 = (await jCreate({ parentId: '1', title: 'T43-F2' })).id;
+    const xId = (await jCreate({ parentId: '1', title: 'T43-X', url: 'https://t43.test/y' })).id;
+    await jMove(xId, { parentId: f2 }); // 同一轮内的移动：撤销时会被自己的逆操作先移出
+    const bPoint = await endUndoTransaction();
+    assert.ok(bPoint, '前置条件：应产生撤销点');
+    const sameTurn = await applyUndo(bPoint!.id);
+    ok('同一轮「创建 F + 移入 X」的撤销必须照常成功（不能被误判为冲突）', () => {
+      assert.equal(sameTurn.ok, true, `应成功，实际 ${JSON.stringify(sameTurn)}`);
+    });
+    const treeAfterSameTurn = await snapshotTree();
+    ok('同轮用例撤销后回到初始树', () => assert.equal(treeAfterSameTurn, baseTree2));
+
+    // ── C. 空文件夹撤销仍然成功（预检不能把正常路径一起拦掉）──
+    clean();
+    const baseTree3 = await snapshotTree();
+    await beginUndoTransaction('t43-empty');
+    const f3 = (await jCreate({ parentId: '1', title: 'T43-EMPTY' })).id;
+    const cPoint = await endUndoTransaction();
+    const emptyUndo = await applyUndo(cPoint!.id);
+    ok('空文件夹的撤销仍然成功', () => {
+      assert.equal(emptyUndo.ok, true, `应成功，实际 ${JSON.stringify(emptyUndo)}`);
+      assert.equal(nodeById(f3), undefined, '空文件夹应被删除');
+    });
+    const treeAfterEmpty = await snapshotTree();
+    ok('空文件夹用例后树不变', () => assert.equal(treeAfterEmpty, baseTree3));
+
+    clean();
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

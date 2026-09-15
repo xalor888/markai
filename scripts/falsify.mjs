@@ -632,6 +632,13 @@ const cases = [
     expectFail: ['预算记账正确时工具循环继续'],
   },
   {
+    name: '撤销新建文件夹不再预检内容（会递归删除后来移入的数据）',
+    file: 'src/lib/undo/apply.ts',
+    from: '  const conflicts = await findFolderRemovalConflicts(target);\n  if (conflicts.length > 0) {',
+    to: '  const conflicts: FolderRemovalConflict[] = [];\n  if (conflicts.length > 0) {',
+    expectFail: ['文件夹里有后来移入的内容时，撤销必须被拒绝'],
+  },
+  {
     name: '后端不再拒绝非最新撤销点（会跨轮次递归删除后来移入的数据）',
     file: 'src/lib/undo/apply.ts',
     from: '  if (id && target.id !== points[0]?.id) {',

@@ -632,6 +632,13 @@ const cases = [
     expectFail: ['预算记账正确时工具循环继续'],
   },
   {
+    name: 'planMode 不再把"先声明计划"写进系统提示（模型无从知道该声明）',
+    file: 'src/lib/ai/agent.ts',
+    from: "    config.planMode === true ? SYSTEM_PROMPT + PLAN_MODE_INSTRUCTION : SYSTEM_PROMPT;",
+    to: '    SYSTEM_PROMPT;',
+    expectFail: ['planMode 开启时，系统提示要求先声明整轮计划再动手'],
+  },
+  {
     name: '整轮预授权放行未声明的写操作（把安全边界交给模型自觉）',
     file: 'src/lib/ai/agent.ts',
     from: "            !(turnGrant?.approved && turnGrant.tools.has(tc.function.name)),",

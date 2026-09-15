@@ -6189,6 +6189,41 @@ function ok(name: string, fn: () => void) {
       assert.equal(mockCalls.create, 0, '声明工具本身不得写库'),
     );
     clear();
+
+    // ── F. 系统提示：planMode 开启时必须指示"先声明计划再动手" ──
+    const systemMessages = () =>
+      fetchCalls
+        .map((c) => {
+          try {
+            const body = JSON.parse(String(c.init.body ?? '{}')) as {
+              messages?: { role: string; content: string }[];
+            };
+            return body.messages?.find((m) => m.role === 'system')?.content ?? '';
+          } catch {
+            return '';
+          }
+        })
+        .filter(Boolean);
+
+    fetchCalls.length = 0;
+    resetMockCalls();
+    sseQueue = [finalRound()];
+    await runTurnWith('只是聊聊天', { config: { planMode: true } });
+    const onSys = systemMessages().at(-1) ?? '';
+    fetchCalls.length = 0;
+    sseQueue = [finalRound()];
+    await runTurnWith('只是聊聊天', { config: { planMode: false } });
+    const offSys = systemMessages().at(-1) ?? '';
+
+    ok('planMode 开启时，系统提示要求先声明整轮计划再动手', () => {
+      assert.match(onSys, /submit_plan/, '开启时应提示先用 submit_plan 声明');
+      assert.match(onSys, /先声明|声明计划/, '要说明是"先声明"');
+    });
+    ok('planMode 关闭时，系统提示不含声明计划的指令（不打扰默认路径）', () =>
+      assert.ok(!/submit_plan/.test(offSys), '关闭时不该出现 submit_plan 指令'),
+    );
+    fetchCalls.length = 0;
+    clear();
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

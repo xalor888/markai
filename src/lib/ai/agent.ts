@@ -1,7 +1,7 @@
 /** ── Agent 主循环：流式对话 + 工具调用循环 ── */
 
 import { chatCompletion, ChatError, type ApiMessage, type ApiToolCall } from './client';
-import { SYSTEM_PROMPT, TOOL_DEFINITIONS } from './prompts';
+import { PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT, TOOL_DEFINITIONS } from './prompts';
 import { executeTool, type ToolOutput } from './tools';
 import { applyPlan, buildPlan, classifyTool, type PlannedStep } from './turn-plan';
 import { beginUndoTransaction, endUndoTransaction } from '@/lib/undo/recorder';
@@ -111,7 +111,7 @@ export function estimateTokens(text: string): number {
 
 /** 固定开销估算：系统提示词 + 工具定义 schema（不在历史预算内，需从窗口预算中扣除） */
 export function fixedOverheadTokens(): number {
-  return estimateTokens(SYSTEM_PROMPT) + estimateTokens(JSON.stringify(TOOL_DEFINITIONS)) + 100;
+  return estimateTokens(SYSTEM_PROMPT) + estimateTokens(PLAN_MODE_INSTRUCTION) + estimateTokens(JSON.stringify(TOOL_DEFINITIONS)) + 100;
 }
 
 /**
@@ -219,7 +219,11 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
   const apiHistory = selectHistory(history, budget, config.autoCompress ?? false);
 
   // 组装 API 消息：系统提示词 + 历史（预算内）+ 本次用户输入
-  const apiMessages: ApiMessage[] = [{ role: 'system', content: SYSTEM_PROMPT }];
+  // 计划模式：把"先声明整轮计划"的流程要求写进系统提示（工具说明只讲工具是什么，
+  // 流程要求必须在系统提示里说；声明没做也不影响安全，只是确认次数会变多）
+  const systemContent =
+    config.planMode === true ? SYSTEM_PROMPT + PLAN_MODE_INSTRUCTION : SYSTEM_PROMPT;
+  const apiMessages: ApiMessage[] = [{ role: 'system', content: systemContent }];
   for (const m of apiHistory) {
     const content = extractText(m).slice(0, MAX_MESSAGE_CHARS);
     apiMessages.push({ role: m.role, content: content || null });

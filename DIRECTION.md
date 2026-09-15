@@ -33,7 +33,7 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
 | 测试 | `npm test` | **385 项全绿**（… → 360 → 369 → 370 → 385） |
 | 构建 | `npm run build` | 通过，`.output/chrome-mv3` 788.17 kB |
-| 版本 | `package.json` | **0.2.17（已发版）** |
+| 版本 | `package.json` | **0.2.18（已发版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
 | 发布 | `.github/workflows/release.yml` | `v*` tag → 构建 + Release |
 
@@ -337,11 +337,11 @@ sort_folder + merge_folders 再撤销）抓出**并发批量移动**的坑——
 > 版本节奏（已执行）：P0 的修复没有单独发版，与 P1（撤销）一起打成 **v0.2.2**（头部功能才值得一个版本号）；
 > P2 修掉的撤销缺陷在 v0.2.2 里**已经发布**，因此单独发了补丁版 **v0.2.3**（含说明"修了什么、是否该升级"的发布说明）。
 > **v0.2.4** 收了「撤销覆盖删除」与容量护栏两块（发布说明里写明了升级须知：v0.2.3 及更早写下的旧撤销点没有删除快照，会被如实拒绝整轮撤销）。
-> **未发版（进行中）**：整体轮次级预览**第一、二片**已落地。第一片 `src/lib/ai/turn-plan.ts`
+> **v0.2.18** 发了「整体轮次级预览」（设置页「执行前先看计划」，**默认关闭**），三片分述如下。第一片 `src/lib/ai/turn-plan.ts`
 > （`classifyTool` / `buildPlan` / `applyPlan`，安全默认"未确认即不执行"）；第二片把它接进
 > `agent.ts` 的写循环——按**回次**确认（链式操作依赖前一步返回值，不能憋到轮末），
 > 配置项 `planMode` 默认 **false**（保持现状），闸门类不进计划，未注入确认通道时零执行。
-> **第三片已落地**：确认通道（`lib/ai/plan-approval.ts` + background 注入 + 端口往返）
+> 第三片：确认通道（`lib/ai/plan-approval.ts` + background 注入 + 端口往返）
 > 与聊天面板的计划卡片、设置页 `planMode` 开关。断线与取消都把未决请求按**未批准**结算，
 > 迟到的决定只结算对应 messageId。
 > **未尽事项**：一轮里多个回次可能多次确认；计划模式仍**默认关闭**（是否默认开启是产品决策，

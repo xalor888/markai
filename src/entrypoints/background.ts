@@ -11,6 +11,7 @@ import { ChatError, testConnection } from '@/lib/ai/client';
 import { ensureRoots } from '@/lib/ai/tools';
 import { recoverInterruptedTransaction } from '@/lib/undo/recorder';
 import { toolbarClear, toolbarError } from '@/lib/ai/toolbar-hint';
+import { createPlanApprovalRegistry } from '@/lib/ai/plan-approval';
 import {
   handleContextMenuClick as runContextMenuClick,
   type ContextMenuClickInfo,
@@ -132,6 +133,8 @@ export default defineBackground(() => {
   chrome.runtime.onConnect.addListener((port) => {
     if (port.name !== 'markai-chat') return;
     let abort: AbortController | null = null;
+    // 每个连接一份登记表：决定只结算本连接上挂起的计划
+    const planApprovals = createPlanApprovalRegistry();
 
     port.onMessage.addListener((raw: ChatInbound) => {
       if (raw.type === 'chat:send') {
@@ -139,18 +142,25 @@ export default defineBackground(() => {
         abort?.abort();
         const ctrl = new AbortController();
         abort = ctrl;
-        void handleChatSend(port, raw, ctrl.signal).finally(() => {
+        void handleChatSend(port, raw, ctrl.signal, planApprovals).finally(() => {
           // 仅当仍是当前请求时才清空，避免旧请求的 finally 覆盖新请求的 abort
           if (abort === ctrl) abort = null;
         });
       } else if (raw.type === 'chat:cancel') {
         abort?.abort();
+        // 轮次被中止：把还挂着的计划按"未批准"结算，避免 await 永远不返回
+        planApprovals.cancelAll();
+      } else if (raw.type === 'chat:plan_decision') {
+        // 只结算对应 messageId 的那一轮；迟到的决定不会批准别的计划
+        planApprovals.resolve(raw.messageId, raw.approved);
       }
     });
 
     port.onDisconnect.addListener(() => {
       abort?.abort();
       abort = null;
+      // 面板关了没人能点确认：未决计划按"未批准"结算（绝不挂死一轮）
+      planApprovals.cancelAll();
     });
   });
 
@@ -341,6 +351,7 @@ async function handleChatSend(
   port: chrome.runtime.Port,
   msg: Extract<ChatInbound, { type: 'chat:send' }>,
   signal: AbortSignal,
+  planApprovals: ReturnType<typeof createPlanApprovalRegistry>,
 ): Promise<void> {
   safePost(port, { type: 'chat:start', messageId: msg.messageId });
   // 处理中醒目提醒：工具栏图标显示「…」徽标，结束时清除（错误红色 '!'）。
@@ -393,7 +404,18 @@ async function handleChatSend(
   }
 
   try {
-    await runAgentTurn({ config, messageId: msg.messageId, history: msg.history, text, signal, onEvent: (e) => safePost(port, e) });
+    await runAgentTurn({
+      config,
+      messageId: msg.messageId,
+      history: msg.history,
+      text,
+      signal,
+      onEvent: (e) => safePost(port, e),
+      // 计划模式的真实确认通道：发出 chat:plan 后等这个连接上的 chat:plan_decision；
+      // 端口断开/取消时由登记表按"未批准"结算（绝不挂死一轮）
+      requestPlanApproval: (steps, messageId) =>
+        planApprovals.request(messageId, steps, (m) => safePost(port, m)),
+    });
   } catch (e) {
     if (signal.aborted) {
       safePost(port, { type: 'chat:cancelled', messageId: msg.messageId });

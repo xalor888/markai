@@ -31,7 +31,7 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
-| 测试 | `npm test` | **370 项全绿**（… → 348 → 360 → 369 → 370） |
+| 测试 | `npm test` | **385 项全绿**（… → 360 → 369 → 370 → 385） |
 | 构建 | `npm run build` | 通过，`.output/chrome-mv3` 788.17 kB |
 | 版本 | `package.json` | **0.2.17（已发版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
@@ -341,8 +341,11 @@ sort_folder + merge_folders 再撤销）抓出**并发批量移动**的坑——
 > （`classifyTool` / `buildPlan` / `applyPlan`，安全默认"未确认即不执行"）；第二片把它接进
 > `agent.ts` 的写循环——按**回次**确认（链式操作依赖前一步返回值，不能憋到轮末），
 > 配置项 `planMode` 默认 **false**（保持现状），闸门类不进计划，未注入确认通道时零执行。
-> **未尽事项**：UI 计划卡片与按钮尚未做（第三片），因此生产环境开启 `planMode` 目前会
-> 如实告知"未执行"而不是弹确认；一轮里多个回次可能多次确认。
+> **第三片已落地**：确认通道（`lib/ai/plan-approval.ts` + background 注入 + 端口往返）
+> 与聊天面板的计划卡片、设置页 `planMode` 开关。断线与取消都把未决请求按**未批准**结算，
+> 迟到的决定只结算对应 messageId。
+> **未尽事项**：一轮里多个回次可能多次确认；计划模式仍**默认关闭**（是否默认开启是产品决策，
+> 见设计文档 §五）；真机未验证。
 > **v0.2.17** 收了两件事：把错误台账的 catch **逐处走查**做完（`docs/error-handling-audit.md`，
 > 189 处逐条判定），并修掉走查中发现的 4 处「把不确定说成确定」（删除预扫描的读取失败、
 > 复制后改名失败、主题保存失败、快捷键打开侧边栏失败）。

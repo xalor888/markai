@@ -632,6 +632,20 @@ const cases = [
     expectFail: ['预算记账正确时工具循环继续'],
   },
   {
+    name: '确认登记表断线时按"批准"结算（面板关了反而放行）',
+    file: 'src/lib/ai/plan-approval.ts',
+    from: '      for (const settle of all) settle(false);',
+    to: '      for (const settle of all) settle(true);',
+    expectFail: ['cancelAll 把未决请求按"未批准"结算（绝不挂死一轮）'],
+  },
+  {
+    name: '计划决定不再匹配 messageId（迟到的决定能批准别的轮次）',
+    file: 'src/lib/ai/plan-approval.ts',
+    from: '      const settle = pending.get(messageId);',
+    to: '      const settle = [...pending.values()][0];',
+    expectFail: ['对未知 messageId 的 resolve 返回 false（不命中）'],
+  },
+  {
     name: 'agent 不再走计划闸门（写操作在确认前就落库）',
     file: 'src/lib/ai/agent.ts',
     from: "      if (planEnabled && classifyTool(tc.function.name) === 'write') {",

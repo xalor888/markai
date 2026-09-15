@@ -80,6 +80,8 @@ export type ChatInbound =
       contextFolderId?: string; // 用户当前查看的文件夹
     }
   | { type: 'chat:cancel' }
+  /** 计划模式：用户对 chat:plan 的决定（必须带 messageId，只结算对应轮次） */
+  | { type: 'chat:plan_decision'; messageId: string; approved: boolean }
   // 保活心跳：MV3 下 SW 约 30s 无事件即被回收，长任务（大库检测/分类）期间
   // LLM 往返可能超过该窗口；UI 每 20s 发一次 ping，消息到达即重置空闲计时器
   | { type: 'chat:ping' };

@@ -391,6 +391,30 @@ export function ConfigForm() {
           </p>
         </div>
 
+        {/* 轮次级计划模式：写操作先出计划、确认后才执行（默认关闭） */}
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between">
+            <Label htmlFor="plan-mode">执行前先看计划</Label>
+            <span className="text-[11px] text-muted-foreground">
+              {config.planMode ? '每个写操作回次先确认' : '关闭（直接执行）'}
+            </span>
+          </div>
+          <select
+            id="plan-mode"
+            className="h-8 w-full appearance-none rounded-sm border border-input bg-card px-2 text-xs text-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            value={config.planMode ? 'on' : 'off'}
+            onChange={(e) => void update({ planMode: e.target.value === 'on' })}
+          >
+            <option value="off">关闭（Agent 直接执行写操作）</option>
+            <option value="on">开启（先展示计划，确认后才改动书签）</option>
+          </select>
+          <p className="text-[11px] leading-4 text-muted-foreground">
+            {config.planMode
+              ? 'Agent 每次要改动书签前，会先把计划列在聊天里等你确认；取消则这一步不会执行。删除提议仍按其自己的确认设置处理。'
+              : 'Agent 会直接执行移动/新建/重命名等写操作（仍可用「撤销本次操作」回退）。'}
+          </p>
+        </div>
+
         {/* 上下文：模型上下文长度（默认 1024K）+ 压缩阈值 */}
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">

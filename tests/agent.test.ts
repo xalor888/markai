@@ -5886,6 +5886,135 @@ function ok(name: string, fn: () => void) {
     void useBookmarkStore;
   }
 
+  /* ── T55: 计划确认通道与界面接线（第三片） ── */
+  console.log('\n[T55] 计划确认通道');
+  {
+    const { createPlanApprovalRegistry } = await import('../src/lib/ai/plan-approval');
+
+    const plan = [{ name: 'create_folder', label: '新建文件夹', count: 1, summary: '新建文件夹', preview: false }];
+
+    // ── A. request 发出 chat:plan 并挂起 ──
+    const posted: { type: string; messageId: string; steps?: unknown[] }[] = [];
+    const reg = createPlanApprovalRegistry();
+    const p1 = reg.request('msg-a', plan, (m) => posted.push(m as never));
+    ok('request 发出 chat:plan（带 messageId 与步骤清单）', () => {
+      assert.equal(posted.length, 1);
+      assert.equal(posted[0]!.type, 'chat:plan');
+      assert.equal(posted[0]!.messageId, 'msg-a');
+      assert.equal(posted[0]!.steps?.length, 1);
+    });
+    ok('resolve(true) 结算对应请求为"批准"', async () => {
+      assert.equal(reg.resolve('msg-a', true), true, '应命中');
+    });
+    await p1.then((v) => {
+      ok('批准后 promise 解出 true', () => assert.equal(v, true));
+    });
+
+    // ── B. resolve(false) 结算为"取消" ──
+    const p2 = reg.request('msg-b', plan, () => {});
+    reg.resolve('msg-b', false);
+    await p2.then((v) => {
+      ok('取消后 promise 解出 false', () => assert.equal(v, false));
+    });
+
+    // ── C. 未知 messageId 的 resolve 必须安全无副作用（不能误结算别人的请求） ──
+    let settledC: boolean | null = null;
+    const p3 = reg.request('msg-c', plan, () => {});
+    void p3.then((v) => {
+      settledC = v;
+    });
+    ok('对未知 messageId 的 resolve 返回 false（不命中）', () =>
+      assert.equal(reg.resolve('msg-不存在', true), false),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    ok('未知 messageId 的决定不得影响其它未决请求', () =>
+      assert.equal(settledC, null, 'msg-c 应仍未结算'),
+    );
+    reg.resolve('msg-c', false);
+    await p3;
+
+    // ── D. cancelAll（端口断开）必须把未决请求按"未批准"结算，不能挂死 ──
+    let settledD: boolean | null = null;
+    const p4 = reg.request('msg-d', plan, () => {});
+    void p4.then((v) => {
+      settledD = v;
+    });
+    let settledE: boolean | null = null;
+    const p5 = reg.request('msg-e', plan, () => {});
+    void p5.then((v) => {
+      settledE = v;
+    });
+    reg.cancelAll();
+    await Promise.all([p4, p5]);
+    ok('cancelAll 把未决请求按"未批准"结算（绝不挂死一轮）', () => {
+      assert.equal(settledD, false, '断线应结算为未批准');
+      assert.equal(settledE, false);
+    });
+    ok('cancelAll 之后登记表为空', () => assert.equal(reg.pendingCount(), 0));
+
+    // ── E. store：chat:plan 事件 → pendingPlan；approve/cancel 发决定并清空 ──
+    const { useAIStore } = await import('../src/stores/aiStore');
+    const sent: { type: string; messageId?: string; approved?: boolean }[] = [];
+    useAIStore.setState({
+      port: { postMessage: (m: unknown) => sent.push(m as never) } as unknown as chrome.runtime.Port,
+      pendingPlan: null,
+    });
+    useAIStore.getState().handleOutbound({
+      type: 'chat:plan',
+      messageId: 'msg-ui',
+      steps: plan,
+    } as never);
+    ok('store：收到 chat:plan 后 pendingPlan 有值', () => {
+      const pp = useAIStore.getState().pendingPlan;
+      assert.ok(pp, 'pendingPlan 应有值');
+      assert.equal(pp!.messageId, 'msg-ui');
+      assert.equal(pp!.steps.length, 1);
+    });
+    useAIStore.getState().approvePlan();
+    ok('store：approvePlan 发送 approved:true 并清空 pendingPlan', () => {
+      const last = sent[sent.length - 1]!;
+      assert.equal(last.type, 'chat:plan_decision');
+      assert.equal(last.messageId, 'msg-ui');
+      assert.equal(last.approved, true);
+      assert.equal(useAIStore.getState().pendingPlan, null);
+    });
+
+    sent.length = 0;
+    useAIStore.getState().handleOutbound({ type: 'chat:plan', messageId: 'msg-ui2', steps: plan } as never);
+    useAIStore.getState().cancelPlan();
+    ok('store：cancelPlan 发送 approved:false 并清空 pendingPlan', () => {
+      const last = sent[sent.length - 1]!;
+      assert.equal(last.type, 'chat:plan_decision');
+      assert.equal(last.approved, false);
+      assert.equal(useAIStore.getState().pendingPlan, null);
+    });
+
+    // ── F. 源码守卫：卡片与设置开关接线 ──
+    const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    ok('UI：计划卡片渲染每步摘要，且同时有确认与取消两个入口', () => {
+      const panel = readFileSync(resolve(rootDir, 'src/components/chat/chat-panel.tsx'), 'utf8');
+      assert.match(panel, /pendingPlan/, '面板必须读取 pendingPlan');
+      assert.match(panel, /approvePlan/, '必须有确认入口');
+      assert.match(panel, /cancelPlan/, '必须有取消入口');
+      assert.match(panel, /step\.summary/, '必须渲染每步摘要');
+    });
+    ok('UI：取消文案如实说明"没有执行任何写操作"', () => {
+      const panel = readFileSync(resolve(rootDir, 'src/components/chat/chat-panel.tsx'), 'utf8');
+      assert.match(panel, /没有执行任何写操作/, '取消必须如实说明零写入');
+    });
+    ok('设置页：planMode 开关接线存在', () => {
+      const form = readFileSync(resolve(rootDir, 'src/components/options/config-form.tsx'), 'utf8');
+      assert.match(form, /planMode/, '设置页要有计划模式开关');
+    });
+    ok('设置页：planMode 默认关闭（不改变现有用户节奏）', () => {
+      const cfg = readFileSync(resolve(rootDir, 'src/stores/configStore.ts'), 'utf8');
+      assert.match(cfg, /planMode:\s*false/, '默认必须是 false');
+    });
+
+    useAIStore.setState({ pendingPlan: null });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

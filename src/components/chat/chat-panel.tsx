@@ -71,6 +71,9 @@ export function ChatPanel({
   const streaming = useAIStore((s) => s.streaming);
   const send = useAIStore((s) => s.send);
   const cancel = useAIStore((s) => s.cancel);
+  const pendingPlan = useAIStore((s) => s.pendingPlan);
+  const approvePlan = useAIStore((s) => s.approvePlan);
+  const cancelPlan = useAIStore((s) => s.cancelPlan);
   const clearMessages = useAIStore((s) => s.clearMessages);
   const retryLast = useAIStore((s) => s.retryLast);
   const conversations = useAIStore((s) => s.conversations);
@@ -635,6 +638,43 @@ export function ChatPanel({
             </div>
           )}
         </div>
+        {/* 计划模式：待确认的写操作清单。**确认前一步都不会执行**；取消则零写入。 */}
+        {pendingPlan && (
+          <div className="shrink-0 border-t border-border bg-muted/40 px-3 py-2">
+            <div className="mb-1.5 flex items-center gap-1.5">
+              <ScanSearch className="h-3.5 w-3.5 shrink-0 text-accent" />
+              <span className="text-xs font-medium text-foreground">计划：等待你确认</span>
+              <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
+                共 {pendingPlan.steps.length} 步，确认前不会改动任何书签
+              </span>
+            </div>
+            <ul className="mb-2 space-y-1">
+              {pendingPlan.steps.map((step, i) => (
+                <li
+                  key={`${step.name}-${i}`}
+                  className="flex items-center gap-1.5 text-[11px] text-foreground"
+                >
+                  <span className="shrink-0 text-muted-foreground/60">{i + 1}.</span>
+                  <span className="min-w-0 flex-1 truncate" title={step.summary}>
+                    {step.summary}
+                  </span>
+                  {step.preview && (
+                    <span className="shrink-0 text-muted-foreground/60">（仅预览）</span>
+                  )}
+                </li>
+              ))}
+            </ul>
+            <div className="flex items-center gap-1.5">
+              <Button size="sm" onClick={approvePlan}>
+                确认执行
+              </Button>
+              <Button size="sm" variant="outline" onClick={cancelPlan}>
+                取消
+              </Button>
+              <span className="text-[11px] text-muted-foreground">取消则本轮没有执行任何写操作</span>
+            </div>
+          </div>
+        )}
         {/* 上翻查看历史后：回到底部按钮 */}
         {!stickToBottom && messages.length > 0 && (
           <button

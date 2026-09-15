@@ -117,6 +117,14 @@ interface AIState {
   declineAllDeletions: () => Promise<void>;
   /** 操作日志：拉取最近的撤销点（每轮 Agent 结束后刷新） */
   refreshUndo: () => Promise<void>;
+  /** 计划模式：当前等待用户确认的写操作计划（null = 没有待确认计划） */
+  pendingPlan: { messageId: string; steps: { name: string; label: string; count: number; summary: string; preview: boolean }[] } | null;
+  /** 确认执行本轮计划中的写操作 */
+  approvePlan: () => void;
+  /** 取消本轮计划（零写入） */
+  cancelPlan: () => void;
+  /** 内部：发送计划决定 */
+  _decidePlan: (approved: boolean) => void;
   /** 操作日志：撤销最近（或指定）的写操作轮次，并把书签树刷新回 UI */
   undoLast: (id?: string) => Promise<void>;
   /** 持久化；force=true 时跳过远端合并（清空等用户明确意图的操作） */
@@ -245,6 +253,7 @@ export const useAIStore = create<AIState>((set, get) => ({
   undoNotice: null,
   persistError: null,
   undoUnknown: false,
+      pendingPlan: null,
   persistNotice: null,
   undoNoticeAt: null,
   streaming: false,
@@ -385,6 +394,33 @@ export const useAIStore = create<AIState>((set, get) => ({
     }
   },
 
+  approvePlan() {
+    get()._decidePlan(true);
+  },
+
+  cancelPlan() {
+    get()._decidePlan(false);
+  },
+
+  /**
+   * 发送计划决定。必须带上 pendingPlan 自己的 messageId——后台按它结算对应的那一轮，
+   * 迟到的决定不会批准别的轮次。发完立刻清空本地 pendingPlan（界面不再显示"待确认"）。
+   */
+  _decidePlan(approved: boolean) {
+    const plan = get().pendingPlan;
+    if (!plan) return;
+    set({ pendingPlan: null });
+    try {
+      get().port?.postMessage({
+        type: 'chat:plan_decision',
+        messageId: plan.messageId,
+        approved,
+      } satisfies ChatInbound);
+    } catch {
+      // 端口已失效：后台那一轮会因断开按"未批准"结算，本地无需再做别的
+    }
+  },
+
   retryLast() {
     const s = get();
     if (s.streaming) return;
@@ -499,6 +535,14 @@ export const useAIStore = create<AIState>((set, get) => ({
         }
         break;
 
+      case 'chat:plan': {
+        // 计划模式：一轮的写操作清单到了，等用户点确认；期间后台在 await 这个决定
+        set({
+          pendingPlan: { messageId: evt.messageId, steps: evt.steps },
+        });
+        break;
+      }
+
       case 'chat:tool_start':
         if (evt.messageId !== get().streamingMessageId) break;
         flushDeltaNow(set);
@@ -565,7 +609,8 @@ export const useAIStore = create<AIState>((set, get) => ({
             ),
           );
         }
-        set({ streaming: false, streamingMessageId: null });
+        // 一轮结束：清掉可能还挂着的计划卡片（后台已按"未批准"结算，卡片不该继续等）
+        set({ streaming: false, streamingMessageId: null, pendingPlan: null });
         void get()._persist();
         // 一轮结束 = 一个撤销点已落盘，刷新「撤销本次操作」按钮的可用状态
         void get().refreshUndo();
@@ -583,7 +628,7 @@ export const useAIStore = create<AIState>((set, get) => ({
               : m,
           ),
         );
-        set({ streaming: false, streamingMessageId: null });
+        set({ streaming: false, streamingMessageId: null, pendingPlan: null });
         pushToast('Agent 请求失败', { description: evt.message, variant: 'destructive' });
         void get()._persist();
         break;

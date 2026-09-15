@@ -92,7 +92,7 @@ export type ChatOutbound =
   | { type: 'chat:delta'; messageId: string; text: string }
   | { type: 'chat:tool_start'; messageId: string; record: ToolCallRecord }
   /** 计划模式：本回次待执行的写操作清单，等 UI 确认后才会执行 */
-  | { type: 'chat:plan'; messageId: string; steps: { name: string; label: string; count: number; summary: string; preview: boolean }[] }
+  | { type: 'chat:plan'; messageId: string; steps: { name: string; label: string; count: number; countDeclared: boolean; summary: string; preview: boolean }[] }
   | { type: 'chat:tool_progress'; messageId: string; recordId: string; text: string }
   | { type: 'chat:tool_done'; messageId: string; record: ToolCallRecord }
   | { type: 'chat:tool_error'; messageId: string; record: ToolCallRecord }

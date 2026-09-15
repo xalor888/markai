@@ -118,7 +118,7 @@ interface AIState {
   /** 操作日志：拉取最近的撤销点（每轮 Agent 结束后刷新） */
   refreshUndo: () => Promise<void>;
   /** 计划模式：当前等待用户确认的写操作计划（null = 没有待确认计划） */
-  pendingPlan: { messageId: string; steps: { name: string; label: string; count: number; summary: string; preview: boolean }[] } | null;
+  pendingPlan: { messageId: string; steps: { name: string; label: string; count: number; countDeclared: boolean; summary: string; preview: boolean }[] } | null;
   /** 确认执行本轮计划中的写操作 */
   approvePlan: () => void;
   /** 取消本轮计划（零写入） */

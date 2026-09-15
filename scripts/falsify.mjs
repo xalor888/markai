@@ -632,6 +632,27 @@ const cases = [
     expectFail: ['预算记账正确时工具循环继续'],
   },
   {
+    name: '预授权不再看已批准规模（声明 3 条却放行 200 条）',
+    file: 'src/lib/ai/agent.ts',
+    from: '    return stepCountOf(argsJson) <= declared;',
+    to: '    return true;',
+    expectFail: ['实际规模超过已批准上限时必须再次确认（批准范围不能被静默超出）'],
+  },
+  {
+    name: '声明的条数又被静默丢掉（inferCount 不认 count 字段）',
+    file: 'src/lib/ai/turn-plan.ts',
+    from: '  if (typeof explicit === \'number\' && Number.isFinite(explicit) && explicit >= 0) {',
+    to: '  if (false) {',
+    expectFail: ['inferStepCount 认得显式的 count 数字（声明条数不会丢）'],
+  },
+  {
+    name: '卡片又把"条数未声明"显示成确定数字',
+    file: 'src/components/chat/chat-panel.tsx',
+    from: "                    {step.countDeclared ? `${step.count} 项` : '条数未声明'}",
+    to: "                    {`${step.count} 项`}",
+    expectFail: ['UI：计划卡片渲染每步条数，且对"未声明条数"有如实文案'],
+  },
+  {
     name: 'planMode 不再把"先声明计划"写进系统提示（模型无从知道该声明）',
     file: 'src/lib/ai/agent.ts',
     from: "    config.planMode === true ? SYSTEM_PROMPT + PLAN_MODE_INSTRUCTION : SYSTEM_PROMPT;",
@@ -641,7 +662,7 @@ const cases = [
   {
     name: '整轮预授权放行未声明的写操作（把安全边界交给模型自觉）',
     file: 'src/lib/ai/agent.ts',
-    from: "            !(turnGrant?.approved && turnGrant.tools.has(tc.function.name)),",
+    from: "            !withinGrant(tc.function.name, tc.function.arguments),",
     to: '            !turnGrant?.approved,',
     expectFail: ['已批准的声明之外的写操作，仍必须再次确认（不能靠模型自觉）'],
   },

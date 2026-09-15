@@ -12,6 +12,8 @@ export interface PlanApprovalStep {
   name: string;
   label: string;
   count: number;
+  /** 条数是否有依据；false 时界面必须如实写"条数未声明" */
+  countDeclared: boolean;
   summary: string;
   preview: boolean;
 }

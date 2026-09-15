@@ -658,6 +658,10 @@ export function ChatPanel({
                   <span className="min-w-0 flex-1 truncate" title={step.summary}>
                     {step.summary}
                   </span>
+                  {/* 条数必须如实：没声明过就不能显示成"1 项"（那是把"不知道"说成"就一条"） */}
+                  <span className="shrink-0 text-muted-foreground/60">
+                    {step.countDeclared ? `${step.count} 项` : '条数未声明'}
+                  </span>
                   {step.preview && (
                     <span className="shrink-0 text-muted-foreground/60">（仅预览）</span>
                   )}

@@ -69,6 +69,11 @@ export interface PlannedStep {
   label: string;
   /** 按参数**推断**的条数；推断不出时为 1 */
   count: number;
+  /**
+   * 这个条数是**明确声明/可推断**出来的，还是"没得依据、退回 1"。
+   * UI 必须据此区分「1 项」与「条数未声明」——否则会把"不知道"显示成"就 1 条"。
+   */
+  countDeclared: boolean;
   /** 一句话摘要（给人看的） */
   summary: string;
   /** 该步本身只是 dryRun 预览（执行它不会落库） */
@@ -106,14 +111,32 @@ function parseArgs(args: string): Record<string, unknown> | undefined {
   }
 }
 
-/** 按参数推断"这一步会影响几条"。推断不出就记 1——不猜大也不猜小。 */
-function inferCount(a: Record<string, unknown> | undefined): number {
-  if (!a) return 1;
+/**
+ * 按参数推断"这一步会影响几条"，并说明这个数**是否有依据**。
+ * 显式的 `count`（模型在 submit_plan 里声明的规模）优先，其次是数组字段的长度；
+ * 都没有就退回 1 并标 `declared: false`——**不猜大也不猜小，更不假装知道**。
+ */
+function inferCount(a: Record<string, unknown> | undefined): { count: number; declared: boolean } {
+  if (!a) return { count: 1, declared: false };
+  const explicit = a.count;
+  if (typeof explicit === 'number' && Number.isFinite(explicit) && explicit >= 0) {
+    return { count: explicit, declared: true };
+  }
   for (const key of ['bookmarkIds', 'items', 'ids', 'bookmarkIdList']) {
     const v = a[key];
-    if (Array.isArray(v)) return v.length;
+    if (Array.isArray(v)) return { count: v.length, declared: true };
   }
-  return 1;
+  return { count: 1, declared: false };
+}
+
+/** 只要条数（供"已批准规模"比较用） */
+export function inferStepCount(a: Record<string, unknown> | undefined): number {
+  return inferCount(a).count;
+}
+
+/** 从参数 JSON 直接算条数（调用点少写一次 parse） */
+export function stepCountOf(argsJson: string): number {
+  return inferStepCount(parseArgs(argsJson));
 }
 
 /** 目标文件夹 id（用于 UI 解析路径） */
@@ -136,11 +159,20 @@ export function buildPlan(steps: { name: string; args: string }[]): PlannedStep[
     if (classifyTool(s.name) !== 'write') continue;
     const a = parseArgs(s.args);
     const label = TOOL_META[s.name]?.label ?? s.name;
-    const count = inferCount(a);
+    const { count, declared } = inferCount(a);
     const preview = a?.dryRun === true;
     const targetId = inferTarget(a);
-    const summary = `${label}${count > 1 ? ` ${count} 项` : ''}${preview ? '（仅预览）' : ''}`;
-    out.push({ name: s.name, args: s.args, label, count, summary, preview, ...(targetId ? { targetId } : {}) });
+    const summary = `${label}${declared && count !== 1 ? ` ${count} 项` : ''}${preview ? '（仅预览）' : ''}`;
+    out.push({
+      name: s.name,
+      args: s.args,
+      label,
+      count,
+      countDeclared: declared,
+      summary,
+      preview,
+      ...(targetId ? { targetId } : {}),
+    });
   }
   return out;
 }

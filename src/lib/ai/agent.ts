@@ -3,7 +3,7 @@
 import { chatCompletion, ChatError, type ApiMessage, type ApiToolCall } from './client';
 import { PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT, TOOL_DEFINITIONS } from './prompts';
 import { executeTool, type ToolOutput } from './tools';
-import { applyPlan, buildPlan, classifyTool, type PlannedStep } from './turn-plan';
+import { applyPlan, buildPlan, classifyTool, stepCountOf, type PlannedStep } from './turn-plan';
 import { beginUndoTransaction, endUndoTransaction } from '@/lib/undo/recorder';
 import type { AIConfig, ChatMessage, ChatOutbound, ToolCallRecord } from './types';
 
@@ -273,7 +273,25 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
    * **它不是安全边界**：只有"已声明且被批准"的**工具名**才免于再次确认；
    * 未声明的写操作照样走逐回次确认（见下面的写循环）。取消则整轮零写入。
    */
-  let turnGrant: { approved: boolean; tools: Set<string> } | null = null;
+  let turnGrant: { approved: boolean; tools: Map<string, number | null> } | null = null;
+
+  /**
+   * 这一步是否落在"已批准范围"内。
+   *
+   * 为什么不能只看工具名：用户批准的依据是计划卡片上的**规模**（"移动 3 条"）。
+   * 如果只按工具名豁免，模型声明 3 条却实际移动 200 条也会被静默放行——
+   * 那是把"超出授权范围"说成了"已批准"。
+   * - 未声明的工具 → 不豁免；
+   * - 声明了工具但**没声明条数** → 按工具名豁免（上限无从谈起），卡片会如实写"条数未声明"；
+   * - 声明了条数 → 实际规模**超过**上限即不豁免，退回逐回次确认。
+   */
+  const withinGrant = (name: string, argsJson: string): boolean => {
+    if (!turnGrant?.approved) return false;
+    const declared = turnGrant.tools.get(name);
+    if (declared === undefined) return false;
+    if (declared === null) return true;
+    return stepCountOf(argsJson) <= declared;
+  };
 
   for (;;) {
     let turn: { content: string; toolCalls: ApiToolCall[] };
@@ -388,7 +406,11 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
             approved = false;
           }
         }
-        turnGrant = { approved, tools: new Set(declared.map((d) => d.tool)) };
+        // 记录每个工具**已批准的规模上限**（模型没声明条数时记 null = 无上限，卡片会说明）
+        turnGrant = {
+          approved,
+          tools: new Map(declared.map((d) => [d.tool, typeof d.count === 'number' ? d.count : null])),
+        };
       }
     }
 
@@ -398,9 +420,18 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
       ? ordered.filter(
           ({ tc }) =>
             classifyTool(tc.function.name) === 'write' &&
-            !(turnGrant?.approved && turnGrant.tools.has(tc.function.name)),
+            !withinGrant(tc.function.name, tc.function.arguments),
         )
       : [];
+    /**
+     * 本回次里"声明过、但实际规模超出上限"的写操作：它们要走逐回次确认，
+     * 并在卡片上**说明为什么要再问一次**（否则用户会以为程序在无故重复打断）。
+     */
+    const overLimitNames = new Set(
+      plannedWrites
+        .filter(({ tc }) => turnGrant?.approved && turnGrant.tools.has(tc.function.name))
+        .map(({ tc }) => tc.function.name),
+    );
 
     /**
      * 执行本回次的计划：**确认前零执行**；未获批准时零执行并把"未执行"如实回填给模型
@@ -409,6 +440,10 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
     const runPlannedWrites = async (): Promise<void> => {
       const steps = buildPlan(
         plannedWrites.map(({ tc }) => ({ name: tc.function.name, args: tc.function.arguments })),
+      ).map((st) =>
+        overLimitNames.has(st.name)
+          ? { ...st, summary: `超出已批准范围，需再确认：${st.summary}` }
+          : st,
       );
       if (steps.length === 0) return;
       safePost(onEvent, { type: 'chat:plan', messageId, steps });
@@ -452,7 +487,7 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
           continue;
         }
         // 已声明的写操作：授权已覆盖，直接执行（不再逐个确认）
-        if (turnGrant?.approved && turnGrant.tools.has(tc.function.name)) {
+        if (withinGrant(tc.function.name, tc.function.arguments)) {
           results.set(i, await runOne(tc));
           continue;
         }

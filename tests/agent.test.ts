@@ -5923,7 +5923,7 @@ function ok(name: string, fn: () => void) {
   {
     const { createPlanApprovalRegistry } = await import('../src/lib/ai/plan-approval');
 
-    const plan = [{ name: 'create_folder', label: '新建文件夹', count: 1, summary: '新建文件夹', preview: false }];
+    const plan = [{ name: 'create_folder', label: '新建文件夹', count: 1, countDeclared: true, summary: '新建文件夹', preview: false }];
 
     // ── A. request 发出 chat:plan 并挂起 ──
     const posted: { type: string; messageId: string; steps?: unknown[] }[] = [];
@@ -6224,6 +6224,134 @@ function ok(name: string, fn: () => void) {
     );
     fetchCalls.length = 0;
     clear();
+  }
+
+  /* ── T57: 声明范围与实际执行必须一致（超出已批准规模要重新确认） ── */
+  console.log('\n[T57] 声明范围与实际执行的偏差');
+  {
+    const { round1, UNDO } = await (async () => ({ round1: 0, UNDO: '' }))();
+    void round1;
+    void UNDO;
+    const { buildPlan, inferStepCount } = await import('../src/lib/ai/turn-plan');
+    const { UNDO_STORAGE_KEY, UNDO_PENDING_KEY, resetUndoTransactionForTest } = await import(
+      '../src/lib/undo/recorder'
+    );
+    const clear = () => {
+      storageMap.delete(UNDO_STORAGE_KEY);
+      storageMap.delete(UNDO_PENDING_KEY);
+      resetUndoTransactionForTest();
+      resetMockCalls();
+    };
+
+    // ── A. 声明的条数不能被静默丢掉 ──
+    ok('inferStepCount 认得显式的 count 数字（声明条数不会丢）', () =>
+      assert.equal(inferStepCount({ count: 42 }), 42),
+    );
+    ok('buildPlan 仍然按数组长度推断（既有行为不回归）', () => {
+      const plan = buildPlan([{ name: 'move_bookmarks', args: JSON.stringify({ bookmarkIds: ['a', 'b'] }) }]);
+      assert.equal(plan[0]!.count, 2);
+    });
+
+    // ── B. 声明条数进入 chat:plan 载荷 ──
+    const declared = { steps: [{ tool: 'create_bookmark', summary: '新建 3 条', count: 3 }] };
+    const planEvents: { steps: { count: number; summary: string }[] }[] = [];
+    sseQueue = [
+      toolRound([{ id: 'c-d', name: 'submit_plan', args: declared }]),
+      finalRound(),
+    ];
+    await runTurnWith('先说计划', {
+      config: { planMode: true },
+      requestPlanApproval: async () => false,
+    });
+    void planEvents;
+    clear();
+
+    // ── C. 超出已批准规模 → 必须再次确认 ──
+    let approvalsC = 0;
+    let mutationsAtSecondAsk = -1;
+    const bigIds = Array.from({ length: 200 }, (_, i) => `t57-${i}`);
+    sseQueue = [
+      toolRound([
+        { id: 'c-d', name: 'submit_plan', args: { steps: [{ tool: 'move_bookmarks', summary: '移动 3 条', count: 3 }] } },
+        // 第一回次：3 条（在已批准范围内）
+        { id: 'c-m1', name: 'move_bookmarks', args: { bookmarkIds: ['a', 'b', 'c'], parentId: '1' } },
+      ]),
+      // 第二回次：200 条（**远超**声明上限）
+      toolRound([
+        { id: 'c-m2', name: 'move_bookmarks', args: { bookmarkIds: bigIds, parentId: '1' } },
+      ]),
+      finalRound(),
+    ];
+    await runTurnWith('整理一下', {
+      config: { planMode: true },
+      requestPlanApproval: async () => {
+        approvalsC += 1;
+        if (approvalsC === 2) mutationsAtSecondAsk = mockCalls.move;
+        return true;
+      },
+    });
+    ok('实际规模超过已批准上限时必须再次确认（批准范围不能被静默超出）', () =>
+      assert.equal(approvalsC, 2, `应问两次（首次批准 + 超范围再确认），实际 ${approvalsC}`),
+    );
+    ok('再次确认发生在超范围那次执行**之前**（不是先做后问）', () =>
+      assert.equal(mutationsAtSecondAsk, 0, `第二次询问时还不该有 move，实际 ${mutationsAtSecondAsk}`),
+    );
+    clear();
+
+    // ── D. 对照：规模不超过上限时不重复确认（防止把功能做成"一律重问"） ──
+    let approvalsD = 0;
+    sseQueue = [
+      toolRound([
+        { id: 'c-d', name: 'submit_plan', args: { steps: [{ tool: 'create_folder', summary: '建 1 个文件夹', count: 5 }] } },
+        { id: 'c-f1', name: 'create_folder', args: { parentId: '1', title: 'T57-A' } },
+      ]),
+      toolRound([{ id: 'c-f2', name: 'create_folder', args: { parentId: '1', title: 'T57-B' } }]),
+      finalRound(),
+    ];
+    await runTurnWith('建两个文件夹', {
+      config: { planMode: true },
+      requestPlanApproval: async () => {
+        approvalsD += 1;
+        return true;
+      },
+    });
+    ok('规模不超过已批准上限时仍只问一次（不回归成每回次都问）', () =>
+      assert.equal(approvalsD, 1, `应只问一次，实际 ${approvalsD}`),
+    );
+    ok('未超范围时两个回次的写操作都执行了', () =>
+      assert.equal(mockCalls.create, 2, `应建 2 个，实际 ${mockCalls.create}`),
+    );
+    clear();
+
+    // ── E. 未声明 count：仍按工具名豁免，但载荷要如实说明"未声明" ──
+    let approvalsE = 0;
+    sseQueue = [
+      toolRound([
+        { id: 'c-d', name: 'submit_plan', args: { steps: [{ tool: 'create_folder', summary: '建文件夹' }] } },
+        { id: 'c-f1', name: 'create_folder', args: { parentId: '1', title: 'T57-C' } },
+      ]),
+      toolRound([{ id: 'c-f2', name: 'create_folder', args: { parentId: '1', title: 'T57-D' } }]),
+      finalRound(),
+    ];
+    await runTurnWith('建文件夹', {
+      config: { planMode: true },
+      requestPlanApproval: async () => {
+        approvalsE += 1;
+        return true;
+      },
+    });
+    ok('未声明条数时仍按工具名豁免（不回归）', () =>
+      assert.equal(approvalsE, 1, `应只问一次，实际 ${approvalsE}`),
+    );
+    clear();
+
+    // ── F. 源码守卫：卡片渲染条数，且"未声明"有如实样子 ──
+    ok('UI：计划卡片渲染每步条数，且对"未声明条数"有如实文案', () => {
+      const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+      const panel = readFileSync(resolve(rootDir, 'src/components/chat/chat-panel.tsx'), 'utf8');
+      assert.match(panel, /step\.count/, '卡片必须渲染条数');
+      assert.match(panel, /未声明/, '未声明条数时要有如实说明');
+    });
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

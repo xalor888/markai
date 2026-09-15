@@ -258,7 +258,7 @@ export async function endUndoTransaction(): Promise<UndoPoint | null> {
   const candidates = [point, ...state.points].slice(0, MAX_UNDO_POINTS);
   const trim = trimPointsToBudget(candidates, budgetBytes);
   const notice = describeUndoTrim(trim) ?? state.notice;
-  const written = await writeUndoPoints(trim.kept, notice);
+  const written = await writeUndoPoints(trim.kept, notice, state.terminalRunIds);
   if (!written.ok) {
     // 正式点没落盘：**保留（并补全）pending**，让下次启动仍能把它恢复出来。
     // 返回 null 而不是 point——写不进去就不算"已记录"，不能对调用方谎报成功。
@@ -277,12 +277,24 @@ export function resetUndoTransactionForTest(): void {
   active = null;
 }
 
-/** 存储结构（v2 起带 notice/noticeAt；v1 只有 points，读取时兼容） */
+/** 存储结构（v3 起带 terminalRunIds；更早版本只有 points，读取时兼容） */
 interface StoredUndo {
   points?: UndoPoint[];
   /** 上一次落盘时的裁剪/失败说明（给用户看的实话） */
   notice?: string;
   noticeAt?: number;
+  /**
+   * **已终结**的 runId（有界，最近的在前）。
+   *
+   * 为什么需要：去重如果只扫描当前 points，那么一个点被**消费**或**裁剪**之后，
+   * 它的 runId 就从存储里消失了。若此时还残留着同一 runId 的 pending（例如
+   * "正式点写成功、pending 清理失败"后进程又被杀），下次启动的恢复流程会把它
+   * **重新提升成一个新 id 的可执行点**——删除类逆操作于是可以被重复回放，
+   * 造成重复子树。终态列表就是给恢复流程看的"这个 runId 已经结清了"。
+   *
+   * 只存 runId 字符串（是聊天消息 id，不含任何书签内容），并有条数上界。
+   */
+  terminalRunIds?: string[];
 }
 
 export interface UndoState {
@@ -291,6 +303,17 @@ export interface UndoState {
   notice?: string;
   /** notice 产生的时间（UI 据此只提示一次） */
   noticeAt?: number;
+  /** 已终结的 runId（有界）：恢复流程据此拒绝复活 */
+  terminalRunIds: string[];
+}
+
+/** 终态 runId 的条数上界：只留最近这么多条，避免无限增长 */
+export const MAX_TERMINAL_RUN_IDS = 50;
+
+/** 把一个 runId 记为终态（最近的在前，超出上界就截断） */
+function rememberTerminalRun(prev: string[] | undefined, runId: string): string[] {
+  const kept = (prev ?? []).filter((r) => r !== runId);
+  return [runId, ...kept].slice(0, MAX_TERMINAL_RUN_IDS);
 }
 
 /** 最近一次**写入失败**（原文 + 发生时间）。SW 内存态：重启即丢（那时也没人会看到旧提示） */
@@ -318,16 +341,18 @@ export async function readUndoState(): Promise<UndoState> {
   } catch {
     // 读不出来：既没有点，也不能假装一切正常
     return lastWriteError
-      ? { points: [], notice: lastWriteError.message, noticeAt: lastWriteError.at }
-      : { points: [], notice: '读取撤销记录失败', noticeAt: 0 };
+      ? { points: [], terminalRunIds: [], notice: lastWriteError.message, noticeAt: lastWriteError.at }
+      : { points: [], terminalRunIds: [], notice: '读取撤销记录失败', noticeAt: 0 };
   }
   const points = Array.isArray(raw?.points) ? raw.points : [];
+  const terminalRunIds = Array.isArray(raw?.terminalRunIds) ? raw.terminalRunIds : [];
   if (lastWriteError) {
     // noticeAt 用错误发生的时间（而不是"现在"），否则每次刷新都算新提示、反复打扰
-    return { points, notice: lastWriteError.message, noticeAt: lastWriteError.at };
+    return { points, terminalRunIds, notice: lastWriteError.message, noticeAt: lastWriteError.at };
   }
   return {
     points,
+    terminalRunIds,
     ...(raw?.notice ? { notice: raw.notice } : {}),
     ...(raw?.noticeAt ? { noticeAt: raw.noticeAt } : {}),
   };
@@ -338,9 +363,14 @@ export async function readUndoState(): Promise<UndoState> {
  * 「没有可撤销的操作」，把失败说成了「本来就没有」）。
  * 仍然不向调用方抛错——写不进存储不该让书签操作本身失败。
  */
-export async function writeUndoPoints(points: UndoPoint[], notice?: string): Promise<{ ok: boolean; error?: string }> {
+export async function writeUndoPoints(
+  points: UndoPoint[],
+  notice?: string,
+  terminalRunIds: string[] = [],
+): Promise<{ ok: boolean; error?: string }> {
   const payload: StoredUndo = {
     points,
+    ...(terminalRunIds.length > 0 ? { terminalRunIds } : {}),
     ...(notice ? { notice, noticeAt: Date.now() } : {}),
   };
   try {
@@ -381,8 +411,11 @@ export async function takeUndoPoint(id?: string): Promise<{ point: UndoPoint | n
   const point = points[idx] ?? null;
   // 不原地改读取到的数组：真实 storage 给的是副本，但"读到的值就地改"本身就是坏习惯
   const remaining = points.filter((_, i) => i !== idx);
-  // 保留原有 notice：消费一个点不该抹掉"曾丢弃过更早点"的记录
-  const written = await writeUndoPoints(remaining, state.notice);
+  // 移除与"记账"必须落在**同一次写入**里：分两次写会出现"点没了但没记终态"的窗口，
+  // 若此时残留 pending 恰好在下次启动被恢复，就又造出一个可重复回放的点。
+  // 保留原有 notice：消费一个点不该抹掉"曾丢弃过更早点"的记录。
+  const terminal = point ? rememberTerminalRun(state.terminalRunIds, point.runId) : state.terminalRunIds;
+  const written = await writeUndoPoints(remaining, state.notice, terminal);
   // 如实回报是否真的移除：消费失败时点仍在存储里，调用方据此阻止重复回放
   return { point, removed: written.ok };
 }
@@ -426,6 +459,15 @@ export async function recoverInterruptedTransaction(): Promise<UndoPoint | null>
   // 恢复前先等在途写入落定：否则清理之后可能又来一条旧写入
   await drainPendingWrites();
   const state = await readUndoState();
+
+  // **终态优先**：这个 runId 已经被消费过（或已终结），说明它的 pending 是陈旧残留
+  // ——只清 pending，绝不生成新点。否则删除类逆操作会被重复回放，造出重复子树。
+  // 这一条同时覆盖"点已被消费、pending 清理失败、进程又被杀"的完整序列。
+  if (state.terminalRunIds.includes(pending.runId)) {
+    await clearPending();
+    return null;
+  }
+
   // 幂等：同一个事务（runId）已经提升过就不再造第二个点。
   // 覆盖"正式点写入成功、但 clearPending 失败"的情况——否则下次启动会把同一段改动
   // 再提升一次，出现两个都能被回放的点（删除类逆操作会重复重建子树）。
@@ -447,6 +489,7 @@ export async function recoverInterruptedTransaction(): Promise<UndoPoint | null>
   const written = await writeUndoPoints(
     trim.kept,
     `上一轮被中断，已把当时已完成的改动保留为可撤销记录（${summarizeOps(point.ops)}）`,
+    state.terminalRunIds,
   );
   // 写失败时**保留 pending**，下次启动重试——绝不能在正式点落盘前就把它删掉
   if (!written.ok) return null;

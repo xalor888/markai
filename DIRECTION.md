@@ -31,7 +31,7 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
-| 测试 | `npm test` | **307 项全绿**（… → 283 → 292 → 294 → 307） |
+| 测试 | `npm test` | **314 项全绿**（… → 292 → 294 → 307 → 314） |
 | 构建 | `npm run build` | 通过，`.output/chrome-mv3` 788.17 kB |
 | 版本 | `package.json` | **0.2.13（已发版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
@@ -227,8 +227,12 @@ API Key 静默丢失（下次启动聊天莫名其妙失败）；更严重的是
   互斥（检查与登记之间无 await），T46 用可控 create 闸门确定性构造重叠并断言零副作用；
   ③~~**消费失败仍可能显示成功**~~ **已修**：`undoLast` 先判 `!ok`，消费写失败显示 destructive
   「撤销未完成 + 已还原 N 项 + 不要重复点击」；读取失败另以 `undoUnknown` 标出「状态未知」；
-  ④**`runId` 不是持久终态墓碑**——点被消费或裁剪后，残留 pending 可能再次提升成新点。
+  ④~~**`runId` 不是持久终态墓碑**~~ **已修**：`markai.undo` 增加**有界**（最多 50 条）的
+  `terminalRunIds`；`takeUndoPoint` 把「移除该点」与「记该 runId 为终态」放在**同一次写入**里
+  （原子，不留"点没了但没记账"的窗口）；恢复流程在提升 pending 前先查终态，已终结者**只清 pending、
+  不生成新点**；`clearUndoPoints` 连终态一并清（T47 七条）。
   **跨进程边界**：②的互斥是进程内的，SW 回收后消失（已如实标注，未解决）。
+- 至此**撤销发布冻结的四项条件全部满足**。剩余待办：进程内互斥的跨会话覆盖、真实浏览器验证。
   其余 best-effort catch 类别也仍未被逐处复核；
 - "Chrome 到底多久杀一次 SW、这个窗口有多现实"需要真机才能量化，我没有那个环境。
 

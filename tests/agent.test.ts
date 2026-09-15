@@ -5020,6 +5020,125 @@ function ok(name: string, fn: () => void) {
     resetUndoTransactionForTest();
   }
 
+  /* ── T47: runId 持久终态——已消费的点不得被残留 pending 复活 ── */
+  console.log('\n[T47] runId 终态身份');
+  {
+    const {
+      UNDO_STORAGE_KEY,
+      UNDO_PENDING_KEY,
+      beginUndoTransaction,
+      endUndoTransaction,
+      ensureOrderCheckpoint,
+      readUndoState,
+      recoverInterruptedTransaction,
+      takeUndoPoint,
+      clearUndoPoints,
+      resetUndoTransactionForTest,
+    } = await import('../src/lib/undo/recorder');
+    const { jRemove } = await import('../src/lib/undo/mutations');
+    const { applyUndo } = await import('../src/lib/undo/apply');
+
+    const clean = () => {
+      storageMap.delete(UNDO_STORAGE_KEY);
+      storageMap.delete(UNDO_PENDING_KEY);
+      resetUndoTransactionForTest();
+      storageSetFail = false;
+      storageSetFailKeys = null;
+      storageSetFailTimes = Number.POSITIVE_INFINITY;
+      storageSetDelayMs = 0;
+      storageSetDelaySequence = [];
+    };
+    const pendingOf = (runId: string) => ({
+      runId,
+      ops: [{ kind: 'create', id: 'ghost-x', title: '幽灵新建', isFolder: false }],
+      containsDelete: false,
+      orderCheckpoints: [],
+      updatedAt: Date.now(),
+    });
+
+    // ── A. 核心场景：点被消费后，同 runId 的残留 pending 不得复活成新点 ──
+    clean();
+    const folder = (await mockBookmarks.create({ parentId: '1', title: 'T47-FOLDER' })).id;
+    const kid = (await mockBookmarks.create({ parentId: folder, title: 'T47-KID', url: 'https://t47.test/k' })).id;
+    await beginUndoTransaction('t47-consumed');
+    await ensureOrderCheckpoint(folder);
+    await jRemove(kid);
+    const point = await endUndoTransaction();
+    assert.ok(point, '前置条件：应产生撤销点');
+
+    const consume = await applyUndo(point!.id);
+    assert.equal(consume.ok, true, '前置条件：该点应被正常撤销并消费');
+
+    const stateAfter = await readUndoState();
+    ok('消费成功后，该 runId 被记为持久终态', () =>
+      assert.ok(
+        (stateAfter.terminalRunIds ?? []).includes('t47-consumed'),
+        `终态列表应包含该 runId，实际 ${JSON.stringify(stateAfter.terminalRunIds)}`,
+      ),
+    );
+
+    // 手工注入"残留 pending"（模拟 pending 清理失败后进程又被杀）
+    storageMap.set(UNDO_PENDING_KEY, pendingOf('t47-consumed'));
+    const revived = await recoverInterruptedTransaction();
+    const afterRecover = await readUndoState();
+
+    ok('已终结 runId 的残留 pending 不得被提升成新的可执行点', () => {
+      assert.equal(revived, null, '不应返回恢复出来的点');
+      assert.equal(
+        afterRecover.points.some((p) => p.runId === 't47-consumed'),
+        false,
+        '不能在存储里再造一个同 runId 的点（那会让删除类逆操作被重复回放）',
+      );
+    });
+    ok('处理残留 pending 时必须把它清掉（否则每次启动都会重来一遍）', () =>
+      assert.equal(storageMap.has(UNDO_PENDING_KEY), false, 'pending 应被清除'),
+    );
+
+    // ── B. 对照：从未消费过的 runId，其 pending 仍必须正常提升 ──
+    clean();
+    storageMap.set(UNDO_PENDING_KEY, pendingOf('t47-fresh'));
+    const fresh = await recoverInterruptedTransaction();
+    const afterFresh = await readUndoState();
+    ok('从未消费过的 runId 仍正常提升（终态检查不能把正常恢复一起拦掉）', () => {
+      assert.ok(fresh, '应返回一个新点');
+      assert.equal(afterFresh.points.length, 1, '应写入一个点');
+      assert.equal(afterFresh.points[0]!.runId, 't47-fresh');
+    });
+
+    // ── C. 终态列表有上界：连续消费超过上界后长度被截断 ──
+    clean();
+    const CAP = 50; // 与实现约定一致：最多保留最近 50 条
+    for (let i = 0; i < CAP + 5; i++) {
+      const f = (await mockBookmarks.create({ parentId: '1', title: `T47-cap-${i}` })).id;
+      await beginUndoTransaction(`t47-cap-${i}`);
+      await ensureOrderCheckpoint('1');
+      await jRemove(f, { tree: true });
+      await endUndoTransaction();
+      await takeUndoPoint();
+    }
+    const capState = await readUndoState();
+    ok('终态列表必须有上界（否则会无限增长）', () => {
+      assert.ok((capState.terminalRunIds?.length ?? 0) <= CAP, `应 <= ${CAP}，实际 ${capState.terminalRunIds?.length}`);
+      assert.ok((capState.terminalRunIds?.length ?? 0) > 0, '不该被清空');
+    });
+    ok('截断保留的是最近的终态（最近的 runId 仍能挡住复活）', () =>
+      assert.ok(
+        (capState.terminalRunIds ?? []).includes(`t47-cap-${CAP + 4}`),
+        '最近消费的 runId 应仍在终态列表里',
+      ),
+    );
+
+    // ── D. 清空本地数据要连终态一起清 ──
+    await clearUndoPoints();
+    const cleared = await readUndoState();
+    ok('「清空本地数据」把终态列表一并清掉', () =>
+      assert.equal((cleared.terminalRunIds ?? []).length, 0, '终态列表也应被清空'),
+    );
+
+    clean();
+    if (nodeById(folder)) await mockBookmarks.removeTree(folder);
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

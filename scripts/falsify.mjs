@@ -105,8 +105,8 @@ const cases = [
   {
     name: '收尾时正式写入失败仍清掉 pending（唯一快照被删，改动再也撤不了）',
     file: 'src/lib/undo/recorder.ts',
-    from: '  const written = await writeUndoPoints(trim.kept, notice);\n  if (!written.ok) {',
-    to: '  const written = await writeUndoPoints(trim.kept, notice);\n  if (false) {',
+    from: '  const written = await writeUndoPoints(trim.kept, notice, state.terminalRunIds);\n  if (!written.ok) {',
+    to: '  const written = await writeUndoPoints(trim.kept, notice, state.terminalRunIds);\n  if (false) {',
     expectFail: ['收尾时正式写入失败：pending 必须保留', '收尾时正式写入失败不得声称'],
   },
   {
@@ -630,6 +630,20 @@ const cases = [
     from: '  const usedTokens = () => estimateRequestTokens(apiMessages);',
     to: '  const usedTokens = () => fixedOverheadTokens() + estimateRequestTokens(apiMessages);',
     expectFail: ['预算记账正确时工具循环继续'],
+  },
+  {
+    name: '恢复时不再查 runId 终态（已消费的点会被残留 pending 复活成新点）',
+    file: 'src/lib/undo/recorder.ts',
+    from: '  if (state.terminalRunIds.includes(pending.runId)) {',
+    to: '  if (false) {',
+    expectFail: ['已终结 runId 的残留 pending 不得被提升成新的可执行点'],
+  },
+  {
+    name: '消费点时不记终态（移除与记账不再原子）',
+    file: 'src/lib/undo/recorder.ts',
+    from: '  const terminal = point ? rememberTerminalRun(state.terminalRunIds, point.runId) : state.terminalRunIds;',
+    to: '  const terminal = state.terminalRunIds;',
+    expectFail: ['消费成功后，该 runId 被记为持久终态'],
   },
   {
     name: '撤销执行互斥被移除（重叠请求会各自重建一份子树）',

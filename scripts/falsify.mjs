@@ -632,6 +632,31 @@ const cases = [
     expectFail: ['预算记账正确时工具循环继续'],
   },
   {
+    name: '轮次计划不再排除闸门类（propose_deletions 被二次延迟）',
+    file: 'src/lib/ai/turn-plan.ts',
+    from: "    if (classifyTool(s.name) !== 'write') continue;",
+    to: "    if (classifyTool(s.name) === 'read' || classifyTool(s.name) === 'unknown') continue;",
+    // 回滚后闸门类会进计划，先撞上"只保留写类"这条，再撞上"闸门类不进计划"——两条都是真信号
+    expectFail: [
+      'buildPlan：只保留写类，且保持原顺序',
+      'buildPlan：闸门类不进计划（它本身就是"延迟的删除"）',
+    ],
+  },
+  {
+    name: '轮次计划丢了失败计数（部分失败被吞成成功）',
+    file: 'src/lib/ai/turn-plan.ts',
+    from: '      failed += 1;',
+    to: '      failed += 0;',
+    expectFail: ['applyPlan：单条失败不中断，并如实计数与带首个原因'],
+  },
+  {
+    name: '轮次计划丢掉安全默认（未确认也会执行）',
+    file: 'src/lib/ai/turn-plan.ts',
+    from: '  if (opts.confirmed !== true) {',
+    to: '  if (false) {',
+    expectFail: ['applyPlan 默认不执行：未确认时 executor 零调用、并标 cancelled'],
+  },
+  {
     name: '快捷键打开侧边栏失败又静默（按了没反应）',
     file: 'src/entrypoints/background.ts',
     from: "        await toolbarError('MarkAI：侧边栏未能自动打开，请点扩展图标手动打开');",

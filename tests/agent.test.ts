@@ -5598,6 +5598,110 @@ function ok(name: string, fn: () => void) {
     });
   }
 
+  /* ── T53: 轮次级计划（纯逻辑，未接 UI/agent） ── */
+  console.log('\n[T53] 轮次级计划');
+  {
+    const { classifyTool, buildPlan, applyPlan } = await import('../src/lib/ai/turn-plan');
+
+    ok('classifyTool：读类 / 写类 / 闸门类各自归类', () => {
+      assert.equal(classifyTool('list_bookmarks'), 'read');
+      assert.equal(classifyTool('open_bookmark'), 'read', '打开单个书签与读类同组（不写书签库）');
+      assert.equal(classifyTool('move_bookmarks'), 'write');
+      assert.equal(classifyTool('open_bookmarks'), 'write', '一次打开 20 个标签页也是副作用，值得确认');
+      assert.equal(classifyTool('propose_deletions'), 'gate', '它本身即"延迟的删除"，不该被二次延迟');
+      assert.equal(classifyTool('delete_all_bookmarks'), 'gate', '自带 confirm/auto 闸门，不并入计划');
+      assert.equal(classifyTool('不存在的工具'), 'unknown');
+    });
+
+    const steps = [
+      { name: 'list_bookmarks', args: '{}' },
+      { name: 'move_bookmarks', args: JSON.stringify({ bookmarkIds: ['a', 'b', 'c'], parentId: 'p1' }) },
+      { name: 'propose_deletions', args: JSON.stringify({ items: [] }) },
+      { name: 'rename_bookmark', args: JSON.stringify({ bookmarkId: 'x', title: '新名字' }) },
+      { name: 'auto_categorize', args: JSON.stringify({ folderId: 'f', dryRun: true }) },
+    ];
+    const plan = buildPlan(steps);
+
+    ok('buildPlan：只保留写类，且保持原顺序', () =>
+      assert.deepEqual(plan.map((p) => p.name), ['move_bookmarks', 'rename_bookmark', 'auto_categorize']),
+    );
+    ok('buildPlan：闸门类不进计划（它本身就是"延迟的删除"）', () =>
+      assert.ok(!plan.some((p) => p.name === 'propose_deletions')),
+    );
+    ok('buildPlan：读类不进计划（它们由 agent 立即执行，用来算出计划）', () =>
+      assert.ok(!plan.some((p) => p.name === 'list_bookmarks')),
+    );
+    ok('buildPlan：每步有人话标签与按参数推断的条数', () => {
+      assert.equal(plan[0]!.label, '批量移动');
+      assert.equal(plan[0]!.count, 3, '批量移动 3 项');
+      assert.match(plan[0]!.summary, /批量移动/);
+      assert.equal(plan[1]!.label, '重命名');
+      assert.equal(plan[1]!.count, 1);
+    });
+    ok('buildPlan：dryRun 步骤标注为"仅预览"', () =>
+      assert.equal(plan[2]!.preview, true, 'dryRun:true 应标 preview'),
+    );
+    ok('buildPlan：全是读类时计划为空（不产出空动作）', () =>
+      assert.deepEqual(buildPlan([{ name: 'list_bookmarks', args: '{}' }]), []),
+    );
+
+    // ── 安全默认：**不显式确认就不执行** ──
+    let unconfirmedCalls = 0;
+    const unconfirmed = await applyPlan(plan, async () => {
+      unconfirmedCalls += 1;
+      return { ok: true };
+    });
+    ok('applyPlan 默认不执行：未确认时 executor 零调用、并标 cancelled', () => {
+      assert.equal(unconfirmedCalls, 0, '安全默认必须是"不执行"');
+      assert.equal(unconfirmed.cancelled, true);
+      assert.equal(unconfirmed.ok, 0);
+      assert.equal(unconfirmed.failed, 0);
+    });
+
+    // ── 确认后：按序串行、单个失败不中断、如实计数 ──
+    const calls: string[] = [];
+    const out = await applyPlan(
+      plan,
+      async (step) => {
+        calls.push(step.name);
+        if (step.name === 'rename_bookmark') throw new Error('重命名被拒绝');
+        return { ok: true };
+      },
+      { confirmed: true },
+    );
+    ok('applyPlan：确认后按计划顺序串行执行', () =>
+      assert.deepEqual(calls, ['move_bookmarks', 'rename_bookmark', 'auto_categorize']),
+    );
+    ok('applyPlan：单条失败不中断，并如实计数与带首个原因', () => {
+      assert.equal(out.ok, 2, '成功的两条不能丢');
+      assert.equal(out.failed, 1);
+      assert.match(out.firstError ?? '', /重命名被拒绝/);
+      assert.equal(out.cancelled, false);
+    });
+    ok('applyPlan：逐条结果与计划一一对应（顺序与成败都对得上）', () => {
+      assert.deepEqual(
+        out.results.map((r) => [r.name, r.ok]),
+        [
+          ['move_bookmarks', true],
+          ['rename_bookmark', false],
+          ['auto_categorize', true],
+        ],
+      );
+    });
+
+    // ── 空计划：不调用 executor ──
+    let emptyCalls = 0;
+    const emptyOut = await applyPlan([], async () => {
+      emptyCalls += 1;
+      return { ok: true };
+    }, { confirmed: true });
+    ok('applyPlan：空计划不调用 executor', () => {
+      assert.equal(emptyCalls, 0);
+      assert.equal(emptyOut.ok, 0);
+      assert.equal(emptyOut.failed, 0);
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

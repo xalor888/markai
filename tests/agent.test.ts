@@ -144,6 +144,27 @@ function firstTreeDiff(
   return null;
 }
 
+/**
+ * 测试替身的**副作用计数**：用来断言「非最新撤销点被拒绝时必须零副作用」。
+ *
+ * 只靠「树快照没变」不足以证明零副作用——同位置 move、写回相同 storage 都可能不改最终快照。
+ * 计数放在替身里（不是生产代码里），因此它统计的是真实的 API 调用意图。
+ * 读类（get/getSubTree）不计数：安全检查必须允许读取当前状态。
+ */
+const mockCalls = {
+  create: 0,
+  move: 0,
+  update: 0,
+  remove: 0,
+  removeTree: 0,
+  getChildren: 0,
+  storageSet: 0,
+  storageRemove: 0,
+};
+function resetMockCalls(): void {
+  for (const k of Object.keys(mockCalls) as (keyof typeof mockCalls)[]) mockCalls[k] = 0;
+}
+
 const mockBookmarks = {
   getTree: async () => [toApi({ id: '0', title: '', dateAdded: 0 })],
   getSubTree: async (id: string) => {
@@ -155,12 +176,16 @@ const mockBookmarks = {
     const list = Array.isArray(ids) ? ids : [ids];
     return list.map((id) => nodeById(id)).filter((n): n is FNode => !!n).map((n) => toApi(n));
   },
-  getChildren: async (id: string) => childrenOf(id).map((n) => toApi(n)),
+  getChildren: async (id: string) => {
+    mockCalls.getChildren += 1;
+    return childrenOf(id).map((n) => toApi(n));
+  },
   getRecent: async (count: number) =>
     [...store].sort((a, b) => b.dateAdded - a.dateAdded).slice(0, count).map((n) => toApi(n)),
   search: async (query: string) =>
     store.filter((n) => n.title.includes(query) || (n.url ?? '').includes(query)).map((n) => toApi(n)),
   create: async (opt: { parentId?: string; title: string; url?: string; index?: number }) => {
+    mockCalls.create += 1;
     const id = String(nextId++);
     const node: FNode = {
       id,
@@ -180,6 +205,7 @@ const mockBookmarks = {
    * 替身若忽略 index，任何"重排顺序"的测试都不可能失败——这正是本文件必须实现它的原因。
    */
   move: async (id: string, dest: { parentId: string; index?: number }) => {
+    mockCalls.move += 1;
     const node = nodeById(id);
     assert(node, `move: 节点 ${id} 不存在`);
     const oldParentId = node.parentId;
@@ -199,18 +225,28 @@ const mockBookmarks = {
     return toApi(node);
   },
   update: async (id: string, patch: { title?: string; url?: string }) => {
+    mockCalls.update += 1;
     const node = nodeById(id);
     assert(node, `update: 节点 ${id} 不存在`);
     if (patch.title !== undefined) node.title = patch.title;
     if (patch.url !== undefined) node.url = patch.url;
     return toApi(node);
   },
+  /**
+   * 忠实实现 Chrome `bookmarks.remove`：**只删单个节点**，非空文件夹必须用 `removeTree`。
+   *
+   * 替身若在这里静默/递归删除，会让「撤销新建文件夹时里面有后来移入的内容」的冲突测试**假绿**
+   * ——生产代码改用 remove 后看起来"通过"，而真实浏览器会拒绝并保留数据。保真度本身要被守护。
+   */
   remove: async (id: string) => {
+    mockCalls.remove += 1;
     const idx = store.findIndex((n) => n.id === id);
     assert(idx >= 0, `remove: 节点 ${id} 不存在`);
+    assert.equal(childrenOf(id).length, 0, `remove: 文件夹 ${id} 非空，应使用 removeTree`);
     store.splice(idx, 1);
   },
   removeTree: async (id: string) => {
+    mockCalls.removeTree += 1;
     const removeRecursive = (nid: string) => {
       for (const c of childrenOf(nid)) removeRecursive(c.id);
       const idx = store.findIndex((n) => n.id === nid);
@@ -238,6 +274,7 @@ const mockBookmarks = {
         return structuredClone(out);
       },
       set: async (obj: Record<string, unknown>) => {
+        mockCalls.storageSet += 1;
         // 全局故障注入；storageSetFailKeys 非空时只让这些键失败，
         // 用来单独验证"正式撤销点写入失败、但 pending 仍可写"这类交接
         const keys = Object.keys(obj);
@@ -260,6 +297,7 @@ const mockBookmarks = {
         for (const [k, v] of Object.entries(obj)) storageMap.set(k, structuredClone(v));
       },
       remove: async (keys: string | string[]) => {
+        mockCalls.storageRemove += 1;
         for (const k of Array.isArray(keys) ? keys : [keys]) storageMap.delete(k);
       },
       // 真实 API：返回这些键占用的字节数（按值的 JSON 序列化长度，与配额计量方式一致）。
@@ -4403,6 +4441,58 @@ function ok(name: string, fn: () => void) {
     ok('没有要送出的指令时清掉残留种子（避免幽灵指令）', () => {
       assert.equal(noop.log.seeds.length, 0);
       assert.equal(noop.log.clearedSeed, 1);
+    });
+  }
+
+  /* ── T41: 测试替身必须忠实于「非空目录不能直接 remove」的 API 语义 ── */
+  console.log('\n[T41] 测试替身：非空目录删除');
+  {
+    // 为什么替身也要有这条测试：Chrome 的 bookmarks.remove 只删单个节点，非空文件夹必须用 removeTree。
+    // 替身若允许 remove 直接删掉非空目录，未来「撤销新建文件夹时里面有后来移入的内容」的冲突测试
+    // 就会**假绿**——生产代码即使改用 remove 也会"通过"，而真实浏览器会拒绝并保留数据。
+    // 所以替身的保真度本身是一条必须被反证守护的契约。
+    const folder = (await mockBookmarks.create({ parentId: '1', title: 'T41-非空目录' })).id;
+    const kid = (await mockBookmarks.create({ parentId: folder, title: 'T41-子项' })).id;
+    const before = await snapshotTree();
+
+    let rejected = false;
+    try {
+      await mockBookmarks.remove(folder);
+    } catch {
+      rejected = true;
+    }
+    const after = await snapshotTree();
+
+    ok('替身 remove 必须拒绝非空文件夹（真实 Chrome 会拒绝而不是递归删除）', () =>
+      assert.equal(rejected, true, 'remove 非空文件夹应被拒绝'),
+    );
+    ok('被拒绝的 remove 不得改变树（文件夹与子项都还在）', () => {
+      assert.equal(after, before, '树必须完全不变');
+      assert.equal(childrenOf(folder).length, 1, '子项应仍在文件夹里');
+      assert.ok(nodeById(kid), '子项节点必须仍然存在');
+    });
+
+    // 空文件夹仍可被 remove 正常删除（这是 remove 的合法用途，不能一起禁掉）
+    const emptyFolder = (await mockBookmarks.create({ parentId: '1', title: 'T41-空目录' })).id;
+    await mockBookmarks.remove(emptyFolder);
+    ok('空文件夹仍可被 remove 正常删除', () => assert.equal(nodeById(emptyFolder), undefined));
+
+    // removeTree 的递归语义不回归：真正要清空一棵子树时仍然可用
+    await mockBookmarks.removeTree(folder);
+    ok('removeTree 仍然递归删除整棵子树（合法用途不受影响）', () => {
+      assert.equal(nodeById(folder), undefined, '文件夹应被删除');
+      assert.equal(nodeById(kid), undefined, '子项应被递归删除');
+    });
+
+    // 副作用计数可用：未来的「非最新撤销点零副作用」断言依赖它，所以它自己也要被验证
+    resetMockCalls();
+    const probe = (await mockBookmarks.create({ parentId: '1', title: 'T41-probe' })).id;
+    await mockBookmarks.getChildren('1');
+    await mockBookmarks.removeTree(probe);
+    ok('副作用计数可用：读类与写类调用都被如实记录（零副作用断言的基础）', () => {
+      assert.equal(mockCalls.getChildren, 1, 'getChildren 应被计数');
+      assert.equal(mockCalls.create, 1, 'create 应被计数');
+      assert.equal(mockCalls.removeTree, 1, 'removeTree 应被计数');
     });
   }
 

@@ -632,6 +632,13 @@ const cases = [
     expectFail: ['预算记账正确时工具循环继续'],
   },
   {
+    name: '替身 remove 重新允许删非空目录（会让「撤销新建文件夹」冲突测试假绿）',
+    file: 'tests/agent.test.ts',
+    from: '    assert.equal(childrenOf(id).length, 0, `remove: 文件夹 ${id} 非空，应使用 removeTree`);',
+    to: '    // reverted (旧的假替身：非空目录也照删)',
+    expectFail: ['替身 remove 必须拒绝非空文件夹'],
+  },
+  {
     name: 'aiStore 重试未排除被重试的 user 消息',
     file: 'src/stores/aiStore.ts',
     from: '    const source = get().messages;\n    const history = (opts?.replaceLastUser ? source.slice(0, -1) : source).slice(-HISTORY_LIMIT);',

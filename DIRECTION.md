@@ -33,7 +33,7 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
 | 测试 | `npm test` | **348 项全绿**（… → 314 → 325 → 335 → 348） |
 | 构建 | `npm run build` | 通过，`.output/chrome-mv3` 788.17 kB |
-| 版本 | `package.json` | **0.2.16（已发版）** |
+| 版本 | `package.json` | **0.2.17（已发版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
 | 发布 | `.github/workflows/release.yml` | `v*` tag → 构建 + Release |
 
@@ -337,6 +337,9 @@ sort_folder + merge_folders 再撤销）抓出**并发批量移动**的坑——
 > 版本节奏（已执行）：P0 的修复没有单独发版，与 P1（撤销）一起打成 **v0.2.2**（头部功能才值得一个版本号）；
 > P2 修掉的撤销缺陷在 v0.2.2 里**已经发布**，因此单独发了补丁版 **v0.2.3**（含说明"修了什么、是否该升级"的发布说明）。
 > **v0.2.4** 收了「撤销覆盖删除」与容量护栏两块（发布说明里写明了升级须知：v0.2.3 及更早写下的旧撤销点没有删除快照，会被如实拒绝整轮撤销）。
+> **v0.2.17** 收了两件事：把错误台账的 catch **逐处走查**做完（`docs/error-handling-audit.md`，
+> 189 处逐条判定），并修掉走查中发现的 4 处「把不确定说成确定」（删除预扫描的读取失败、
+> 复制后改名失败、主题保存失败、快捷键打开侧边栏失败）。
 > **v0.2.16** 收了「批量移动如实报数」（抽出 `lib/bookmarks/bulk.ts`：`moveMany` 逐项独立计数、
 > `describeBulk` 统一四种话术，四处调用点口径一致），并把错误台账 §3 的"拖拽失败路径"逐处判定完毕。
 > **v0.2.15** 收了「打开链接失败不再被吞掉」（统一走 `open-url.ts`：失败可见、批量按实际结果

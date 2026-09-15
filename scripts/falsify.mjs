@@ -632,6 +632,13 @@ const cases = [
     expectFail: ['预算记账正确时工具循环继续'],
   },
   {
+    name: '文件夹逆操作退回递归 removeTree（回放中途失败会毁掉残留内容）',
+    file: 'src/lib/undo/apply.ts',
+    from: '      await chrome.bookmarks.remove(op.id);\n      return;',
+    to: '      await chrome.bookmarks.removeTree(op.id);\n      return;',
+    expectFail: ['回放中途失败留下非空文件夹时，绝不递归删除里面的内容'],
+  },
+  {
     name: '撤销新建文件夹不再预检内容（会递归删除后来移入的数据）',
     file: 'src/lib/undo/apply.ts',
     from: '  const conflicts = await findFolderRemovalConflicts(target);\n  if (conflicts.length > 0) {',

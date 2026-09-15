@@ -208,6 +208,9 @@ const mockBookmarks = {
     mockCalls.move += 1;
     const node = nodeById(id);
     assert(node, `move: 节点 ${id} 不存在`);
+    // 与 Chrome 一致：目标父目录必须存在（否则真实 API 会拒绝）。替身若不校验，
+    // "移动到一个已被删除的文件夹"会静默成功，让一部分失败路径无法被测试构造出来。
+    assert(nodeById(dest.parentId), `move: 目标父目录 ${dest.parentId} 不存在`);
     const oldParentId = node.parentId;
     const oldIndex =
       oldParentId === undefined ? -1 : childrenOf(oldParentId).findIndex((n) => n.id === id);
@@ -4718,6 +4721,63 @@ function ok(name: string, fn: () => void) {
     ok('空文件夹用例后树不变', () => assert.equal(treeAfterEmpty, baseTree3));
 
     clean();
+  }
+
+  /* ── T44: 纵深防御——回放中途失败留下非空文件夹时绝不递归删除 ── */
+  console.log('\n[T44] 文件夹逆操作的纵深防御');
+  {
+    const {
+      UNDO_STORAGE_KEY,
+      UNDO_PENDING_KEY,
+      beginUndoTransaction,
+      endUndoTransaction,
+      resetUndoTransactionForTest,
+    } = await import('../src/lib/undo/recorder');
+    const { jCreate, jMove } = await import('../src/lib/undo/mutations');
+    const { applyUndo } = await import('../src/lib/undo/apply');
+
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
+    storageSetFail = false;
+    storageSetFailKeys = null;
+    storageSetFailTimes = Number.POSITIVE_INFINITY;
+    storageSetDelayMs = 0;
+    storageSetDelaySequence = [];
+
+    // 构造「预检会放过、但回放中途失败」的序列：
+    //   P 是 Y 的原文件夹；同一轮里创建 F 并把 Y 移入 F；随后 P 在轮次之外被删除。
+    // 撤销时把 Y 移回 P 会失败（目标目录已不存在），于是 Y 仍留在 F 里——
+    // 此时"删除 F"若是递归的，就会把 Y 一起毁掉。
+    const origin = (await mockBookmarks.create({ parentId: '1', title: 'T44-ORIGIN' })).id;
+    const yId = (await mockBookmarks.create({ parentId: origin, title: 'T44-Y', url: 'https://t44.test/y' })).id;
+
+    await beginUndoTransaction('t44-dind');
+    const fId = (await jCreate({ parentId: '1', title: 'T44-F' })).id;
+    await jMove(yId, { parentId: fId }); // 记录：Y 从 origin 移入 F
+    const point = await endUndoTransaction();
+    assert.ok(point, '前置条件：应产生撤销点');
+
+    // 轮次之外删除原文件夹：撤销时的"移回 origin"必然失败
+    await mockBookmarks.removeTree(origin);
+    // 预检必须放过这一轮（Y 由本点的 move 逆操作负责移出，不算冲突）
+    await applyUndo(point!.id);
+    const fStillThere = !!nodeById(fId);
+    const yStillThere = !!nodeById(yId);
+
+    ok('回放中途失败留下非空文件夹时，绝不递归删除里面的内容', () => {
+      assert.equal(yStillThere, true, 'Y 必须还在——它不该因为"移回原文件夹失败"而被删掉');
+    });
+    ok('此时文件夹与内容保持一致（没有半删除状态）', () => {
+      assert.equal(fStillThere, true, 'F 也必须还在（无法安全删除就不能删）');
+    });
+
+    // 清理：F 里还有 Y，用 removeTree 明确清掉这一棵
+    if (fStillThere) await mockBookmarks.removeTree(fId);
+    else if (yStillThere) await mockBookmarks.remove(yId);
+    storageMap.delete(UNDO_STORAGE_KEY);
+    storageMap.delete(UNDO_PENDING_KEY);
+    resetUndoTransactionForTest();
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

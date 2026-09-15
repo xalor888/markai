@@ -5796,6 +5796,13 @@ function ok(name: string, fn: () => void) {
     ok('计划模式：批准后按序执行（create 恰好一次）', () =>
       assert.equal(mockCalls.create, 1, '批准后应执行一次'),
     );
+    ok('计划模式批准后：一轮仍只产生**一个**撤销点，且覆盖实际执行的操作', () => {
+      const raw = storageMap.get(UNDO_STORAGE_KEY) as { points?: { runId: string; ops: unknown[] }[] } | undefined;
+      const points = raw?.points ?? [];
+      assert.equal(points.length, 1, `应恰好一个撤销点，实际 ${points.length}`);
+      assert.equal(points[0]!.runId, 'msg-1', '撤销点应绑定本轮的 messageId');
+      assert.equal(points[0]!.ops.length, 1, '点里应恰好覆盖实际执行的那一次 create');
+    });
     clear();
 
     // ── C. 计划模式开启 + 取消：零执行、零撤销点、结果如实 ──

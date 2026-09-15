@@ -31,7 +31,7 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
-| 测试 | `npm test` | **369 项全绿**（… → 335 → 348 → 360 → 369） |
+| 测试 | `npm test` | **370 项全绿**（… → 348 → 360 → 369 → 370） |
 | 构建 | `npm run build` | 通过，`.output/chrome-mv3` 788.17 kB |
 | 版本 | `package.json` | **0.2.17（已发版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |

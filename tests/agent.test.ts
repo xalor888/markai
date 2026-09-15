@@ -173,6 +173,23 @@ function resetMockCalls(): void {
 /** 故障注入：tabs.create 整体失败，或只让指定 URL 失败（用于批量部分失败） */
 const tabsFail: { all: boolean; urls: string[] | null } = { all: false, urls: null };
 
+/** chrome.action 的调用记录（工具栏提示用） */
+const actionCalls: { badgeText: string[]; badgeColor: string[]; titles: string[] } = {
+  badgeText: [],
+  badgeColor: [],
+  titles: [],
+};
+function resetActionCalls(): void {
+  actionCalls.badgeText.length = 0;
+  actionCalls.badgeColor.length = 0;
+  actionCalls.titles.length = 0;
+}
+
+/** 故障注入：让 chrome.bookmarks.get 对这些 id 抛错（"读取失败"，不是"不存在"） */
+const bookmarksGetFailIds: { ids: string[] } = { ids: [] };
+/** 故障注入：让 chrome.bookmarks.update 对这些 id 抛错 */
+const bookmarksUpdateFailIds: { ids: string[] } = { ids: [] };
+
 const createGate: { release: Promise<void> | null; entered: (() => void) | null } = {
   release: null,
   entered: null,
@@ -187,6 +204,9 @@ const mockBookmarks = {
   },
   get: async (ids: string | string[]) => {
     const list = Array.isArray(ids) ? ids : [ids];
+    for (const id of list) {
+      if (bookmarksGetFailIds.ids.includes(id)) throw new Error(`bookmarks.get 读取失败（${id}）`);
+    }
     return list.map((id) => nodeById(id)).filter((n): n is FNode => !!n).map((n) => toApi(n));
   },
   getChildren: async (id: string) => {
@@ -246,6 +266,7 @@ const mockBookmarks = {
   },
   update: async (id: string, patch: { title?: string; url?: string }) => {
     mockCalls.update += 1;
+    if (bookmarksUpdateFailIds.ids.includes(id)) throw new Error(`bookmarks.update 失败（${id}）`);
     const node = nodeById(id);
     assert(node, `update: 节点 ${id} 不存在`);
     if (patch.title !== undefined) node.title = patch.title;
@@ -278,6 +299,17 @@ const mockBookmarks = {
 
 (globalThis as Record<string, unknown>).chrome = {
   bookmarks: mockBookmarks,
+  action: {
+    setBadgeText: async (o: { text: string }) => {
+      actionCalls.badgeText.push(o.text);
+    },
+    setBadgeBackgroundColor: async (o: { color: string }) => {
+      actionCalls.badgeColor.push(o.color);
+    },
+    setTitle: async (o: { title: string }) => {
+      actionCalls.titles.push(o.title);
+    },
+  },
   tabs: {
     create: async (props?: { url?: string }) => {
       mockCalls.tabsCreate += 1;
@@ -5390,6 +5422,180 @@ function ok(name: string, fn: () => void) {
     });
 
     useToastStore.setState({ toasts: [] });
+  }
+
+  /* ── T50: 写路径上的"把不确定说成确定"（读取失败 ≠ 不存在 / 重命名失败不得谎报标题） ── */
+  console.log('\n[T50] 写路径的不确定性不得被说成确定');
+  {
+    const { executeDeletions } = await import('../src/lib/ai/deletion-executor');
+    const { executeTool } = await import('../src/lib/ai/tools');
+    const { UNDO_STORAGE_KEY, UNDO_PENDING_KEY, resetUndoTransactionForTest } = await import(
+      '../src/lib/undo/recorder'
+    );
+
+    const clean = () => {
+      storageMap.delete(UNDO_STORAGE_KEY);
+      storageMap.delete(UNDO_PENDING_KEY);
+      resetUndoTransactionForTest();
+      bookmarksGetFailIds.ids = [];
+      bookmarksUpdateFailIds.ids = [];
+    };
+
+    // ── A. 删除预扫描：**读取失败**不等于"书签已不存在" ──
+    clean();
+    const target = (await mockBookmarks.create({ parentId: '1', title: 'T50-KEEP', url: 'https://t50.test/a' })).id;
+    bookmarksGetFailIds.ids = [target];
+    const out = await executeDeletions([{ proposalId: 'p-t50', bookmarkId: target }]);
+    bookmarksGetFailIds.ids = [];
+    const stillThere = !!nodeById(target);
+
+    ok('读取失败不得被当作"书签已不存在"而计入删除成功', () => {
+      assert.equal(out.count, 0, '不能把读取失败算成删除成功');
+      assert.equal(out.failed.length, 1, '必须如实报一条失败');
+      assert.match(out.failed[0]!.error, /读取失败|无法确认/, `原因要说清是读取问题，实际 ${out.failed[0]!.error}`);
+    });
+    ok('读取失败后书签必须原样保留（不能因为报错而当它已删）', () =>
+      assert.equal(stillThere, true, '书签不该消失'),
+    );
+
+    // 对照：真的不存在时，仍按"目标已达成"处理（不回归）
+    clean();
+    const ghost = await executeDeletions([{ proposalId: 'p-ghost', bookmarkId: 'no-such-id-t50' }]);
+    ok('对照：书签确实不存在时仍按"目标已达成"处理（不回归）', () => {
+      assert.equal(ghost.count, 1, '确实不存在 → 视为已达成');
+      assert.equal(ghost.failed.length, 0);
+    });
+
+    // ── B. copy_bookmark：重命名失败不得谎报标题 ──
+    clean();
+    const src = (await mockBookmarks.create({ parentId: '1', title: 'T50-SRC', url: 'https://t50.test/src' })).id;
+    const destFolder = (await mockBookmarks.create({ parentId: '1', title: 'T50-DEST' })).id;
+    // 让"复制出来的新节点"的 update 失败：新 id 未知，用通配（对所有 update 失败）
+    bookmarksUpdateFailIds.ids = [];
+    const origUpdate = mockBookmarks.update;
+    // 只让标题为 T50-NEW-TITLE 的那次 update 失败
+    (mockBookmarks as unknown as { update: typeof origUpdate }).update = async (id, patch) => {
+      if (patch.title === 'T50-NEW-TITLE') throw new Error('重命名被拒绝');
+      return origUpdate(id, patch);
+    };
+    const copyOut = await executeTool(
+      'copy_bookmark',
+      JSON.stringify({ bookmarkId: src, parentId: destFolder, title: 'T50-NEW-TITLE' }),
+    );
+    (mockBookmarks as unknown as { update: typeof origUpdate }).update = origUpdate;
+    const parsed = JSON.parse(copyOut.result) as { copied?: string; title?: string; renamed?: boolean; note?: string };
+    const copiedId = parsed.copied;
+
+    ok('复制后重命名失败时，不得声称副本已用请求的标题', () => {
+      assert.notEqual(parsed.title, 'T50-NEW-TITLE', '实际标题还是原标题，不能谎报');
+      assert.equal(parsed.title, 'T50-SRC', '应如实回报实际标题');
+    });
+    ok('重命名失败必须在结果里如实标注', () => {
+      assert.equal(parsed.renamed, false, '应标出重命名没成功');
+      assert.match(parsed.note ?? '', /重命名/, '要给出人话说明');
+    });
+    ok('副本本身仍然要真的建出来（复制成功的事实不能被抹掉）', () => {
+      assert.ok(copiedId, '应返回新节点 id');
+      assert.ok(nodeById(copiedId!), '新节点确实存在');
+      assert.equal(nodeById(copiedId!)!.title, 'T50-SRC', '其标题是原标题');
+    });
+
+    // 对照：重命名成功时，如实回报请求的标题
+    clean();
+    const src2 = (await mockBookmarks.create({ parentId: '1', title: 'T50-SRC2', url: 'https://t50.test/src2' })).id;
+    const okOut = await executeTool(
+      'copy_bookmark',
+      JSON.stringify({ bookmarkId: src2, parentId: destFolder, title: 'T50-OK-TITLE' }),
+    );
+    const okParsed = JSON.parse(okOut.result) as { title?: string; renamed?: boolean };
+    ok('对照：重命名成功时如实回报请求的标题', () => {
+      assert.equal(okParsed.title, 'T50-OK-TITLE');
+      assert.notEqual(okParsed.renamed, false, '不该标成失败');
+    });
+
+    clean();
+    if (nodeById(target)) await mockBookmarks.removeTree(target);
+    if (nodeById(destFolder)) await mockBookmarks.removeTree(destFolder);
+  }
+
+  /* ── T51: 主题设置保存失败必须可见（与设置页同一标准） ── */
+  console.log('\n[T51] 主题保存失败的可见性');
+  {
+    // applyTheme 依赖 window/document；这里只补最小 stub（不引 jsdom，符合本项目测试基座原则）
+    const g = globalThis as unknown as Record<string, unknown>;
+    const origWindow = g.window;
+    const origDocument = g.document;
+    g.window = { matchMedia: () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }) };
+    g.document = { documentElement: { classList: { toggle: () => {} } } };
+
+    const { useThemeStore } = await import('../src/stores/themeStore');
+    const { useToastStore } = await import('../src/lib/toast');
+
+    useToastStore.setState({ toasts: [] });
+    storageSetFailKeys = ['markai.theme'];
+    storageSetFailTimes = Number.POSITIVE_INFINITY;
+    await useThemeStore.getState().setTheme('dark');
+    storageSetFailKeys = null;
+    storageSetFailTimes = Number.POSITIVE_INFINITY;
+    const toasts = useToastStore.getState().toasts;
+
+    ok('主题保存失败必须如实告知（不能静默丢弃设置）', () => {
+      assert.ok(
+        toasts.some((t) => t.variant === 'destructive'),
+        `应有 destructive 提示，实际 ${JSON.stringify(toasts)}`,
+      );
+      assert.match(JSON.stringify(toasts), /主题/, '提示要指明是主题相关');
+    });
+    ok('主题本身仍要立即生效（失败也不该卡住界面）', () =>
+      assert.equal(useThemeStore.getState().theme, 'dark'),
+    );
+
+    // 对照：保存成功时不该弹任何失败提示
+    useToastStore.setState({ toasts: [] });
+    storageMap.delete('markai.theme');
+    await useThemeStore.getState().setTheme('light');
+    ok('对照：主题保存成功时不打扰用户', () => {
+      assert.equal(useToastStore.getState().toasts.length, 0, '成功不该弹提示');
+      assert.equal(useThemeStore.getState().theme, 'light');
+    });
+
+    storageMap.delete('markai.theme');
+    useToastStore.setState({ toasts: [] });
+    g.window = origWindow;
+    g.document = origDocument;
+  }
+
+  /* ── T52: 工具栏是不依赖 storage 的可见通路（快捷键失败也要说） ── */
+  console.log('\n[T52] 工具栏提示');
+  {
+    const { toolbarError, toolbarClear } = await import('../src/lib/ai/toolbar-hint');
+
+    resetActionCalls();
+    await toolbarError('MarkAI：侧边栏未能自动打开，请点扩展图标手动打开');
+    ok('toolbarError 同时设置红色 badge 与悬停说明', () => {
+      assert.deepEqual(actionCalls.badgeText, ['!'], 'badge 应为 !');
+      assert.deepEqual(actionCalls.badgeColor, ['#dc2626'], '应为红色');
+      assert.equal(actionCalls.titles.length, 1);
+      assert.match(actionCalls.titles[0]!, /侧边栏/, '悬停说明要说清是什么失败');
+    });
+
+    resetActionCalls();
+    await toolbarClear();
+    ok('toolbarClear 清掉 badge 并恢复常规标题', () => {
+      assert.deepEqual(actionCalls.badgeText, [''], 'badge 应被清空');
+      assert.deepEqual(actionCalls.titles, ['MarkAI'], '标题应恢复');
+    });
+
+    ok('快捷键打开侧边栏失败时使用工具栏提示（接线被守住）', () => {
+      const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+      const bg = readFileSync(resolve(rootDir, 'src/entrypoints/background.ts'), 'utf8');
+      // 快捷键处理里必须有可见反馈，而不是空的 catch
+      const cmdBlock = bg.slice(bg.indexOf('chrome.commands.onCommand.addListener'));
+      const end = cmdBlock.indexOf('// ── 2.');
+      const scope = end > 0 ? cmdBlock.slice(0, end) : cmdBlock;
+      assert.match(scope, /toolbarError/, '快捷键打开失败必须给出可见反馈');
+      assert.ok(!/catch \{\s*\n\s*\/\/\s*忽略（用户可手动打开）/.test(scope), '不得退回"静默忽略"');
+    });
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

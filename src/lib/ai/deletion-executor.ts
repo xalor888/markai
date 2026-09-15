@@ -70,10 +70,20 @@ async function runDeletions(items: DeletionItem[]): Promise<DeletionOutcome> {
   await runPool(normal, async (it) => {
     try {
       if (it.all) throw new Error('非"删除全部"提议携带了多余标志');
-      const nodes = await chrome.bookmarks.get(it.bookmarkId).catch(() => []);
-      const node = nodes[0];
+      // **读取失败 ≠ 书签不存在**：前者是"不确定"，后者才是"目标已达成"。
+      // 原先 `.catch(() => [])` 把两者混为一谈，于是一次瞬时的读取失败会被计入**删除成功**，
+      // 用户以为删掉了、其实书签还在。不确定必须如实上报成失败，让人/模型决定是否重试。
+      let node: chrome.bookmarks.BookmarkTreeNode | undefined;
+      try {
+        const nodes = await chrome.bookmarks.get(it.bookmarkId);
+        node = nodes[0];
+      } catch (e) {
+        throw new Error(
+          `无法确认该书签的状态（读取失败）：${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
       if (!node) {
-        // 书签已不存在（如其他窗口已删）：视为目标已达成，避免 UI 卡在可重试的 pending 死循环
+        // 确实不存在（如其他窗口已删）：视为目标已达成，避免 UI 卡在可重试的 pending 死循环
         count++;
         return;
       }

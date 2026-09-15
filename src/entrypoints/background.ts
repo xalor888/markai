@@ -10,6 +10,7 @@ import { runAgentTurn } from '@/lib/ai/agent';
 import { ChatError, testConnection } from '@/lib/ai/client';
 import { ensureRoots } from '@/lib/ai/tools';
 import { recoverInterruptedTransaction } from '@/lib/undo/recorder';
+import { toolbarClear, toolbarError } from '@/lib/ai/toolbar-hint';
 import {
   handleContextMenuClick as runContextMenuClick,
   type ContextMenuClickInfo,
@@ -72,7 +73,9 @@ export default defineBackground(() => {
       try {
         await chrome.sidePanel.open({ windowId: win.id });
       } catch {
-        // 忽略（用户可手动打开）
+        // 按了快捷键却什么都没发生是"失败被吞掉"的典型：用一个不依赖 storage 的
+        // 工具栏提示告诉用户"没打开，请手动点扩展图标"。
+        await toolbarError('MarkAI：侧边栏未能自动打开，请点扩展图标手动打开');
       }
     }
   });
@@ -182,16 +185,9 @@ async function handleContextMenuClick(info: chrome.contextMenus.OnClickData, tab
       await chrome.tabs.create({ url });
     },
     pageUrl: () => chrome.runtime.getURL('page.html'),
-    // storage 写不进去时的唯一可见通路：工具栏标记 + 悬停说明
-    setErrorHint: async (title) => {
-      await chrome.action.setBadgeBackgroundColor({ color: '#dc2626' }).catch(() => {});
-      await chrome.action.setBadgeText({ text: '!' }).catch(() => {});
-      await chrome.action.setTitle({ title }).catch(() => {});
-    },
-    clearErrorHint: async () => {
-      await chrome.action.setTitle({ title: 'MarkAI' }).catch(() => {});
-      await chrome.action.setBadgeText({ text: '' }).catch(() => {});
-    },
+    // storage 写不进去时的唯一可见通路：工具栏标记 + 悬停说明（与快捷键失败共用同一模块）
+    setErrorHint: toolbarError,
+    clearErrorHint: toolbarClear,
   });
 }
 

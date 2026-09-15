@@ -1372,10 +1372,30 @@ async function copyBookmark(args: unknown): Promise<ToolOutput> {
   const node = nodes[0];
   if (!node) throw new Error(`书签不存在（id: ${bookmarkId}）`);
   const created = await copyNodeDeep(node, pid);
+  // 重命名失败**不能**谎报标题：副本其实已经建出来了（不能抹掉这个事实），
+  // 但它仍是原标题。原先 `.catch(() => {})` 吞掉失败后照样回报请求的标题，
+  // 于是模型和用户都会以为改名成功。
+  let reportedTitle = node.title || '(未命名)';
+  let renamed: boolean | undefined;
+  let note: string | undefined;
   if (title && node.url) {
-    await jUpdate(created, { title }).catch(() => {});
+    try {
+      await jUpdate(created, { title });
+      reportedTitle = title;
+      renamed = true;
+    } catch (e) {
+      renamed = false;
+      note = `副本已创建，但重命名失败（保留原标题）：${e instanceof Error ? e.message : String(e)}`;
+    }
   }
-  return { result: JSON.stringify({ copied: created, title: title || node.title || '(未命名)' }) };
+  return {
+    result: JSON.stringify({
+      copied: created,
+      title: reportedTitle,
+      ...(renamed !== undefined ? { renamed } : {}),
+      ...(note ? { note } : {}),
+    }),
+  };
 }
 
 const openBookmarkSchema = z.object({

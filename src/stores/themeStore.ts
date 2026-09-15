@@ -2,6 +2,8 @@
 
 import { create } from 'zustand';
 
+import { pushToast } from '@/lib/toast';
+
 export type Theme = 'light' | 'dark' | 'system';
 
 const THEME_KEY = 'markai.theme';
@@ -30,8 +32,13 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
   async setTheme(t) {
     try {
       await chrome.storage.local.set({ [THEME_KEY]: t });
-    } catch {
-      // 持久化失败不影响本次切换
+    } catch (e) {
+      // 本次切换照常生效（不卡界面），但**不能静默丢弃设置**：
+      // 与设置页同一标准——保存失败要让用户知道，否则重启后主题"自己变回去了"。
+      pushToast('主题设置没有保存成功', {
+        description: `${e instanceof Error ? e.message : String(e)}；本次切换已生效，但重开浏览器后可能回到原来的主题。`,
+        variant: 'destructive',
+      });
     }
     set({ theme: t });
     applyTheme(t);

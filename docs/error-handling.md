@@ -29,6 +29,7 @@
 | 重叠的并发撤销回放 | `appliedThisSession` 只在「回放结束且消费失败」之后登记，挡不住重叠请求：两次 `applyUndo(同一点)` 各自读到同一目标、各自通过检查，删除类逆操作会把同一棵子树**重建两份** | 在全部只读检查之后、任何副作用之前建立进程内 `inFlight` 集合，检查与登记之间无 await（单线程下原子）；T46 用可控 create 闸门确定性构造重叠（T46 六条 + 反证）。**跨进程未覆盖**：SW 回收后集合消失 |
 | 消费失败却显示「已撤销」 | `applyUndo` 消费写失败返回 `{ok:false, restored>0, failures:[]}`；`undoLast` 按 failures 分支判断，掉进成功 toast，忽略「不要重复点击」的告警 | `undoLast` 改为先判 `!ok`：零还原 → 「无法撤销」；已还原但记录未更新 → 「撤销未完成 + 已还原 N 项 + 原因」（T45） |
 | 读取撤销记录失败被当成「没有记录」 | `refreshUndo` 的 catch 把列表清空，界面于是断言「没有可撤销的操作」——把不确定说成确定 | 新增 `undoUnknown` 标记；读取失败/形状异常时置位，面板显示「撤销记录读取失败，当前状态未知」，成功读取时清除（T45） |
+| 批量移动把「部分完成」说成「整体失败」 | `bookmark-tree` 拖入文件夹与 `bookmark-list` 拖放用顺序 `await` 循环 +一句笼统的「移动失败」：第 3 项抛错时前 2 项**已经移过去了**却不说，用户不知道到底动了几项；同一功能的另外两处（`move-picker`、"移动到其他根文件夹"）却用 `allSettled` 如实报计数——两种口径并存 | 抽出 `src/lib/bookmarks/bulk.ts`：`moveMany` 逐项独立计数（含首个失败原因）、`describeBulk` 统一话术（全成功 success / 部分成功「已移动 X 项，Y 项失败」/ 全失败「移动失败」/ 空输入不谎报），四处调用点统一走它（T49 十条 + 源码守卫；两条反证） |
 | 打开链接失败完全不可见 | UI 里近二十处 `void chrome.tabs.create({...}).catch(() => {})`：在书签树按回车、点「打开全部」失败时**没有任何反应**；批量路径还会**无条件**弹「已打开 N 个标签页」，把可能一个都没打开说成成功 | 统一走 `src/lib/open-url.ts`：`openUrl` 失败弹 destructive；`openUrls` 按**实际**结果报「已打开 X 个，Y 个失败」/「打开失败」，全成功才 success；提示只显示 URL 来源（origin），不泄漏路径与查询参数；弹窗补挂 `ToastViewport` 并改为「打开成功才关弹窗」（T48 十一条 + 源码守卫 + 两条反证） |
 | 撤销新建文件夹会连带删除后来内容 | `applyOne` 的文件夹 `create` 逆操作是 `removeTree`（无条件递归）：若该文件夹在本轮**之外**被放入内容（手工/另一窗口/未记账的移动），撤销会连内容一起删，而本轮快照里没有它们——不可恢复 | 回放前新增**只读预检** `findFolderRemovalConflicts()`：列出文件夹现存子项，排除「本点自己的 `create` 会删掉」与「本点的 `move`/`moveBatch` 会移回原处（`fromParentId !== 该文件夹`）」两类，剩余即冲突 → 零副作用拒绝并**保留**撤销点，提示用户先移走内容；`applyOne` 同时改为非递归 `remove` 作纵深防御（T43 九条；反证回滚预检必须变红） |
 | 撤销历史「跳选较早点」 | `applyUndo(id)` 接受任意仍在列表中的点，只逆转该点自己的操作却不回退更晚的点；而"撤销新建文件夹"是 `removeTree` 无条件递归 → 「A 新建 F、B 把已有 X 移入 F、跳选撤 A」会连 X 一起删，且 A 的快照里没有 X | `applyUndo` 只接受当前 `points[0]`：非最新点在任何 `chrome.bookmarks.*`、顺序还原与 `takeUndoPoint` 之前零副作用拒绝并保留点；历史面板如实禁用较早记录并给出「请先撤销较新的操作」（T42 八条；反证回滚该检查必须变红） |
@@ -81,7 +82,21 @@
   本文件只是把它们按 §1 的规则归了类，没有逐行走一遍；
 - `background.ts` 里若干 best-effort `catch`（徽标清理、无监听者时的广播、`contextMenus` 重复注册兜底）
   按 §1 判定为可忽略，但**未逐处复核**；
-- 书签树/列表的**拖拽**失败路径（与"打开"相邻但不同）未逐处判定；
+- ~~书签树/列表的**拖拽**失败路径未逐处判定~~ **已逐处判定**（见下）。
+
+**写操作 UI 路径逐处判定结论**（本轮新做）：枚举了组件层与 store 层全部
+`chrome.bookmarks.{create,update,move,remove,removeTree}` 调用点，逐个读清失败后的表现：
+
+| 调用点 | 失败后的表现 | 结论 |
+| --- | --- | --- |
+| `bookmark-dialogs.tsx` 重命名 / 改网址 / 新建 / 删除 / 批量删除（`update`、`create`、`remove`、`removeTree`） | 每个都在 `try/catch` 里，失败弹 destructive 并带原因 | 已可见 |
+| `workspace.tsx` 收藏当前页（`create`） | `try/catch` → 「收藏失败」 | 已可见 |
+| `bookmark-tree.tsx` 行间排序（`move`） | `.then(success)/.catch(destructive)` | 已可见 |
+| `bookmark-list.tsx` 行间排序 + 外部拖入收藏（`move`、`create`） | 同上 | 已可见 |
+| `bookmark-tree.tsx` 拖入文件夹（`move`） | **原先**顺序 `await` 循环 + 一句笼统「移动失败」：第 3 项抛错时前 2 项已经移过去了却不说 | **已修**：改走 `lib/bookmarks/bulk.ts`，如实报「已移动 X 项，Y 项失败」 |
+| `bookmark-list.tsx` 拖放（`move`/复制混合） | **原先**同样丢掉已完成计数（`ok` 在抛错时丢失） | **已修**：逐项独立计数 + `describeBulk` |
+| `move-picker.tsx` 与 `bookmark-tree.tsx`「移动到其他根文件夹」 | 本来就用 `allSettled` 数成功/失败 | 已可见；现统一走同一话术 |
+| `bookmarkStore.copyNodeDeep` | 失败向上抛，由调用方（拖放）捕获并提示 | 已可见 |
 - `failures` 详情在展示层的截断行为未做限制。
 
 **撤销这条主线**：容量护栏、被中断轮次的恢复、持久化交接、消费失败、清空漏清 pending、
@@ -116,6 +131,6 @@
 
 ## 4. 怎么验证这些结论不是嘴上说说
 
-- 每条修复都配了"回滚实现 → 对应测试必须变红"的反证用例（`node scripts/falsify.mjs`，当前 96 条，真实 exit=0 才算通过）；
+- 每条修复都配了"回滚实现 → 对应测试必须变红"的反证用例（`node scripts/falsify.mjs`，当前 98 条，真实 exit=0 才算通过）；
 - 反证脚本会**响亮失败**在三种情况下：测试是假绿、回滚后仍然全绿、锚点失效（SKIP）——它抓出过本项目自己写的多处测试缺陷；
 - 涉及真实 API 语义的地方（`getBytesInUse`、`chrome.storage` 结构化克隆、`bookmarks.move` 下标）都以实测或权威源码为准，替身按同样语义建模。

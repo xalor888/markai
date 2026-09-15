@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { FolderInput, Search } from 'lucide-react';
 import { useBookmarkStore, findNode, type BNode } from '@/stores/bookmarkStore';
 import { pushToast } from '@/lib/toast';
+import { moveManyWithToast } from '@/lib/bookmarks/bulk';
 import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
@@ -57,17 +58,14 @@ export function MovePicker({
   const moveTo = (targetId: string, targetTitle: string) => {
     if (busy) return;
     setBusy(true);
-    void Promise.allSettled(
-      bookmarkIds.map((id) => chrome.bookmarks.move(id, { parentId: targetId })),
+    void moveManyWithToast(
+      bookmarkIds,
+      { parentId: targetId },
+      (id, dest) => chrome.bookmarks.move(id, dest),
+      targetTitle,
     )
-      .then((results) => {
-        const ok = results.filter((r) => r.status === 'fulfilled').length;
-        const fail = results.length - ok;
-        pushToast(
-          ok > 0 ? `已移动 ${ok} 项至「${targetTitle}」` : '移动失败',
-          fail > 0 && ok > 0 ? { description: `${fail} 项移动失败`, variant: 'destructive' } : undefined,
-        );
-        if (ok === 0) {
+      .then((outcome) => {
+        if (outcome.ok === 0) {
           setBusy(false);
           return;
         }
@@ -76,9 +74,6 @@ export function MovePicker({
         useBookmarkStore.getState().revealInTree(targetId);
         void useBookmarkStore.getState().loadTree();
         onClose();
-      })
-      .catch(() => {
-        pushToast('移动失败', { variant: 'destructive' });
       })
       .finally(() => setBusy(false));
   };

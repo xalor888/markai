@@ -8,6 +8,7 @@ import { formatRelativeTime, getHost } from '@/lib/format';
 import { isSelfOrDescendant, resolveDropIndex } from '@/lib/bookmark-dnd';
 import { pushToast } from '@/lib/toast';
 import { openUrl, openUrls } from '@/lib/open-url';
+import { describeBulk } from '@/lib/bookmarks/bulk';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -497,38 +498,36 @@ export function BookmarkList({ className, compact = false }: { className?: strin
         });
       return;
     }
-    const run = async () => {
+    // 逐项独立计数：中途某一项失败时，前面已经完成的那几项**不能丢**——
+    // 原先顺序 await + 一句笼统的"移动失败"会把"已移动 2 项"说成整体失败。
+    const action = isCopy ? '复制' : '移动';
+    void (async () => {
       let ok = 0;
+      let failed = 0;
+      let firstError: string | undefined;
       let idx = dropIndex;
       for (const id of dragIds) {
         const dragNode = findNode(useBookmarkStore.getState().roots, id);
         if (!dragNode) continue;
         // 防护：文件夹不能移入/复制到自身或子文件夹（含「自身」，由 isSelfOrDescendant 判定）
         if (isSelfOrDescendant(dragNode, selectedFolderId)) continue;
-        if (isCopy) {
-          await copyNodeDeep(dragNode, selectedFolderId, idx);
+        try {
+          if (isCopy) {
+            await copyNodeDeep(dragNode, selectedFolderId, idx);
+          } else {
+            await chrome.bookmarks.move(id, { parentId: selectedFolderId, ...(idx !== undefined ? { index: idx } : {}) });
+          }
           ok++;
-        } else {
-          await chrome.bookmarks.move(id, { parentId: selectedFolderId, ...(idx !== undefined ? { index: idx } : {}) });
-          ok++;
+        } catch (e) {
+          failed++;
+          firstError ??= e instanceof Error ? e.message : String(e);
         }
         if (idx !== undefined) idx++; // 批量插入保持输入顺序
       }
-      return ok;
-    };
-    void run()
-      .then((ok) => {
-        pushToast(ok > 0 ? `已${isCopy ? '复制' : '移动'} ${ok} 项到当前文件夹` : '没有可移动的书签', {
-          variant: ok > 0 ? 'success' : 'default',
-        });
-        void useBookmarkStore.getState().loadTree();
-      })
-      .catch((err: unknown) => {
-        pushToast(`${isCopy ? '复制' : '移动'}失败`, {
-          description: err instanceof Error ? err.message : String(err),
-          variant: 'destructive',
-        });
-      });
+      const { title, opts } = describeBulk(action, { ok, failed, ...(firstError ? { firstError } : {}) }, '当前文件夹');
+      pushToast(title, opts);
+      void useBookmarkStore.getState().loadTree();
+    })();
   };
 
   /** 行间拖放排序（仅浏览模式 + 原始顺序时可用，index 才对应真实位置） */

@@ -31,6 +31,7 @@ import { copyText } from '@/lib/clipboard';
 import { isSelfOrDescendant, resolveDropIndex } from '@/lib/bookmark-dnd';
 import { pushToast } from '@/lib/toast';
 import { openUrl, openUrls } from '@/lib/open-url';
+import { moveManyWithToast } from '@/lib/bookmarks/bulk';
 import { cn } from '@/lib/utils';
 import { Favicon } from '@/components/common/favicon';
 import { Separator } from '@/components/ui/separator';
@@ -471,24 +472,17 @@ const TreeRow = memo(function TreeRow({
       }
       // 文件夹：移入其中（若折叠则自动展开，便于查看结果）
       if (!expanded) toggleExpand(node.id);
-      const moveAll = async () => {
-        for (const id of dragIds) {
-          if (id === node.id) continue;
-          await chrome.bookmarks.move(id, { parentId: node.id });
-        }
-      };
-      void moveAll()
-        .then(() => {
-          const suffix = dragIds.length > 1 ? `（${dragIds.length} 项）` : '';
-          pushToast(`已移动到「${node.title || '(未命名)'}」${suffix}`, { variant: 'success' });
-          void useBookmarkStore.getState().loadTree();
-        })
-        .catch((err: unknown) => {
-          pushToast('移动失败', {
-            description: err instanceof Error ? err.message : String(err),
-            variant: 'destructive',
-          });
-        });
+      // 顺序 await 循环会把"第 3 项失败"报成整体失败，而前两项其实已经移过去了——
+      // 统一走 bulk.ts 的如实计数（同一功能的另外两处本来就这么做）。
+      const idsToMove = dragIds.filter((id) => id !== node.id);
+      void moveManyWithToast(
+        idsToMove,
+        { parentId: node.id },
+        (id, dest) => chrome.bookmarks.move(id, dest),
+        node.title || '(未命名)',
+      ).then(() => {
+        void useBookmarkStore.getState().loadTree();
+      });
       return;
     }
 
@@ -968,24 +962,10 @@ export function ContextMenuOverlay() {
     close();
     const ids = multiSelected ? [...selectedIds] : node ? [node.id] : [];
     if (ids.length === 0) return;
-    void Promise.allSettled(ids.map((id) => chrome.bookmarks.move(id, { parentId: targetId })))
-      .then((results) => {
-        const ok = results.filter((r) => r.status === 'fulfilled').length;
-        const fail = results.length - ok;
-        pushToast(
-          ok > 0 ? `已移动 ${ok} 项至「${title}」` : '移动失败',
-          fail > 0 && ok > 0
-            ? { description: `${fail} 项移动失败`, variant: 'destructive' }
-            : { variant: ok > 0 ? 'success' : 'destructive' },
-        );
+    void moveManyWithToast(ids, { parentId: targetId }, (id, dest) => chrome.bookmarks.move(id, dest), title)
+      .then(() => {
         if (multiSelected) useBookmarkStore.getState().clearSelection();
         void useBookmarkStore.getState().loadTree();
-      })
-      .catch((err: unknown) => {
-        pushToast('移动失败', {
-          description: err instanceof Error ? err.message : String(err),
-          variant: 'destructive',
-        });
       });
   };
 

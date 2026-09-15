@@ -632,6 +632,23 @@ const cases = [
     expectFail: ['预算记账正确时工具循环继续'],
   },
   {
+    name: '批量移动丢掉了部分成功的计数（把"移了 2 项"说成整体失败）',
+    file: 'src/lib/bookmarks/bulk.ts',
+    from: '  const ok = results.filter((r) => r.status === \'fulfilled\').length;',
+    to: '  const ok = results.length;',
+    expectFail: ['moveMany：部分失败时仍数出成功项'],
+  },
+  {
+    name: '部分失败又被报成全部成功（describeBulk 少了 failed 分支）',
+    file: 'src/lib/bookmarks/bulk.ts',
+    from: '  if (o.failed === 0) return { title: `已${action} ${o.ok} 项${where}`, opts: { variant: \'success\' } };',
+    to: '  if (true) return { title: `已${action} ${o.ok} 项${where}`, opts: { variant: \'success\' } };',
+    expectFail: [
+      'describeBulk：部分成功 → destructive 且报出「X 项，Y 项失败」',
+      'moveManyWithToast：部分失败时如实报「已移动 X 项，Y 项失败」',
+    ],
+  },
+  {
     name: '打开链接失败又被吞掉（用户点了没反应）',
     file: 'src/lib/open-url.ts',
     from: "    pushToast('无法打开链接', { description: failureMessage(url, e), variant: 'destructive' });",

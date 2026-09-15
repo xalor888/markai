@@ -5291,6 +5291,107 @@ function ok(name: string, fn: () => void) {
     resetMockCalls();
   }
 
+  /* ── T49: 批量移动必须如实报数（部分成功不得说成整体失败） ── */
+  console.log('\n[T49] 批量移动的如实计数');
+  {
+    const { moveMany, describeBulk, moveManyWithToast } = await import('../src/lib/bookmarks/bulk');
+    const { useToastStore } = await import('../src/lib/toast');
+
+    const okMover = async () => ({ id: 1 });
+    const failOn = (badId: string) => async (id: string) => {
+      if (id === badId) throw new Error('Tabs cannot be edited');
+      return { id: 1 };
+    };
+
+    // ── A. 全部成功 ──
+    const all = await moveMany(['a', 'b', 'c'], { parentId: 'p' }, okMover);
+    ok('moveMany：全部成功时计数正确', () => assert.deepEqual(all, { ok: 3, failed: 0 }));
+
+    // ── B. 部分失败：必须数出成功了几项 ──
+    const partial = await moveMany(['a', 'b', 'c'], { parentId: 'p' }, failOn('b'));
+    ok('moveMany：部分失败时仍数出成功项（不能丢掉已完成的事实）', () => {
+      assert.equal(partial.ok, 2, '成功 2 项');
+      assert.equal(partial.failed, 1, '失败 1 项');
+      assert.match(partial.firstError ?? '', /Tabs cannot be edited/, '要带回首个失败原因');
+    });
+
+    // ── C. 全失败 ──
+    const allFail = await moveMany(['a', 'b'], { parentId: 'p' }, async () => {
+      throw new Error('拒绝');
+    });
+    ok('moveMany：全部失败时 ok=0', () => {
+      assert.equal(allFail.ok, 0);
+      assert.equal(allFail.failed, 2);
+    });
+
+    // ── D. 话术：三种结果各自如实 ──
+    ok('describeBulk：全成功 → success「已移动 N 项」', () => {
+      const r = describeBulk('移动', { ok: 3, failed: 0 }, '目标');
+      assert.equal(r.title, '已移动 3 项至「目标」');
+      assert.equal(r.opts?.variant, 'success');
+    });
+    ok('describeBulk：部分成功 → destructive 且报出「X 项，Y 项失败」', () => {
+      const r = describeBulk('移动', { ok: 2, failed: 1, firstError: '原因' }, '目标');
+      assert.match(r.title, /已移动 2 项至「目标」，1 项失败/);
+      assert.equal(r.opts?.variant, 'destructive');
+      assert.equal(r.opts?.description, '原因');
+    });
+    ok('describeBulk：全失败 → destructive「移动失败」+ 原因', () => {
+      const r = describeBulk('移动', { ok: 0, failed: 2, firstError: '原因' });
+      assert.equal(r.title, '移动失败');
+      assert.equal(r.opts?.variant, 'destructive');
+      assert.equal(r.opts?.description, '原因');
+    });
+    ok('describeBulk：空输入不谎报成功', () => {
+      const r = describeBulk('移动', { ok: 0, failed: 0 });
+      assert.match(r.title, /没有可移动的项/);
+      assert.notEqual(r.opts?.variant, 'success');
+    });
+
+    // ── E. 执行 + 提示：部分失败时**不得**出现"全部成功"样式 ──
+    useToastStore.setState({ toasts: [] });
+    const toasts: { title: string; variant: string }[] = [];
+    const origPush = useToastStore.getState().push;
+    useToastStore.setState({
+      push: ((t: { title: string; variant: string }) => {
+        toasts.push({ title: t.title, variant: t.variant });
+        return origPush(t as never);
+      }) as never,
+    });
+    const outcome = await moveManyWithToast(['a', 'b', 'c'], { parentId: 'p' }, failOn('c'), '目标');
+    useToastStore.setState({ push: origPush });
+    ok('moveManyWithToast：部分失败时如实报「已移动 X 项，Y 项失败」', () => {
+      assert.deepEqual(outcome, { ok: 2, failed: 1, firstError: 'Tabs cannot be edited' });
+      assert.equal(toasts.length, 1, '只应弹一条提示');
+      assert.match(toasts[0]!.title, /已移动 2 项至「目标」，1 项失败/);
+      assert.equal(toasts[0]!.variant, 'destructive');
+    });
+    ok('批量部分失败时绝不出现 success 提示', () =>
+      assert.ok(!toasts.some((t) => t.variant === 'success')),
+    );
+
+    // ── F. 源码守卫：四处批量移动统一走 describeBulk（不再各写各的） ──
+    ok('批量移动的四个调用点统一走 bulk.ts（口径一致）', () => {
+      const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+      const files = [
+        'src/components/sidebar/bookmark-tree.tsx',
+        'src/components/bookmark-list/bookmark-list.tsx',
+        'src/components/bookmark-list/move-picker.tsx',
+      ];
+      for (const f of files) {
+        const src = readFileSync(resolve(rootDir, f), 'utf8');
+        assert.match(src, /describeBulk|moveManyWithToast/, `${f} 应使用统一的批量计数话术`);
+        // 不得再出现"顺序 await 循环 + 一句笼统的移动失败"
+        assert.ok(
+          !/pushToast\('移动失败', \{\s*\n\s*description/.test(src),
+          `${f} 不应再有丢掉部分成功计数的笼统失败提示`,
+        );
+      }
+    });
+
+    useToastStore.setState({ toasts: [] });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

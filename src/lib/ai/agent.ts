@@ -3,6 +3,7 @@
 import { chatCompletion, ChatError, type ApiMessage, type ApiToolCall } from './client';
 import { SYSTEM_PROMPT, TOOL_DEFINITIONS } from './prompts';
 import { executeTool, type ToolOutput } from './tools';
+import { applyPlan, buildPlan, classifyTool, type PlannedStep } from './turn-plan';
 import { beginUndoTransaction, endUndoTransaction } from '@/lib/undo/recorder';
 import type { AIConfig, ChatMessage, ChatOutbound, ToolCallRecord } from './types';
 
@@ -43,6 +44,12 @@ export interface AgentTurnParams {
   text: string;
   signal: AbortSignal;
   onEvent: (event: ChatOutbound) => void;
+  /**
+   * 计划模式下请求用户确认；返回是否批准。
+   * **未注入时视为"未批准"**——安全默认是"不执行"，而不是"悄悄全做了"。
+   * 生产实现由 background 注入（UI 侧是第三片）。
+   */
+  requestPlanApproval?: (plan: PlannedStep[], messageId: string) => Promise<boolean>;
 }
 
 /** 提取消息纯文本 */
@@ -310,9 +317,65 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
           results.set(i, await runOne(tc));
         }),
     );
+    // 计划模式：本回次的**写类**操作先收成计划、等确认后再执行。
+    // 为什么按**回次**而不是整轮：一轮里模型可能分多次提出工具调用，而"新建文件夹 → 把书签
+    // 移进去"这类链式操作依赖前一步的返回值——把整轮写操作都憋到轮末会让链式操作直接断掉。
+    // 代价是：一轮里多次回次可能多次确认（合并成整轮一次需要模型一次性给出完整计划，属后续分片）。
+    const planEnabled = params.config.planMode === true;
+    const plannedWrites = planEnabled
+      ? ordered.filter(({ tc }) => classifyTool(tc.function.name) === 'write')
+      : [];
+
+    /**
+     * 执行本回次的计划：**确认前零执行**；未获批准时零执行并把"未执行"如实回填给模型
+     * （否则模型会以为已经做完，继续往下编）。
+     */
+    const runPlannedWrites = async (): Promise<void> => {
+      const steps = buildPlan(
+        plannedWrites.map(({ tc }) => ({ name: tc.function.name, args: tc.function.arguments })),
+      );
+      if (steps.length === 0) return;
+      safePost(onEvent, { type: 'chat:plan', messageId, steps });
+      let approved = false;
+      if (params.requestPlanApproval) {
+        try {
+          approved = await params.requestPlanApproval(steps, messageId);
+        } catch {
+          approved = false;
+        }
+      }
+      if (!approved) {
+        for (const { i } of plannedWrites) {
+          results.set(i, { error: '用户取消了本次计划，这一步没有执行（请勿假设它已生效）' });
+        }
+        return;
+      }
+      await applyPlan(
+        steps,
+        async (step) => {
+          const target = plannedWrites[steps.indexOf(step)];
+          if (!target) return;
+          const r = await runOne(target.tc);
+          results.set(target.i, r);
+          if (r.error) throw new Error(r.error);
+        },
+        { confirmed: true },
+      );
+    };
+
     // 写类工具串行（保持执行顺序，避免移动/创建竞争）
+    let planDone = false;
     for (const { tc, i } of ordered) {
       if (READ_TOOLS.has(tc.function.name)) continue;
+      if (planEnabled && classifyTool(tc.function.name) === 'write') {
+        // 计划在第一个待执行写操作的位置整体执行，保持写操作之间的相对顺序；
+        // 闸门类（propose_deletions 等）不进计划，仍在原位执行、自带自己的确认闸门
+        if (!planDone) {
+          planDone = true;
+          await runPlannedWrites();
+        }
+        continue;
+      }
       results.set(i, await runOne(tc));
     }
     // 按原顺序发送结果事件并回填模型

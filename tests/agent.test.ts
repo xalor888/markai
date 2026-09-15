@@ -474,6 +474,28 @@ globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
 
 const TEST_CONFIG: AIConfig = { providerId: 'test', baseUrl: 'https://api.test.com/v1', apiKey: 'sk-test', model: 'test-model' };
 
+/** 可注入 config 与计划确认通道的 turn（第二片用） */
+function runTurnWith(
+  text: string,
+  opts: {
+    events?: ChatOutbound[];
+    config?: Partial<AIConfig>;
+    requestPlanApproval?: (plan: { name: string; summary: string }[], messageId: string) => Promise<boolean>;
+    messageId?: string;
+  } = {},
+): Promise<void> {
+  const events = opts.events ?? [];
+  return runAgentTurn({
+    config: { ...TEST_CONFIG, ...opts.config },
+    messageId: opts.messageId ?? 'msg-1',
+    history: [],
+    text,
+    signal: new AbortController().signal,
+    onEvent: (e) => events.push(e),
+    ...(opts.requestPlanApproval ? { requestPlanApproval: opts.requestPlanApproval } : {}),
+  });
+}
+
 function runTurn(text: string, events: ChatOutbound[] = []): Promise<void> {
   return runAgentTurn({
     config: TEST_CONFIG,
@@ -5700,6 +5722,161 @@ function ok(name: string, fn: () => void) {
       assert.equal(emptyOut.ok, 0);
       assert.equal(emptyOut.failed, 0);
     });
+  }
+
+  /* ── T54: 计划模式接进 agent 写循环（按回次确认） ── */
+  console.log('\n[T54] 计划模式与写循环');
+  {
+    const { UNDO_STORAGE_KEY, UNDO_PENDING_KEY, resetUndoTransactionForTest } = await import(
+      '../src/lib/undo/recorder'
+    );
+    const { useBookmarkStore } = await import('../src/stores/bookmarkStore');
+    const clear = () => {
+      storageMap.delete(UNDO_STORAGE_KEY);
+      storageMap.delete(UNDO_PENDING_KEY);
+      resetUndoTransactionForTest();
+      resetMockCalls();
+    };
+    /** 一个"新建文件夹"的模型响应（单回次、单个写工具） */
+    const createFolderTurn = () =>
+      sseResponse([
+        sseEvent(
+          JSON.stringify({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'call-cf',
+                      type: 'function',
+                      function: { name: 'create_folder', arguments: JSON.stringify({ parentId: '1', title: 'T54-新文件夹' }) },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+        ),
+        sseEvent(JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] })),
+        'data: [DONE]\n\n',
+      ]);
+
+    // ── A. 计划模式关闭：行为与现在完全一致（写操作立即执行） ──
+    clear();
+    sseQueue = [createFolderTurn(), sseResponse([sseEvent(JSON.stringify({ choices: [{ delta: { content: '好了' } }] })), 'data: [DONE]\n\n'])];
+    await runTurnWith('建个文件夹', { config: { planMode: false } });
+    ok('计划模式关闭时写操作照旧立即执行（不回归既有行为）', () =>
+      assert.equal(mockCalls.create, 1, 'create_folder 应立即执行'),
+    );
+    clear();
+
+    // ── B. 计划模式开启 + 批准：确认后才执行 ──
+    const planEvents: ChatOutbound[] = [];
+    let approvedPlan: { summary: string }[] | null = null;
+    sseQueue = [createFolderTurn(), sseResponse([sseEvent(JSON.stringify({ choices: [{ delta: { content: '好了' } }] })), 'data: [DONE]\n\n'])];
+    await runTurnWith('建个文件夹', {
+      config: { planMode: true },
+      events: planEvents,
+      requestPlanApproval: async (plan) => {
+        approvedPlan = plan;
+        // 关键：请求确认时，写操作必须**还没发生**
+        ok('请求确认的那一刻，写操作必须还没有发生', () =>
+          assert.equal(mockCalls.create, 0, `确认前不应有 create，实际 ${mockCalls.create}`),
+        );
+        return true;
+      },
+    });
+    ok('计划模式：发出 chat:plan 事件，且清单里是这一步的写操作', () => {
+      const planEvent = planEvents.find((e) => e.type === 'chat:plan');
+      assert.ok(planEvent, '应有 chat:plan 事件');
+      assert.equal(approvedPlan?.length, 1);
+      assert.match(approvedPlan![0]!.summary, /新建文件夹/);
+    });
+    ok('计划模式：批准后按序执行（create 恰好一次）', () =>
+      assert.equal(mockCalls.create, 1, '批准后应执行一次'),
+    );
+    clear();
+
+    // ── C. 计划模式开启 + 取消：零执行、零撤销点、结果如实 ──
+    const cancelEvents: ChatOutbound[] = [];
+    sseQueue = [createFolderTurn(), sseResponse([sseEvent(JSON.stringify({ choices: [{ delta: { content: '好的，已取消' } }] })), 'data: [DONE]\n\n'])];
+    await runTurnWith('建个文件夹', {
+      config: { planMode: true },
+      events: cancelEvents,
+      requestPlanApproval: async () => false,
+    });
+    ok('计划模式取消：写操作零执行', () =>
+      assert.equal(mockCalls.create, 0, `取消后不应有任何 create，实际 ${mockCalls.create}`),
+    );
+    ok('计划模式取消：不产生撤销点（存储里没有 markai.undo 点）', () => {
+      const raw = storageMap.get(UNDO_STORAGE_KEY);
+      const points = raw ? ((raw as { points?: unknown[] }).points ?? []) : [];
+      assert.equal(points.length, 0, `取消不应留下撤销点，实际 ${JSON.stringify(raw)}`);
+      assert.ok(!storageMap.has(UNDO_PENDING_KEY), '也不应留下 pending 快照');
+    });
+    ok('计划模式取消：把"未执行"如实回填（模型不能以为已生效）', () => {
+      const err = cancelEvents.find((e) => e.type === 'chat:tool_error') as
+        | { type: 'chat:tool_error'; record: { error?: string } }
+        | undefined;
+      assert.ok(err, '应以 tool_error 形式回填，而不是成功');
+      assert.match(err!.record.error ?? '', /取消|没有执行/, '要说清是取消、未执行');
+    });
+    clear();
+
+    // ── D. 计划模式开启但**没有确认通道**：安全默认 = 不执行 ──
+    sseQueue = [createFolderTurn(), sseResponse([sseEvent(JSON.stringify({ choices: [{ delta: { content: 'x' } }] })), 'data: [DONE]\n\n'])];
+    await runTurnWith('建个文件夹', { config: { planMode: true } });
+    ok('计划模式但没有确认通道时：零执行（安全默认，不"悄悄全做了"）', () =>
+      assert.equal(mockCalls.create, 0, `无确认通道时不应执行，实际 ${mockCalls.create}`),
+    );
+    clear();
+
+    // ── E. 闸门类不进计划：即使计划模式开启，删除提议仍走自己的闸门 ──
+    const gateEvents: ChatOutbound[] = [];
+    const gateApproveCalls: number[] = [];
+    sseQueue = [
+      sseResponse([
+        sseEvent(
+          JSON.stringify({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    {
+                      index: 0,
+                      id: 'call-pd',
+                      type: 'function',
+                      function: {
+                        name: 'propose_deletions',
+                        arguments: JSON.stringify({ items: [{ bookmarkId: 'no-such-t54', reason: '测试' }] }),
+                      },
+                    },
+                  ],
+                },
+              },
+            ],
+          }),
+        ),
+        sseEvent(JSON.stringify({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] })),
+        'data: [DONE]\n\n',
+      ]),
+      sseResponse([sseEvent(JSON.stringify({ choices: [{ delta: { content: '已提交提议' } }] })), 'data: [DONE]\n\n']),
+    ];
+    await runTurnWith('清理一下', {
+      config: { planMode: true },
+      events: gateEvents,
+      requestPlanApproval: async (plan) => {
+        gateApproveCalls.push(plan.length);
+        return true;
+      },
+    });
+    ok('闸门类不在计划清单里（它本身就是"延迟的删除"，不该被二次延迟）', () => {
+      assert.deepEqual(gateApproveCalls, [], 'propose_deletions 不应触发计划确认');
+      assert.ok(!gateEvents.some((e) => e.type === 'chat:plan'), '不应发出 plan 事件');
+    });
+    clear();
+    void useBookmarkStore;
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

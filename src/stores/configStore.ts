@@ -15,6 +15,8 @@ const DEFAULT_CONFIG: AIConfig = {
   model: '',
   // 删除默认始终需用户确认（安全）；"无需确认"模式需用户在设置页主动开启
   deleteMode: 'confirm',
+  // 轮次级计划默认关闭：先保持既有操作节奏，开启与否是产品决策（见 DIRECTION）
+  planMode: false,
   // 模型上下文长度（默认 1024K）+ 压缩阈值 80%
   contextWindow: 1_048_576,
   compressThreshold: 0.8,

@@ -55,6 +55,11 @@ export interface AIConfig {
   model: string;
   /** 删除执行模式：confirm = 始终需用户确认；auto = AI 删除提议自动执行（默认需确认更安全） */
   deleteMode?: 'confirm' | 'auto';
+  /**
+   * 轮次级计划模式：开启后，每个工具回次里的**写操作**先收成计划、等用户确认再执行。
+   * 默认关闭（保持既有行为）——默认开启会改变所有现有用户的操作节奏，属产品决策。
+   */
+  planMode?: boolean;
   /** 模型上下文长度（token）：默认 1024K（1M），用户在设置页可手动调整，服务商返回 context_window 时可自动带入 */
   contextWindow?: number;
   /** 自动压缩阈值（0.5~0.95）：历史用量达到 窗口×阈值 时触发压缩，默认 0.8 */
@@ -84,6 +89,8 @@ export type ChatOutbound =
   | { type: 'chat:start'; messageId: string }
   | { type: 'chat:delta'; messageId: string; text: string }
   | { type: 'chat:tool_start'; messageId: string; record: ToolCallRecord }
+  /** 计划模式：本回次待执行的写操作清单，等 UI 确认后才会执行 */
+  | { type: 'chat:plan'; messageId: string; steps: { name: string; label: string; count: number; summary: string; preview: boolean }[] }
   | { type: 'chat:tool_progress'; messageId: string; recordId: string; text: string }
   | { type: 'chat:tool_done'; messageId: string; record: ToolCallRecord }
   | { type: 'chat:tool_error'; messageId: string; record: ToolCallRecord }

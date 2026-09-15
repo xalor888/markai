@@ -632,6 +632,20 @@ const cases = [
     expectFail: ['预算记账正确时工具循环继续'],
   },
   {
+    name: 'agent 不再走计划闸门（写操作在确认前就落库）',
+    file: 'src/lib/ai/agent.ts',
+    from: "      if (planEnabled && classifyTool(tc.function.name) === 'write') {",
+    to: '      if (false) {',
+    expectFail: ['计划模式：发出 chat:plan 事件，且清单里是这一步的写操作'],
+  },
+  {
+    name: '计划取消后仍继续执行（"取消"变成空话）',
+    file: 'src/lib/ai/agent.ts',
+    from: '      if (!approved) {',
+    to: '      if (false) {',
+    expectFail: ['计划模式取消：写操作零执行'],
+  },
+  {
     name: '轮次计划不再排除闸门类（propose_deletions 被二次延迟）',
     file: 'src/lib/ai/turn-plan.ts',
     from: "    if (classifyTool(s.name) !== 'write') continue;",

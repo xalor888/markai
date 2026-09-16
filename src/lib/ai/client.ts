@@ -51,7 +51,7 @@ const MAX_RETRIES = 5;
 const RETRY_BASE_MS = 1000;
 
 /** 可重试的错误：网络层（无 status）、限流 429、服务端 5xx。认证/参数/取消类不重试 */
-function isRetriableError(e: unknown): boolean {
+export function isRetriableError(e: unknown): boolean {
   if (!(e instanceof ChatError)) return false;
   const status = e.status;
   if (status === undefined) return true; // 网络层错误 / 超时

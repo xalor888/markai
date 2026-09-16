@@ -51,7 +51,8 @@ export function trimConversationsToBudget<T extends ConversationLike>(
   conversations: T[],
   budgetBytes: number,
 ): TrimResult<T> {
-  if (approximateBytes(conversations) <= budgetBytes) {
+  const safeBudget = Number.isFinite(budgetBytes) ? Math.max(0, budgetBytes) : 0;
+  if (approximateBytes(conversations) <= safeBudget) {
     return { kept: conversations, droppedMessages: 0, droppedConversations: 0 };
   }
 
@@ -69,7 +70,7 @@ export function trimConversationsToBudget<T extends ConversationLike>(
 
   const MAX_DROP_STEPS = 100_000; // 防御：异常输入不至于死循环
   let steps = 0;
-  while (currentBytes() > budgetBytes && steps++ < MAX_DROP_STEPS) {
+  while (currentBytes() > safeBudget && steps++ < MAX_DROP_STEPS) {
     const oldest = byAge.find((c) => !dropWhole.has(c.id) && c.messages.length - (dropMessages.get(c.id) ?? 0) > 0);
     if (!oldest) {
       // 所有会话的消息都丢空了还不达标 → 整个丢弃最旧的会话

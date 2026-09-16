@@ -33,6 +33,10 @@
 | 复制书签后改名失败被吞掉 | `jUpdate(created,{title}).catch(() => {})` 吞掉失败后仍回报请求的标题，模型与用户都以为改名成功 | 副本照常建出（不抹掉已完成的事实），但按实际标题回报并标 `renamed:false` + `note`（T50 + 反证） |
 | 主题保存失败静默丢弃 | `themeStore.setTheme` 的 catch 为空：主题当次生效但没落盘，重启后「自己变回去了」，与设置页（`configStore` 有警示）口径不一致 | 本次切换照常生效，同时弹 destructive「主题设置没有保存成功」并说明重启后可能回退（T51 + 反证） |
 | 主题读取失败静默回落 | `themeStore.load` 的 catch 直接降级到 `system`，未区分「首次运行无配置」与「storage.local.get 抛错」——读取失败时静默丢弃用户保存的主题 | 区分无配置与读取抛错：无配置安全使用 `system`；读取抛错弹 destructive 提示说明无法读取，并安全降级到 system（T59 三条 + 1 条反证） |
+| resolveConfig 遗漏 planMode | 用户开启计划模式后，后台执行轮次通过 resolveConfig 读取配置时丢失 planMode 字段，导致计划模式在真实后台无法生效 | 在 resolveConfig 补齐 planMode: saved?.planMode ?? false 映射，确保配置开关真实透传至后台 Agent（T62 两条用例 + 1 条反证） |
+| bookmarkStore 折叠其他遗漏自身 | 右键菜单「折叠其他分支」（collapseOthers）仅保留祖先节点，未将目标自身加入保留集合，导致目标自身被错误折叠 | 在 collapseOthers 增加 if (cur && !cur.url) keep.add(cur.id)，确保目标自身与其祖先链均保持展开状态（T65 两条用例 + 1 条反证） |
+| tools 根节点保护遗漏虚拟根 0 | isRoot 仅依赖子根列表 ROOT_IDS，传入 Chromium 顶级虚拟根 id 0 时判定为 false，可能导致非法底层操作 | 显式增加 id === '0' || ROOT_IDS.has(id)，导出 isRoot 并在 move/update/merge/delete 工具调用点全面拦截虚拟根并抛出标准错误（T63 两条用例 + 1 条反证） |
+| deletion-executor 事务收尾未限定身份 | 手工删除执行器在 finally 中调用无参 endUndoTransaction()，可能在交错场景下误关闭其他轮次活跃事务 | 显式调用 endUndoTransaction('deletions:manual')，与 expectedRunId 安全保护对齐，杜绝误关其他事务（T30 断言 + 1 条反证） |
 | 快捷键打开侧边栏失败静默 | Ctrl+Shift+M 的 `sidePanel.open` 失败是空 catch——**按了没反应** | 复用「不依赖 storage 的工具栏提示」通路（抽出可测的 `lib/ai/toolbar-hint.ts`），并让右键指令失败提示与它共用同一实现（T52 + 反证） |
 | 批量移动把「部分完成」说成「整体失败」 | `bookmark-tree` 拖入文件夹与 `bookmark-list` 拖放用顺序 `await` 循环 +一句笼统的「移动失败」：第 3 项抛错时前 2 项**已经移过去了**却不说，用户不知道到底动了几项；同一功能的另外两处（`move-picker`、"移动到其他根文件夹"）却用 `allSettled` 如实报计数——两种口径并存 | 抽出 `src/lib/bookmarks/bulk.ts`：`moveMany` 逐项独立计数（含首个失败原因）、`describeBulk` 统一话术（全成功 success / 部分成功「已移动 X 项，Y 项失败」/ 全失败「移动失败」/ 空输入不谎报），四处调用点统一走它（T49 十条 + 源码守卫；两条反证） |
 | 等待计划确认时被中止/抢占导致挂起与事务被偷 | 轮次 A 等计划确认时被新消息抢占（只调用了 abort）未结算未决计划导致永久挂起；后续苏醒后 finally 的 endUndoTransaction 不校验 runId，直接关闭新轮次 B 的事务，导致 B 后续操作静默不进撤销日志 | `requestPlanApprovalWithAbort` 与 abort 信号赛跑按未批准结算并清理条目；`chat:send` 抢占上一条也进行结算；`endUndoTransaction` 增加 `expectedRunId` 校验，不匹配绝不关闭他人事务（T58 五条 + 2 条反证） |
@@ -149,6 +153,6 @@
 
 ## 4. 怎么验证这些结论不是嘴上说说
 
-- 每条修复都配了"回滚实现 → 对应测试必须变红"的反证用例（`node scripts/falsify.mjs`，当前 119 条，真实 exit=0 才算通过）；
+- 每条修复都配了"回滚实现 → 对应测试必须变红"的反证用例（`node scripts/falsify.mjs`，当前 135 条，真实 exit=0 才算通过）；
 - 反证脚本会**响亮失败**在三种情况下：测试是假绿、回滚后仍然全绿、锚点失效（SKIP）——它抓出过本项目自己写的多处测试缺陷；
 - 涉及真实 API 语义的地方（`getBytesInUse`、`chrome.storage` 结构化克隆、`bookmarks.move` 下标）都以实测或权威源码为准，替身按同样语义建模。

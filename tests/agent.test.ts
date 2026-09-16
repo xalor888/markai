@@ -12,7 +12,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runAgentTurn } from '../src/lib/ai/agent';
@@ -1740,6 +1740,14 @@ function ok(name: string, fn: () => void) {
       assert.equal(resolveDropIndex(2, 'below'), 3);
     });
 
+    ok('resolveDropIndex 边界防护：负数、非整数与非法数值安全钳位至 >= 0', () => {
+      assert.equal(resolveDropIndex(-1, 'above'), 0, '负数上方应钳位为 0');
+      assert.equal(resolveDropIndex(-5, 'below'), 1, '负数下方应钳位为 0+1');
+      assert.equal(resolveDropIndex(2.9, 'above'), 2, '非整数向下取整');
+      assert.equal(resolveDropIndex(2.1, 'below'), 3, '非整数下方向下取整+1');
+      assert.equal(resolveDropIndex(Number.NaN, 'above'), 0, 'NaN 安全回落为 0');
+    });
+
     // ── B. 语义链：落点 → Chrome（替身）→ 真实顺序 ──
     // 这是本项目最容易被"顺手减 1"改坏的地方：减 1 会命中 Chromium 的
     // index == old_index + 1 空操作，向后拖拽静默失效。替身已复现真实语义，
@@ -3116,6 +3124,56 @@ function ok(name: string, fn: () => void) {
         'Firefox 从未在真实 Firefox 里验证过，不该继续作为发布产物（见 docs/release.md）',
       );
     });
+
+    ok('store-listing.md 严格遵守 Chrome Web Store 规范与权限对齐', () => {
+      const storeListingPath = resolve(docsDir, 'store-listing.md');
+      assert.ok(existsSync(storeListingPath), 'docs/store-listing.md 必须存在');
+      const listing = readFileSync(storeListingPath, 'utf8');
+      const shortDescMatch = listing.match(/### 2\. 短描述[\s\S]*?`([^`]+)`/);
+      assert.ok(shortDescMatch, '必须包含标准格式的短描述');
+      const shortDesc = (shortDescMatch?.[1] ?? '').trim();
+      assert.ok(shortDesc.length > 0 && shortDesc.length <= 132, `短描述长度应在 1-132 之间，实际 ${shortDesc.length} 字符`);
+      assert.match(listing, /### 3\. 单一用途说明/, '必须包含单一用途说明');
+      const expectedPerms = ['bookmarks', 'storage', 'tabs', 'tabGroups', 'contextMenus', 'sidePanel'];
+      for (const p of expectedPerms) {
+        assert.match(listing, new RegExp(`\\|\\s*\`${p}\`\\s*\\|`), `store-listing 必须逐条包含权限 \`${p}\` 的审核理由申诉`);
+      }
+      assert.match(listing, /<all_urls>/, 'store-listing 必须包含 <all_urls> 的审核理由声明');
+    });
+
+    ok('Chrome Web Store 推广横幅规格严格符合官方尺寸', async () => {
+      if (!existsSync(resolve(rootDir, 'public/store/promo-small-440x280.png'))) {
+        // @ts-ignore
+        await import('../scripts/generate-promo-tiles.mjs');
+      }
+      const storeDir = resolve(rootDir, 'public/store');
+      const smallPath = resolve(storeDir, 'promo-small-440x280.png');
+      const marqueePath = resolve(storeDir, 'promo-marquee-1400x560.png');
+      assert.ok(existsSync(smallPath), 'promo-small-440x280.png 必须存在');
+      assert.ok(existsSync(marqueePath), 'promo-marquee-1400x560.png 必须存在');
+
+      const pngSig = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+      const smallBuf = readFileSync(smallPath);
+      assert.ok(smallBuf.subarray(0, 8).equals(pngSig), '小型横幅必须是有效 PNG');
+      assert.equal(smallBuf.readUInt32BE(16), 440, '小型横幅宽度必须是 440');
+      assert.equal(smallBuf.readUInt32BE(20), 280, '小型横幅高度必须是 280');
+
+      const marqueeBuf = readFileSync(marqueePath);
+      assert.ok(marqueeBuf.subarray(0, 8).equals(pngSig), '主横幅必须是有效 PNG');
+      assert.equal(marqueeBuf.readUInt32BE(16), 1400, '主横幅宽度必须是 1400');
+      assert.equal(marqueeBuf.readUInt32BE(20), 560, '主横幅高度必须是 560');
+    });
+
+    ok('docs/release-notes-0.2.23.md 完整记载 v0.2.23 核心交付点', () => {
+      const notesPath = resolve(docsDir, 'release-notes-0.2.23.md');
+      assert.ok(existsSync(notesPath), 'release-notes-0.2.23.md 必须存在');
+      const text = readFileSync(notesPath, 'utf8');
+      assert.match(text, /planMode/, '必须包含 planMode 关键修复说明');
+      assert.match(text, /store-listing\.md/, '必须包含 store-listing.md 上架材料说明');
+      assert.match(text, /resolveDropIndex/, '必须包含 resolveDropIndex 拖拽防护说明');
+      assert.match(text, /format\.ts/, '必须包含 format.ts 基础加固说明');
+      assert.match(text, /toast\.ts/, '必须包含 toast.ts 基础加固说明');
+    });
   }
 
   /* ── T30: 手工确认的删除也可撤销（删除执行器） ── */
@@ -3175,6 +3233,10 @@ function ok(name: string, fn: () => void) {
       assert.equal(outA.failed.length, 0);
       assert.equal(pointsA.length, 1, '应落盘一个撤销点');
       assert.notEqual(firstTreeDiff(beforeA, midA), null, '这一轮确实删掉了东西');
+    });
+
+    ok('手工删除事务身份为 deletions:manual', () => {
+      assert.equal(pointsA[0]?.runId, 'deletions:manual');
     });
     ok('手工删除后撤销：整棵树含顺序逐节点复原（含被删文件夹的子树）', () => {
       assert.ok(undoA.ok, `撤销应成功，实际 ${JSON.stringify(undoA)}`);
@@ -3890,6 +3952,19 @@ function ok(name: string, fn: () => void) {
       assert.ok(approximateBytes(byConv.kept) <= 1200);
       assert.match(describeChatTrim(byConv) ?? '', /会话/);
       assert.equal(trimConversationsToBudget(padded, 999999).droppedConversations, 0, '预算足够时不该丢会话');
+    });
+
+    ok('裁剪边界：空列表、0 预算与负数预算安全处理不崩溃', () => {
+      const emptyRes = trimConversationsToBudget([], 1000);
+      assert.equal(emptyRes.kept.length, 0);
+      assert.equal(emptyRes.droppedMessages, 0);
+
+      const zeroRes = trimConversationsToBudget(small, 0);
+      assert.equal(zeroRes.kept.length, 0, '0 预算应清空所有会话');
+      assert.equal(zeroRes.droppedConversations, 2);
+
+      const negRes = trimConversationsToBudget(small, -100);
+      assert.equal(negRes.kept.length, 0, '负数预算应安全钳位并清空');
     });
 
     // ── D. 写盘失败不再静默：带稳定时间戳的如实错误 ──
@@ -6529,6 +6604,230 @@ function ok(name: string, fn: () => void) {
     const clipSrc = readFileSync('src/lib/clipboard.ts', 'utf-8');
     ok('clipboard.ts 注释真实对齐，不包含误导性的 "// 忽略"', () => {
       assert.ok(!clipSrc.includes('// 忽略'), '不得再有误导性的 // 忽略 注释');
+    });
+  }
+
+  /* ── T60: 通用格式化工具 (format.ts) 单元测试与边界防护 ── */
+  console.log('\n[T60] 通用格式化工具边界与正确性');
+  {
+    const { getHost, isSpecialUrl, formatRelativeTime, truncate, safeJsonParse, uid } = await import('../src/lib/format');
+    ok('isSpecialUrl 准确识别特殊与本地协议', () => {
+      assert.equal(isSpecialUrl('https://github.com'), false);
+      assert.equal(isSpecialUrl('chrome://bookmarks'), true);
+      assert.equal(isSpecialUrl('file:///tmp/a.pdf'), true);
+      assert.equal(isSpecialUrl('about:blank'), true);
+      assert.equal(isSpecialUrl(''), true);
+    });
+
+    ok('getHost：正确提取标准与多级域名，剥离 www，处理无效输入', () => {
+      assert.equal(getHost('https://www.google.com/search?q=1'), 'google.com');
+      assert.equal(getHost('http://sub.domain.org:8080/foo'), 'sub.domain.org');
+      assert.equal(getHost('https://github.com'), 'github.com');
+      assert.equal(getHost('invalid-url'), '');
+      assert.equal(getHost(''), '');
+      assert.equal(getHost(undefined), '');
+    });
+
+    ok('formatRelativeTime：覆盖刚刚/分钟/小时/天/远期/异常值', () => {
+      const now = Date.now();
+      assert.equal(formatRelativeTime(undefined), '未知');
+      assert.equal(formatRelativeTime(0), '未知');
+      assert.equal(formatRelativeTime(-100), '未知');
+      assert.equal(formatRelativeTime(Number.NaN), '未知');
+
+      assert.equal(formatRelativeTime(now - 10_000), '刚刚');
+      assert.equal(formatRelativeTime(now - 5 * 60_000), '5 分钟前');
+      assert.equal(formatRelativeTime(now - 3 * 3_600_000), '3 小时前');
+      assert.equal(formatRelativeTime(now - 4 * 86_400_000), '4 天前');
+
+      const futureStamp = now + 10 * 86_400_000;
+      assert.notEqual(formatRelativeTime(futureStamp), '刚刚');
+      assert.match(formatRelativeTime(futureStamp), /^\d{4}-\d{2}-\d{2}$/);
+    });
+
+    ok('truncate：文本未超长原样返回，超长加省略号', () => {
+      assert.equal(truncate('hello', 10), 'hello');
+      assert.equal(truncate('hello world', 5), 'hello…');
+      assert.equal(truncate('', 10), '');
+    });
+
+    ok('safeJsonParse：合法 JSON 解析成功，非法或空字符串返回 null', () => {
+      assert.deepEqual(safeJsonParse('{"a":1,"b":"str"}'), { a: 1, b: 'str' });
+      assert.equal(safeJsonParse('{invalid json}'), null);
+      assert.equal(safeJsonParse(''), null);
+    });
+
+    ok('uid：生成符合规范的标准 UUID v4 字符串', () => {
+      const id1 = uid();
+      const id2 = uid();
+      assert.ok(typeof id1 === 'string' && id1.length === 36);
+      assert.notEqual(id1, id2);
+      assert.match(id1, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+    });
+  }
+
+  /* ── T61: Toast 系统去重与容量上限 ── */
+  console.log('\n[T61] Toast 系统去重与容量上限');
+  {
+    const { useToastStore, pushToast } = await import('../src/lib/toast');
+
+    ok('Toast 同内容去重：相同 title+desc+variant 不重复入队且复用现有 id', () => {
+      useToastStore.setState({ toasts: [] });
+      const id1 = pushToast('操作失败', { description: '网络超时', variant: 'destructive' });
+      const id2 = pushToast('操作失败', { description: '网络超时', variant: 'destructive' });
+      assert.equal(id1, id2, '去重时应返回相同 id');
+      assert.equal(useToastStore.getState().toasts.length, 1, '去重后队列应只有 1 条');
+    });
+
+    ok('Toast 区分不同变体与描述：不同内容正常追加', () => {
+      useToastStore.setState({ toasts: [] });
+      pushToast('操作失败', { description: '网络超时', variant: 'destructive' });
+      pushToast('操作失败', { description: '网络超时', variant: 'default' });
+      pushToast('操作成功', { variant: 'success' });
+      assert.equal(useToastStore.getState().toasts.length, 3, '不同变体/标题应正常入队');
+    });
+
+    ok('Toast 队列硬上限：连续推送大量通知仅保留最新 4 条，防 DOM 爆炸', () => {
+      useToastStore.setState({ toasts: [] });
+      for (let i = 0; i < 10; i++) {
+        pushToast('通知 #' + i, { description: '内容 ' + i });
+      }
+      const list = useToastStore.getState().toasts;
+      assert.equal(list.length, 4, '硬上限应保留 4 条');
+      assert.equal(list[0]?.title, '通知 #6');
+      assert.equal(list[3]?.title, '通知 #9');
+    });
+
+    ok('Toast remove：按 id 精确移除指定通知，不影响其余条目', () => {
+      useToastStore.setState({ toasts: [] });
+      const idA = pushToast('通知 A');
+      const idB = pushToast('通知 B');
+      assert.equal(useToastStore.getState().toasts.length, 2);
+      useToastStore.getState().remove(idA);
+      const remaining = useToastStore.getState().toasts;
+      assert.equal(remaining.length, 1);
+      assert.equal(remaining[0]?.id, idB);
+    });
+  }
+
+  /* ── T62: resolveConfig 计划模式映射 ── */
+  console.log('\n[T62] resolveConfig planMode 映射');
+  {
+    const { resolveConfig } = await import('../src/lib/providers');
+    ok('resolveConfig：正确透传 planMode: true，缺省回落为 false', () => {
+      assert.equal(resolveConfig({ planMode: true }).planMode, true);
+      assert.equal(resolveConfig({}).planMode, false);
+      assert.equal(resolveConfig({ planMode: false }).planMode, false);
+    });
+  }
+
+  /* ── T63: tools 根文件夹保护（isRoot 涵盖 id 0 与根子目录） ── */
+  console.log('\n[T63] tools 根文件夹保护与拒绝策略');
+  {
+    const { isRoot, executeTool } = await import('../src/lib/ai/tools');
+
+    ok('isRoot：明确判定虚拟根节点 id 0 与子根文件夹为根节点', () => {
+      assert.equal(isRoot('0'), true, '虚拟根 0 必须被判定为根');
+      assert.equal(isRoot('1'), true, '书签栏 1 必须被判定为根');
+      assert.equal(isRoot('custom-folder-id'), false, '普通用户文件夹不得被误判为根');
+    });
+
+    ok('move_bookmark 与 rename_bookmark 拒绝操作根文件夹', async () => {
+      await assert.rejects(
+        () => executeTool('move_bookmark', JSON.stringify({ bookmarkId: '0', parentId: '1' })),
+        /浏览器根文件夹不可移动/,
+      );
+      await assert.rejects(
+        () => executeTool('rename_bookmark', JSON.stringify({ bookmarkId: '1', title: '新名称' })),
+        /浏览器根文件夹不可重命名/,
+      );
+    });
+  }
+
+  /* ── T64: assertNoCycle 循环嵌套防护 ── */
+  console.log('\n[T64] assertNoCycle 循环嵌套防护');
+  {
+    const { assertNoCycle } = await import('../src/lib/ai/tools');
+    ok('assertNoCycle 拦截自身与子孙嵌套', async () => {
+      await assert.rejects(() => assertNoCycle('A', 'A'), /循环嵌套/);
+      const p = await mockBookmarks.create({ parentId: '1', title: 'P' });
+      const c = await mockBookmarks.create({ parentId: p.id, title: 'C' });
+      await assert.rejects(() => assertNoCycle(p.id, c.id), /循环嵌套/);
+      await assert.doesNotReject(() => assertNoCycle(p.id, '1'));
+    });
+  }
+
+  /* ── T65: bookmarkStore 展开与折叠 ── */
+  console.log('\n[T65] bookmarkStore 展开与折叠');
+  {
+    const { useBookmarkStore } = await import('../src/stores/bookmarkStore');
+    ok('collapseOthers 保留自身与祖先', () => {
+      useBookmarkStore.setState({
+        roots: [{ id: '1', title: 'R', children: [{ id: 'A', parentId: '1', title: 'A', children: [] }, { id: 'B', parentId: '1', title: 'B', children: [] }] } as any],
+        expandedIds: ['1', 'A', 'B'],
+      });
+      useBookmarkStore.getState().collapseOthers('A');
+      const res = useBookmarkStore.getState().expandedIds;
+      assert.ok(res.includes('A'), '自身必须保留');
+      assert.ok(res.includes('1'), '祖先必须保留');
+      assert.ok(!res.includes('B'), 'B 必须折叠');
+    });
+    ok('collapseAll 与 expandBranch', () => {
+      useBookmarkStore.getState().collapseAll();
+      assert.equal(useBookmarkStore.getState().expandedIds.length, 0);
+    });
+  }
+
+  /* ── T66: turn-plan 参数解析与 stepCountOf ── */
+  console.log('\n[T66] turn-plan stepCountOf');
+  {
+    const { stepCountOf, applyPlan } = await import('../src/lib/ai/turn-plan');
+    ok('stepCountOf 覆盖显式 count 与列表字段', () => {
+      assert.equal(stepCountOf(JSON.stringify({ count: 8 })), 8);
+      assert.equal(stepCountOf(JSON.stringify({ bookmarkIds: ['a', 'b'] })), 2);
+      assert.equal(stepCountOf(JSON.stringify({ items: ['a'] })), 1);
+      assert.equal(stepCountOf('{invalid json}'), 1);
+      assert.equal(stepCountOf(JSON.stringify(['arr'])), 1);
+    });
+    ok('applyPlan 未确认零执行确认后如实计数', async () => {
+      const step = { name: 'c', args: '{}', label: 'l', count: 1, countDeclared: false, summary: 's', preview: false };
+      const unc = await applyPlan([step], async () => {}, { confirmed: false });
+      assert.equal(unc.cancelled, true);
+      const con = await applyPlan([step], async () => {}, { confirmed: true });
+      assert.equal(con.ok, 1);
+    });
+  }
+
+  /* ── T67: isRetriableError 状态码判定 ── */
+  console.log('\n[T67] isRetriableError 状态码矩阵');
+  {
+    const { isRetriableError, ChatError } = await import('../src/lib/ai/client');
+    ok('isRetriableError 状态码矩阵判定', () => {
+      assert.equal(isRetriableError(new ChatError('timeout')), true);
+      assert.equal(isRetriableError(new ChatError('rate', 429)), true);
+      assert.equal(isRetriableError(new ChatError('err', 500)), true);
+      assert.equal(isRetriableError(new ChatError('auth', 401)), false);
+      assert.equal(isRetriableError(new ChatError('cancel', 499)), false);
+      assert.equal(isRetriableError(new Error('plain')), false);
+    });
+  }
+
+  /* ── T68: 右键菜单指令装配 ── */
+  console.log('\n[T68] buildInstruction 指令装配矩阵');
+  {
+    const { buildInstruction } = await import('../src/lib/ai/context-menu');
+    ok('buildInstruction 针对单书签、文件夹与失效节点的指令装配', () => {
+      const single = buildInstruction('markai:organize', { id: 'b1', title: 'GitHub', url: 'https://github.com' } as any);
+      assert.match(single.text, /判断现有分类里是否有合适的文件夹/);
+      assert.equal(single.folderId, undefined);
+
+      const folder = buildInstruction('markai:organize', { id: 'f1', title: 'Tech' } as any);
+      assert.match(folder.text, /创建合适的子分类/);
+      assert.equal(folder.folderId, 'f1');
+
+      const missing = buildInstruction('markai:organize', undefined);
+      assert.equal(missing.text, '');
+      assert.match(missing.notice ?? '', /右键的书签已被删除或不可用/);
     });
   }
 

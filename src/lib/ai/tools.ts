@@ -25,8 +25,8 @@ export async function ensureRoots(): Promise<void> {
   for (const child of root?.children ?? []) ROOT_IDS.add(child.id);
 }
 
-function isRoot(id: string): boolean {
-  return ROOT_IDS.has(id);
+export function isRoot(id: string): boolean {
+  return id === '0' || ROOT_IDS.has(id);
 }
 
 /** 解析书签完整路径，例如"书签栏 > 技术 > AI" */
@@ -100,7 +100,7 @@ async function assertFolder(parentId?: string): Promise<string> {
 }
 
 /** 校验不会造成循环嵌套（目标不能是自身或自身的子孙） */
-async function assertNoCycle(bookmarkId: string, parentId: string): Promise<void> {
+export async function assertNoCycle(bookmarkId: string, parentId: string): Promise<void> {
   let cur: string | undefined = parentId;
   let depth = 0;
   while (cur && depth++ < 64) {

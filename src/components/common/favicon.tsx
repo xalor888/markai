@@ -1,6 +1,6 @@
 import { Globe } from 'lucide-react';
 import { useEffect, useState } from 'react';
-import { getHost } from '@/lib/format';
+import { getHost, isSpecialUrl } from '@/lib/format';
 import { cn } from '@/lib/utils';
 
 /** 网站 favicon（Google s2 服务，加载失败回退为地球图标） */
@@ -11,8 +11,8 @@ export function Favicon({ url, size = 14, className }: { url?: string; size?: nu
   useEffect(() => {
     setError(false);
   }, [url]);
-  // chrome:// / chrome-extension:// / about: 等特殊页面没有网站 favicon，直接回退
-  const special = !host || /^(chrome|chrome-extension|about|edge|moz-extension):/i.test(url ?? '');
+  // chrome:// / file:// / about: 等特殊或本地页面没有外网 favicon，直接回退为地球图标
+  const special = !host || isSpecialUrl(url);
   if (special || error) {
     return <Globe className={cn('shrink-0 text-muted-foreground', className)} style={{ width: size, height: size }} />;
   }

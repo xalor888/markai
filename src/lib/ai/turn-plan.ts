@@ -105,7 +105,7 @@ export interface PlanOutcome {
 function parseArgs(args: string): Record<string, unknown> | undefined {
   try {
     const v = JSON.parse(args || '{}');
-    return v && typeof v === 'object' ? (v as Record<string, unknown>) : undefined;
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
   } catch {
     return undefined;
   }

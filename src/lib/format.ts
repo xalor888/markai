@@ -10,13 +10,23 @@ export function getHost(url?: string): string {
   }
 }
 
+/** 是否为无外部 favicon 的特殊/本地协议 URL（chrome://, file://, about:, data: 等） */
+export function isSpecialUrl(url?: string): boolean {
+  if (!url) return true;
+  return /^(chrome|chrome-extension|about|edge|moz-extension|file|data|javascript|view-source):/i.test(url.trim());
+}
+
 /** 相对时间：刚刚 / N 分钟前 / N 小时前 / N 天前 / 具体日期 */
 export function formatRelativeTime(timestamp?: number): string {
-  if (!timestamp || timestamp <= 0) return '未知';
+  if (!timestamp || timestamp <= 0 || !Number.isFinite(timestamp)) return '未知';
   const diff = Date.now() - timestamp;
   const minute = 60_000;
   const hour = 3_600_000;
   const day = 86_400_000;
+  if (diff < -day) {
+    const d = new Date(timestamp);
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
   if (diff < minute) return '刚刚';
   if (diff < hour) return `${Math.floor(diff / minute)} 分钟前`;
   if (diff < day) return `${Math.floor(diff / hour)} 小时前`;

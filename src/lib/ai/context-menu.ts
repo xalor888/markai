@@ -41,7 +41,7 @@ export interface ContextMenuClickInfo {
 const ERROR_TITLE = 'MarkAI：右键指令未能保存，请重新选择书签后重试';
 
 /** 组织成发给 Agent 的指令文本 */
-function buildInstruction(
+export function buildInstruction(
   menuItemId: string,
   node: chrome.bookmarks.BookmarkTreeNode | undefined,
 ): { text: string; folderId?: string; notice?: string } {

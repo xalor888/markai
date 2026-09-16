@@ -206,6 +206,7 @@ export const useBookmarkStore = create<BookmarkState>((set, get) => ({
     set((s) => {
       const keep = new Set<string>();
       let cur = findNode(s.roots, id);
+      if (cur && !cur.url) keep.add(cur.id);
       while (cur?.parentId && cur.parentId !== '0') {
         keep.add(cur.parentId);
         cur = findNode(s.roots, cur.parentId);

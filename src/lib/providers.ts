@@ -167,6 +167,7 @@ export function resolveConfig(saved?: Partial<AIConfig> | null): AIConfig {
     apiKey: saved?.apiKey ?? '',
     model,
     deleteMode: saved?.deleteMode ?? 'confirm',
+    planMode: saved?.planMode ?? false,
     contextWindow,
     compressThreshold,
     autoCompress: saved?.autoCompress ?? false,

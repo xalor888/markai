@@ -31,9 +31,9 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
-| 测试 | `npm test` | **417 项全绿**（… → 409 → 414 → 417） |
+| 测试 | `npm test` | **441 项全绿**（… → 439 → 440 → 441） |
 | 构建 | `npm run build` | 通过，`.output/chrome-mv3` 788.17 kB |
-| 版本 | `package.json` | **0.2.22（已发版）** |
+| 版本 | `package.json` | **0.2.23（发版中）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
 | 发布 | `.github/workflows/release.yml` | `v*` tag → 构建 + Release |
 
@@ -337,7 +337,13 @@ sort_folder + merge_folders 再撤销）抓出**并发批量移动**的坑——
 > 版本节奏（已执行）：P0 的修复没有单独发版，与 P1（撤销）一起打成 **v0.2.2**（头部功能才值得一个版本号）；
 > P2 修掉的撤销缺陷在 v0.2.2 里**已经发布**，因此单独发了补丁版 **v0.2.3**（含说明"修了什么、是否该升级"的发布说明）。
 > **v0.2.4** 收了「撤销覆盖删除」与容量护栏两块（发布说明里写明了升级须知：v0.2.3 及更早写下的旧撤销点没有删除快照，会被如实拒绝整轮撤销）。
-> **未发版（进行中）**：P4 分发就绪推进——`docs/privacy.md` 补全 `markai.config`（planMode）、`markai.undo`（runId 终态列表）、`markai.undo.pending`（在途事务快照）的存储与清除披露，并在测试中增加完整性守卫与反证（119 条反证）。
+> **v0.2.23（发版中）**：P4 分发就绪推进、关键缺陷修复与底层工具链加固——
+> ①修复 `resolveConfig` 遗漏 `planMode` 导致后台无法激活计划模式的关键缺陷（T62）；
+> ②编制 Chrome Web Store 上架审核材料清单（`docs/store-listing.md`）与纯 Node 推广横幅生成器（`scripts/generate-promo-tiles.mjs`，440x280 / 1400x560 官方规格）；
+> ③增强书签拖放 `resolveDropIndex` 负数与非法数值安全钳位防非法移动；
+> ④建立 `src/lib/format.ts` 边界防护与全面单元测试 T60；
+> ⑤建立通知系统 `src/lib/toast.ts` 去重、变体区分与硬容量上限裁剪反证 T61；
+> ⑥抽取 isSpecialUrl 过滤无外网图标协议，tools.ts isRoot 增强虚拟根 id 0 防护 T63，导出并加固 assertNoCycle 循环嵌套防护 T64，chat-budget 增加负数零预算防御，bookmarkStore collapseOthers 保持自身展开 T65，deletion-executor 收尾对齐 expectedRunId 防护，turn-plan parseArgs 数组防护与 applyPlan 反证 T66，client isRetriableError 重试状态码矩阵 T67，context-menu buildInstruction 指令装配矩阵 T68，全量测试扩充至 441 项全绿，行为反证扩充至 135 条全绿。
 > **v0.2.22** 收口 `docs/error-handling-audit.md` 最后两处细节（`clipboard.ts` 注释误导修正、`themeStore.load` 读取失败不静默回落并弹提示），T59 三条用例 + 1 条反证。
 > **v0.2.21** 修掉「轮次在等待计划确认时被中止/抢占」造成的挂起与撤销日志丢失——
 > `requestPlanApprovalWithAbort` 与 abort 信号赛跑（按未批准结算且清理条目），`chat:send` 抢占上一条也进行结算；

@@ -41,8 +41,8 @@ export async function executeDeletions(items: DeletionItem[]): Promise<DeletionO
   try {
     return await runDeletions(items);
   } finally {
-    // 必须收尾：留下活动事务会把后续操作串进上一轮
-    if (ownsTransaction) await endUndoTransaction();
+    // 必须收尾：只结束自己开启的 deletions:manual 事务，防关闭并发轮次
+    if (ownsTransaction) await endUndoTransaction('deletions:manual');
   }
 }
 

@@ -27,7 +27,8 @@ type BNode = chrome.bookmarks.BookmarkTreeNode;
  * @param position 落在该行上方（插到它前面）还是下方（插到它后面）
  */
 export function resolveDropIndex(rowIndex: number, position: 'above' | 'below'): number {
-  return position === 'above' ? rowIndex : rowIndex + 1;
+  const safe = Number.isFinite(rowIndex) ? Math.max(0, Math.floor(rowIndex)) : 0;
+  return position === 'above' ? safe : safe + 1;
 }
 
 /** 目标 id 是否在 node 的子树内（不含 node 自身） */

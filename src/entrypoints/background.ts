@@ -11,7 +11,7 @@ import { ChatError, testConnection } from '@/lib/ai/client';
 import { ensureRoots } from '@/lib/ai/tools';
 import { recoverInterruptedTransaction } from '@/lib/undo/recorder';
 import { toolbarClear, toolbarError } from '@/lib/ai/toolbar-hint';
-import { createPlanApprovalRegistry } from '@/lib/ai/plan-approval';
+import { createPlanApprovalRegistry, requestPlanApprovalWithAbort } from '@/lib/ai/plan-approval';
 import {
   handleContextMenuClick as runContextMenuClick,
   type ContextMenuClickInfo,
@@ -140,6 +140,8 @@ export default defineBackground(() => {
       if (raw.type === 'chat:send') {
         // 同一 Port 连续发送时，取消上一次未完成的流式
         abort?.abort();
+        // 上一条若停在计划确认上：abort 不会让它的 await 返回，这里补一次结算（纵深防御）
+        planApprovals.cancelAll();
         const ctrl = new AbortController();
         abort = ctrl;
         void handleChatSend(port, raw, ctrl.signal, planApprovals).finally(() => {
@@ -414,7 +416,13 @@ async function handleChatSend(
       // 计划模式的真实确认通道：发出 chat:plan 后等这个连接上的 chat:plan_decision；
       // 端口断开/取消时由登记表按"未批准"结算（绝不挂死一轮）
       requestPlanApproval: (steps, messageId) =>
-        planApprovals.request(messageId, steps, (m) => safePost(port, m)),
+        requestPlanApprovalWithAbort(
+          planApprovals,
+          messageId,
+          steps,
+          (m) => safePost(port, m),
+          signal,
+        ),
     });
   } catch (e) {
     if (signal.aborted) {

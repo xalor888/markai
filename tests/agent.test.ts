@@ -6399,6 +6399,90 @@ function ok(name: string, fn: () => void) {
     });
   }
 
+  /* ── T58: 等待确认时被中止/抢占，不得挂起、不得偷走新轮次的事务 ── */
+  console.log('\n[T58] 中止时的结算与收尾');
+  {
+    const { beginUndoTransaction, endUndoTransaction, UNDO_STORAGE_KEY, UNDO_PENDING_KEY, resetUndoTransactionForTest } =
+      await import('../src/lib/undo/recorder');
+    const clear = () => {
+      storageMap.delete(UNDO_STORAGE_KEY);
+      storageMap.delete(UNDO_PENDING_KEY);
+      resetUndoTransactionForTest();
+      resetMockCalls();
+    };
+
+    // ── A. 停在计划确认时被 abort：必须结束，且未决登记项要清掉 ──
+    const { createPlanApprovalRegistry, requestPlanApprovalWithAbort } = await import(
+      '../src/lib/ai/plan-approval'
+    );
+    const reg = createPlanApprovalRegistry();
+    let posted = 0;
+    const ctrlA = new AbortController();
+    // 直接用**生产实现**，不要用测试里的仿制品——否则断言只证明了测试自己
+    const requestWithAbort = (messageId: string, steps: never[], signal: AbortSignal) =>
+      requestPlanApprovalWithAbort(
+        reg,
+        messageId,
+        steps,
+        () => {
+          posted += 1;
+        },
+        signal,
+      );
+
+    clear();
+    sseQueue = [
+      toolRound([
+        { id: 'c-d', name: 'submit_plan', args: { steps: [{ tool: 'create_folder', summary: '建文件夹', count: 1 }] } },
+        { id: 'c-f', name: 'create_folder', args: { parentId: '1', title: 'T58-A' } },
+      ]),
+      finalRound(),
+    ];
+    const turnA = runTurnWith('建个文件夹', {
+      config: { planMode: true },
+      requestPlanApproval: (steps, messageId) =>
+        requestWithAbort(messageId, steps as never[], ctrlA.signal),
+    });
+    // 等它真的停在确认处，再 abort
+    for (let i = 0; i < 50 && posted === 0; i++) await new Promise((r) => setTimeout(r, 5));
+    ctrlA.abort();
+    const settled = await Promise.race([
+      turnA.then(() => 'done'),
+      new Promise((r) => setTimeout(() => r('timeout'), 1500)),
+    ]);
+    ok('轮次停在计划确认时被 abort，必须能结束（不能永远挂起）', () =>
+      assert.equal(settled, 'done', 'abort 后该轮应结束'),
+    );
+    ok('abort 后未决的登记项必须被清掉（不泄漏）', () =>
+      assert.equal(reg.pendingCount(), 0, `登记表应清空，实际 ${reg.pendingCount()}`),
+    );
+    ok('被 abort 的轮次零写入', () =>
+      assert.equal(mockCalls.create, 0, `abort 后不该有写入，实际 ${mockCalls.create}`),
+    );
+    clear();
+
+    // ── B. 迟到的旧轮次收尾，不得关闭新轮次的事务 ──
+    clear();
+    await beginUndoTransaction('run-B');
+    // 模拟"还在跑的轮次 B"记录了操作
+    const { jCreate } = await import('../src/lib/undo/mutations');
+    await jCreate({ parentId: '1', title: 'T58-B1' });
+    // 旧轮次 A 迟到苏醒，执行它自己的收尾
+    const stale = await endUndoTransaction('run-A');
+    ok('迟到的旧轮次收尾不得产出撤销点，也不得关闭新轮次的事务', () =>
+      assert.equal(stale, null, 'runId 不匹配时不该收尾'),
+    );
+    // 新轮次 B 继续写：仍必须被记录
+    await jCreate({ parentId: '1', title: 'T58-B2' });
+    const bPoint = await endUndoTransaction('run-B');
+    ok('被迟到收尾打扰后，新轮次的操作仍然完整进入它自己的撤销点', () => {
+      assert.ok(bPoint, 'B 轮应有撤销点');
+      assert.equal(bPoint!.runId, 'run-B', '点必须属于 B 轮');
+      assert.equal(bPoint!.ops.length, 2, `B 的两次写入都要被记录，实际 ${bPoint!.ops.length}`);
+    });
+    clear();
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

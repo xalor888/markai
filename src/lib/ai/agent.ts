@@ -204,7 +204,8 @@ export async function runAgentTurn(params: AgentTurnParams): Promise<void> {
   try {
     await runAgentTurnInner(params);
   } finally {
-    await endUndoTransaction();
+    // 只收尾**自己**这一轮的事务：被抢占后迟到苏醒时不得把新轮次的事务一起关掉
+    await endUndoTransaction(params.messageId);
   }
 }
 

@@ -564,7 +564,7 @@ const cases = [
   {
     name: 'agent 不结束事务（撤销点永不落盘）',
     file: 'src/lib/ai/agent.ts',
-    from: '  } finally {\n    await endUndoTransaction();\n  }',
+    from: '  } finally {\n    // 只收尾**自己**这一轮的事务：被抢占后迟到苏醒时不得把新轮次的事务一起关掉\n    await endUndoTransaction(params.messageId);\n  }',
     to: '  } finally {\n    // reverted\n  }',
     expectFail: ['Agent 轮次自动产生撤销点'],
   },
@@ -630,6 +630,20 @@ const cases = [
     from: '  const usedTokens = () => estimateRequestTokens(apiMessages);',
     to: '  const usedTokens = () => fixedOverheadTokens() + estimateRequestTokens(apiMessages);',
     expectFail: ['预算记账正确时工具循环继续'],
+  },
+  {
+    name: '计划确认不再与 abort 赛跑（轮次被中止后永久挂起）',
+    file: 'src/lib/ai/plan-approval.ts',
+    from: "    signal.addEventListener('abort', onAbort, { once: true });",
+    to: '    void onAbort;',
+    expectFail: ['轮次停在计划确认时被 abort，必须能结束（不能永远挂起）'],
+  },
+  {
+    name: 'endUndoTransaction 不再校验轮次（迟到的收尾会偷走新轮次的事务）',
+    file: 'src/lib/undo/recorder.ts',
+    from: '  if (expectedRunId !== undefined && tx && tx.runId !== expectedRunId) return null;',
+    to: '  if (false) return null;',
+    expectFail: ['迟到的旧轮次收尾不得产出撤销点，也不得关闭新轮次的事务'],
   },
   {
     name: '预授权不再看已批准规模（声明 3 条却放行 200 条）',

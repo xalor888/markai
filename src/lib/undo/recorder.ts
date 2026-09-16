@@ -232,8 +232,12 @@ export function activeOpCount(): number {
  * 结束当前事务并落盘。
  * 没有任何写操作的轮次不会产生撤销点（避免出现「撤销 0 项」的空按钮）。
  */
-export async function endUndoTransaction(): Promise<UndoPoint | null> {
+export async function endUndoTransaction(expectedRunId?: string): Promise<UndoPoint | null> {
   const tx = active;
+  // 迟到的收尾不得关闭**别的轮次**的事务：不匹配就不动它。
+  // （没有这条时，被抢占后迟到苏醒的旧轮次会把新轮次的事务提前收尾，
+  //   新轮次之后的写操作因 active===null 静默丢失撤销记录。）
+  if (expectedRunId !== undefined && tx && tx.runId !== expectedRunId) return null;
   active = null;
   cancelTrailingFlush();
   if (!tx || tx.ops.length === 0) return null;

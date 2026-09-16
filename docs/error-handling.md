@@ -34,6 +34,7 @@
 | 主题保存失败静默丢弃 | `themeStore.setTheme` 的 catch 为空：主题当次生效但没落盘，重启后「自己变回去了」，与设置页（`configStore` 有警示）口径不一致 | 本次切换照常生效，同时弹 destructive「主题设置没有保存成功」并说明重启后可能回退（T51 + 反证） |
 | 快捷键打开侧边栏失败静默 | Ctrl+Shift+M 的 `sidePanel.open` 失败是空 catch——**按了没反应** | 复用「不依赖 storage 的工具栏提示」通路（抽出可测的 `lib/ai/toolbar-hint.ts`），并让右键指令失败提示与它共用同一实现（T52 + 反证） |
 | 批量移动把「部分完成」说成「整体失败」 | `bookmark-tree` 拖入文件夹与 `bookmark-list` 拖放用顺序 `await` 循环 +一句笼统的「移动失败」：第 3 项抛错时前 2 项**已经移过去了**却不说，用户不知道到底动了几项；同一功能的另外两处（`move-picker`、"移动到其他根文件夹"）却用 `allSettled` 如实报计数——两种口径并存 | 抽出 `src/lib/bookmarks/bulk.ts`：`moveMany` 逐项独立计数（含首个失败原因）、`describeBulk` 统一话术（全成功 success / 部分成功「已移动 X 项，Y 项失败」/ 全失败「移动失败」/ 空输入不谎报），四处调用点统一走它（T49 十条 + 源码守卫；两条反证） |
+| 等待计划确认时被中止/抢占导致挂起与事务被偷 | 轮次 A 等计划确认时被新消息抢占（只调用了 abort）未结算未决计划导致永久挂起；后续苏醒后 finally 的 endUndoTransaction 不校验 runId，直接关闭新轮次 B 的事务，导致 B 后续操作静默不进撤销日志 | `requestPlanApprovalWithAbort` 与 abort 信号赛跑按未批准结算并清理条目；`chat:send` 抢占上一条也进行结算；`endUndoTransaction` 增加 `expectedRunId` 校验，不匹配绝不关闭他人事务（T58 五条 + 2 条反证） |
 | 打开链接失败完全不可见 | UI 里近二十处 `void chrome.tabs.create({...}).catch(() => {})`：在书签树按回车、点「打开全部」失败时**没有任何反应**；批量路径还会**无条件**弹「已打开 N 个标签页」，把可能一个都没打开说成成功 | 统一走 `src/lib/open-url.ts`：`openUrl` 失败弹 destructive；`openUrls` 按**实际**结果报「已打开 X 个，Y 个失败」/「打开失败」，全成功才 success；提示只显示 URL 来源（origin），不泄漏路径与查询参数；弹窗补挂 `ToastViewport` 并改为「打开成功才关弹窗」（T48 十一条 + 源码守卫 + 两条反证） |
 | 撤销新建文件夹会连带删除后来内容 | `applyOne` 的文件夹 `create` 逆操作是 `removeTree`（无条件递归）：若该文件夹在本轮**之外**被放入内容（手工/另一窗口/未记账的移动），撤销会连内容一起删，而本轮快照里没有它们——不可恢复 | 回放前新增**只读预检** `findFolderRemovalConflicts()`：列出文件夹现存子项，排除「本点自己的 `create` 会删掉」与「本点的 `move`/`moveBatch` 会移回原处（`fromParentId !== 该文件夹`）」两类，剩余即冲突 → 零副作用拒绝并**保留**撤销点，提示用户先移走内容；`applyOne` 同时改为非递归 `remove` 作纵深防御（T43 九条；反证回滚预检必须变红） |
 | 撤销历史「跳选较早点」 | `applyUndo(id)` 接受任意仍在列表中的点，只逆转该点自己的操作却不回退更晚的点；而"撤销新建文件夹"是 `removeTree` 无条件递归 → 「A 新建 F、B 把已有 X 移入 F、跳选撤 A」会连 X 一起删，且 A 的快照里没有 X | `applyUndo` 只接受当前 `points[0]`：非最新点在任何 `chrome.bookmarks.*`、顺序还原与 `takeUndoPoint` 之前零副作用拒绝并保留点；历史面板如实禁用较早记录并给出「请先撤销较新的操作」（T42 八条；反证回滚该检查必须变红） |
@@ -147,6 +148,6 @@
 
 ## 4. 怎么验证这些结论不是嘴上说说
 
-- 每条修复都配了"回滚实现 → 对应测试必须变红"的反证用例（`node scripts/falsify.mjs`，当前 115 条，真实 exit=0 才算通过）；
+- 每条修复都配了"回滚实现 → 对应测试必须变红"的反证用例（`node scripts/falsify.mjs`，当前 117 条，真实 exit=0 才算通过）；
 - 反证脚本会**响亮失败**在三种情况下：测试是假绿、回滚后仍然全绿、锚点失效（SKIP）——它抓出过本项目自己写的多处测试缺陷；
 - 涉及真实 API 语义的地方（`getBytesInUse`、`chrome.storage` 结构化克隆、`bookmarks.move` 下标）都以实测或权威源码为准，替身按同样语义建模。

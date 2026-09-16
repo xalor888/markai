@@ -33,6 +33,47 @@ export interface PlanApprovalRegistry {
   pendingCount(): number;
 }
 
+/**
+ * 发起一次计划确认，并**与中止信号赛跑**。
+ *
+ * 为什么必须有这个：轮次停在 `await` 确认上时，`signal.abort()` 本身**不会**让 await 返回——
+ * 于是那一轮的 `finally` 永不执行、轮次永久挂起；更糟的是它迟到苏醒时会把**新轮次**的事务
+ * 一起收尾掉，让新轮次之后的写操作静默丢失撤销记录（实测复核过这条链）。
+ * 中止即按「未批准」结算，并清掉登记项（否则登记表泄漏）。
+ */
+export function requestPlanApprovalWithAbort(
+  registry: PlanApprovalRegistry,
+  messageId: string,
+  steps: PlanApprovalStep[],
+  post: (msg: { type: 'chat:plan'; messageId: string; steps: PlanApprovalStep[] }) => void,
+  signal: AbortSignal,
+): Promise<boolean> {
+  // 只结算**本轮**的条目：用 cancelAll 会把别的轮次还挂着的计划一起否掉
+  // （新一轮抢占旧一轮是另一条路径，由调用方在那时 cancelAll）
+  const settleAsRejected = () => {
+    registry.resolve(messageId, false);
+  };
+  if (signal.aborted) {
+    settleAsRejected();
+    return Promise.resolve(false);
+  }
+  return new Promise<boolean>((resolve) => {
+    let done = false;
+    const finish = (v: boolean) => {
+      if (done) return;
+      done = true;
+      signal.removeEventListener('abort', onAbort);
+      resolve(v);
+    };
+    const onAbort = () => {
+      settleAsRejected();
+      finish(false);
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    void registry.request(messageId, steps, post).then(finish);
+  });
+}
+
 export function createPlanApprovalRegistry(): PlanApprovalRegistry {
   const pending = new Map<string, (approved: boolean) => void>();
 

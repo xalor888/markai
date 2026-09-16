@@ -6483,6 +6483,52 @@ function ok(name: string, fn: () => void) {
     clear();
   }
 
+  /* ── T59: 主题读取失败必须可见 + 剪贴板注释真实对齐 ── */
+  console.log('\n[T59] 主题读取失败与剪贴板细节');
+  {
+    const g = globalThis as unknown as Record<string, unknown>;
+    const origWindow = g.window;
+    const origDocument = g.document;
+    g.window = { matchMedia: () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }) };
+    g.document = { documentElement: { classList: { toggle: () => {} } } };
+
+    const { useThemeStore } = await import('../src/stores/themeStore');
+    const { useToastStore } = await import('../src/lib/toast');
+
+    const storageObj = chrome.storage.local as unknown as Record<string, unknown>;
+    const origGet = storageObj.get;
+    storageObj.get = async () => {
+      throw new Error('Storage read failure');
+    };
+
+    try {
+      useToastStore.setState({ toasts: [] });
+      await useThemeStore.getState().load();
+      const toasts = useToastStore.getState().toasts;
+
+      ok('themeStore.load 读取失败时必须给出警告提示（不静默回落）', () => {
+        const t = toasts.find((x) => x.title === '无法读取主题设置');
+        assert.ok(t, `应有无法读取主题提示，实际 ${JSON.stringify(toasts)}`);
+        assert.equal(t!.variant, 'destructive');
+        assert.match(t!.description ?? '', /系统默认主题/);
+      });
+      ok('themeStore.load 读取失败时仍安全降级到 system（界面不崩）', () => {
+        assert.equal(useThemeStore.getState().theme, 'system');
+      });
+    } finally {
+      storageObj.get = origGet;
+      g.window = origWindow;
+      g.document = origDocument;
+    }
+
+    // 源码守卫：clipboard.ts 不得再包含误导性的 "// 忽略"
+    const { readFileSync } = await import('node:fs');
+    const clipSrc = readFileSync('src/lib/clipboard.ts', 'utf-8');
+    ok('clipboard.ts 注释真实对齐，不包含误导性的 "// 忽略"', () => {
+      assert.ok(!clipSrc.includes('// 忽略'), '不得再有误导性的 // 忽略 注释');
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

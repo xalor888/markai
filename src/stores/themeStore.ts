@@ -23,9 +23,13 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
       const saved = data[THEME_KEY] as Theme | undefined;
       set({ theme: saved ?? 'system' });
       applyTheme(saved ?? 'system');
-    } catch {
+    } catch (e) {
       set({ theme: 'system' });
       applyTheme('system');
+      pushToast('无法读取主题设置', {
+        description: `${e instanceof Error ? e.message : String(e)}；已临时使用系统默认主题。`,
+        variant: 'destructive',
+      });
     }
   },
 

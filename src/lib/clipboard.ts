@@ -28,7 +28,7 @@ export async function copyText(text: string, label = '已复制'): Promise<boole
         return true;
       }
     } catch {
-      // 忽略
+      // execCommand 也失败，向下穿透到统一的失败提示
     }
     pushToast('复制失败', { variant: 'destructive' });
     return false;

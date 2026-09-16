@@ -872,6 +872,13 @@ const cases = [
     to: '    const history = get().messages.slice(-HISTORY_LIMIT);',
     expectFail: ['重试时历史排除被重试的 user 消息'],
   },
+  {
+    name: 'themeStore.load 读取失败又被静默吞掉（回落到 system 却不告知）',
+    file: 'src/stores/themeStore.ts',
+    from: "      pushToast('无法读取主题设置', {",
+    to: "      void 0; if (false) pushToast('无法读取主题设置', {",
+    expectFail: ['themeStore.load 读取失败时必须给出警告提示（不静默回落）'],
+  },
 ];
 
 let allGood = true;

@@ -6269,16 +6269,22 @@ function ok(name: string, fn: () => void) {
     // ── C. 超出已批准规模 → 必须再次确认 ──
     let approvalsC = 0;
     let mutationsAtSecondAsk = -1;
-    const bigIds = Array.from({ length: 200 }, (_, i) => `t57-${i}`);
+    // 用**真实**书签 id：虚构 id 会让 move 失败，那样"一个撤销点"就无从谈起（第一版就栽在这）
+    const realIds: string[] = [];
+    for (let i = 0; i < 3; i++) {
+      const n = await mockBookmarks.create({ parentId: '1', title: `T57-real-${i}`, url: `https://t57.test/${i}` });
+      realIds.push(n.id);
+    }
+    const bigIds = realIds.slice(0, 2); // 2 条 > 已批准的 1 条
     sseQueue = [
       toolRound([
-        { id: 'c-d', name: 'submit_plan', args: { steps: [{ tool: 'move_bookmarks', summary: '移动 3 条', count: 3 }] } },
-        // 第一回次：3 条（在已批准范围内）
-        { id: 'c-m1', name: 'move_bookmarks', args: { bookmarkIds: ['a', 'b', 'c'], parentId: '1' } },
+        { id: 'c-d', name: 'submit_plan', args: { steps: [{ tool: 'move_bookmarks', summary: '移动 1 条', count: 1 }] } },
+        // 第一回次：1 条（在已批准范围内）
+        { id: 'c-m1', name: 'move_bookmarks', args: { ids: [realIds[0]!], parentId: '1' } },
       ]),
-      // 第二回次：200 条（**远超**声明上限）
+      // 第二回次：2 条（**超出**声明上限 1）
       toolRound([
-        { id: 'c-m2', name: 'move_bookmarks', args: { bookmarkIds: bigIds, parentId: '1' } },
+        { id: 'c-m2', name: 'move_bookmarks', args: { ids: bigIds, parentId: '1' } },
       ]),
       finalRound(),
     ];
@@ -6293,9 +6299,19 @@ function ok(name: string, fn: () => void) {
     ok('实际规模超过已批准上限时必须再次确认（批准范围不能被静默超出）', () =>
       assert.equal(approvalsC, 2, `应问两次（首次批准 + 超范围再确认），实际 ${approvalsC}`),
     );
-    ok('再次确认发生在超范围那次执行**之前**（不是先做后问）', () =>
-      assert.equal(mutationsAtSecondAsk, 0, `第二次询问时还不该有 move，实际 ${mutationsAtSecondAsk}`),
+    ok('再次确认发生在超范围那批执行**之前**（不是先做后问）', () => {
+      // 第二次询问时：第一回次那 1 条（在已批准范围内）已经移完，但超范围的 2 条还没动
+      assert.equal(mutationsAtSecondAsk, 1, `第二次询问时只该有首回次的 1 次 move，实际 ${mutationsAtSecondAsk}`);
+    });
+    ok('两次批准后实际执行了 1 + 2 = 3 次移动', () =>
+      assert.equal(mockCalls.move, 3, `应共 3 次 move，实际 ${mockCalls.move}`),
     );
+    ok('超范围重确认之后，一轮仍只产生一个撤销点（不因多问一次就多一个点）', () => {
+      const raw = storageMap.get(UNDO_STORAGE_KEY) as { points?: { ops: unknown[] }[] } | undefined;
+      const points = raw?.points ?? [];
+      assert.equal(points.length, 1, `应恰好一个撤销点，实际 ${points.length}`);
+      assert.ok((points[0]?.ops.length ?? 0) > 0, '点里应覆盖实际执行的操作');
+    });
     clear();
 
     // ── D. 对照：规模不超过上限时不重复确认（防止把功能做成"一律重问"） ──

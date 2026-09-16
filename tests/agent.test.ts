@@ -6252,18 +6252,47 @@ function ok(name: string, fn: () => void) {
       assert.equal(plan[0]!.count, 2);
     });
 
-    // ── B. 声明条数进入 chat:plan 载荷 ──
+    // ── B. 声明条数必须真的进入 chat:plan 载荷 ──
     const declared = { steps: [{ tool: 'create_bookmark', summary: '新建 3 条', count: 3 }] };
-    const planEvents: { steps: { count: number; summary: string }[] }[] = [];
+    const planEvents: ChatOutbound[] = [];
     sseQueue = [
       toolRound([{ id: 'c-d', name: 'submit_plan', args: declared }]),
       finalRound(),
     ];
     await runTurnWith('先说计划', {
       config: { planMode: true },
+      events: planEvents,
       requestPlanApproval: async () => false,
     });
-    void planEvents;
+    const planEvt = planEvents.find((e) => e.type === 'chat:plan') as
+      | { type: 'chat:plan'; steps: { count: number; countDeclared: boolean; summary: string }[] }
+      | undefined;
+    ok('声明的条数进入 chat:plan 载荷（不是恒为 1）', () => {
+      assert.ok(planEvt, '应有 chat:plan 事件');
+      assert.equal(planEvt!.steps.length, 1);
+      assert.equal(planEvt!.steps[0]!.count, 3, '应带上声明的 3 条，而不是退回 1');
+      assert.equal(planEvt!.steps[0]!.countDeclared, true, '应标记为"有依据"');
+    });
+    clear();
+
+    // ── B2. 未声明条数时载荷必须标"无依据"（界面据此显示"条数未声明"） ──
+    const planEvents2: ChatOutbound[] = [];
+    sseQueue = [
+      toolRound([{ id: 'c-d2', name: 'submit_plan', args: { steps: [{ tool: 'create_bookmark', summary: '建点东西' }] } }]),
+      finalRound(),
+    ];
+    await runTurnWith('先说计划', {
+      config: { planMode: true },
+      events: planEvents2,
+      requestPlanApproval: async () => false,
+    });
+    const planEvt2 = planEvents2.find((e) => e.type === 'chat:plan') as
+      | { type: 'chat:plan'; steps: { count: number; countDeclared: boolean }[] }
+      | undefined;
+    ok('未声明条数时载荷标记为"无依据"（界面才能如实写"条数未声明"）', () => {
+      assert.ok(planEvt2, '应有 chat:plan 事件');
+      assert.equal(planEvt2!.steps[0]!.countDeclared, false, '没声明就不能标成有依据');
+    });
     clear();
 
     // ── C. 超出已批准规模 → 必须再次确认 ──

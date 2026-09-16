@@ -369,6 +369,13 @@ const cases = [
     expectFail: ['隐私说明覆盖了三件必须说的事'],
   },
   {
+    name: '隐私说明隐瞒在途快照与终态列表',
+    file: 'docs/privacy.md',
+    from: '| `markai.undo.pending` | 崩溃/断电恢复用的在途事务快照：正常收尾、恢复完成或用户清空时自动删除 |',
+    to: '',
+    expectFail: ['隐私说明覆盖了三件必须说的事'],
+  },
+  {
     name: 'release workflow 又发未验证的 Firefox 产物',
     file: '.github/workflows/release.yml',
     from: '      - name: 打包 Chrome zip',

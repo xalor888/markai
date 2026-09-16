@@ -33,7 +33,7 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
 | 测试 | `npm test` | **417 项全绿**（… → 409 → 414 → 417） |
 | 构建 | `npm run build` | 通过，`.output/chrome-mv3` 788.17 kB |
-| 版本 | `package.json` | **0.2.21（已发版）** |
+| 版本 | `package.json` | **0.2.22（已发版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
 | 发布 | `.github/workflows/release.yml` | `v*` tag → 构建 + Release |
 
@@ -337,7 +337,8 @@ sort_folder + merge_folders 再撤销）抓出**并发批量移动**的坑——
 > 版本节奏（已执行）：P0 的修复没有单独发版，与 P1（撤销）一起打成 **v0.2.2**（头部功能才值得一个版本号）；
 > P2 修掉的撤销缺陷在 v0.2.2 里**已经发布**，因此单独发了补丁版 **v0.2.3**（含说明"修了什么、是否该升级"的发布说明）。
 > **v0.2.4** 收了「撤销覆盖删除」与容量护栏两块（发布说明里写明了升级须知：v0.2.3 及更早写下的旧撤销点没有删除快照，会被如实拒绝整轮撤销）。
-> **未发版（进行中）**：收口 `docs/error-handling-audit.md` 最后两处细节（`clipboard.ts` 注释误导修正、`themeStore.load` 读取失败不静默回落并弹提示），T59 三条用例 + 1 条反证。
+> **未发版（进行中）**：P4 分发就绪推进——`docs/privacy.md` 补全 `markai.config`（planMode）、`markai.undo`（runId 终态列表）、`markai.undo.pending`（在途事务快照）的存储与清除披露，并在测试中增加完整性守卫与反证（119 条反证）。
+> **v0.2.22** 收口 `docs/error-handling-audit.md` 最后两处细节（`clipboard.ts` 注释误导修正、`themeStore.load` 读取失败不静默回落并弹提示），T59 三条用例 + 1 条反证。
 > **v0.2.21** 修掉「轮次在等待计划确认时被中止/抢占」造成的挂起与撤销日志丢失——
 > `requestPlanApprovalWithAbort` 与 abort 信号赛跑（按未批准结算且清理条目），`chat:send` 抢占上一条也进行结算；
 > `endUndoTransaction` 增加 `expectedRunId` 校验，迟到苏醒的旧轮次绝无法关闭新轮次的事务，撤销日志不再被静默截断（T58 五条 + 2 条反证）。

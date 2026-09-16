@@ -3083,6 +3083,9 @@ function ok(name: string, fn: () => void) {
       assert.match(privacyDoc, /HEAD/, '要披露死链检测会联系书签站点');
       assert.match(privacyDoc, /清空本地数据/, '要给出清除入口');
       assert.match(privacyDoc, /明文/, '要如实说明 API Key 是明文存储');
+      assert.match(privacyDoc, /markai\.undo\.pending/, '要如实说明在途快照键');
+      assert.match(privacyDoc, /terminalRunIds/, '要如实说明终态列表');
+      assert.match(privacyDoc, /planMode/, '要如实说明计划模式设置');
     });
 
     // 隐私说明向用户承诺「设置页可以清除撤销记录」——这句话必须有测试兜着，

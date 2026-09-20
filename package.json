@@ -3,7 +3,7 @@
   "description": "MarkAI —— 智能书签管家（自由对话的 AI Agent）",
   "private": true,
   "license": "MIT",
-  "version": "0.2.23",
+  "version": "0.2.24",
   "type": "module",
   "scripts": {
     "dev": "wxt",

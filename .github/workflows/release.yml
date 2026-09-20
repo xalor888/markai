@@ -41,6 +41,45 @@ jobs:
       # 不再发布 Firefox 产物：它从未在真实 Firefox 里验证过（见 docs/release.md）。
       # 重新纳入的条件写在同处：先在 Firefox 里装一次并跑通核心路径，再加回这一步。
 
+      # 产物的"健康探针"（docs/release.md §3 那一步的机器化版本）。
+      # 在此之前，"产物是对的"只靠人发版后手动解包核对——漏做也没人拦。
+      # 现在不对就红在这里，Release 根本轮不到创建。
+      - name: 校验产物（manifest 版本 / MV3 / 入口文件）
+        run: |
+          set -euo pipefail
+          # 用版本号拼出确切文件名，不写 `.output/*.zip | head -1`：
+          # `.output` 会攒下历史上每一版的 zip（本地尤其明显），取第一个会校验到旧产物。
+          VERSION=$(node -e 'process.stdout.write(JSON.parse(require("fs").readFileSync("package.json","utf8")).version)')
+          ZIP=".output/markai-${VERSION}-chrome.zip"
+          if [ ! -f "$ZIP" ]; then
+            echo "找不到预期产物：$ZIP" >&2
+            ls -la .output >&2
+            exit 1
+          fi
+          echo "待校验产物：$ZIP"
+          rm -rf /tmp/markai-check && mkdir -p /tmp/markai-check
+          unzip -q "$ZIP" -d /tmp/markai-check
+          VERSION="$VERSION" node -e '
+            const fs = require("fs");
+            const dir = "/tmp/markai-check";
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const m = JSON.parse(fs.readFileSync(dir + "/manifest.json", "utf8"));
+            const need = ["background.js", "sidepanel.html", "page.html", "popup.html", "options.html"];
+            const missing = need.filter((f) => !fs.existsSync(dir + "/" + f));
+            if (m.version !== process.env.VERSION) {
+              throw new Error("manifest 版本 " + m.version + " 与 package.json " + pkg.version + " 不一致");
+            }
+            if (process.env.GITHUB_REF_TYPE === "tag") {
+              const expect = process.env.GITHUB_REF_NAME.replace(/^v/, "");
+              if (m.version !== expect) {
+                throw new Error("manifest 版本 " + m.version + " 与 tag " + process.env.GITHUB_REF_NAME + " 不一致");
+              }
+            }
+            if (m.manifest_version !== 3) throw new Error("manifest_version 必须是 3，实际 " + m.manifest_version);
+            if (missing.length) throw new Error("入口文件缺失：" + missing.join(", "));
+            console.log("产物校验通过：version=" + m.version + " / MV" + m.manifest_version + " / permissions=" + JSON.stringify(m.permissions));
+          '
+
       - name: 上传构建产物
         uses: actions/upload-artifact@v5
         with:
@@ -53,7 +92,9 @@ jobs:
           include-hidden-files: true
           retention-days: 14
 
-      # tag 触发时发布 GitHub Release；手动触发同样发布（用 package.json 版本号）
+      # 只有 tag 触发才发布 GitHub Release。
+      # 手动触发（workflow_dispatch）到这一步为止：构建 + 上传 artifact，**不**建 Release。
+      # （此前的注释写的是"手动触发同样发布"，与 if 条件相反，是按注释发不出东西的坑，2026-09-20 改正。）
       - name: 创建 GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2

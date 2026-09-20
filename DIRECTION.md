@@ -32,11 +32,11 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | --- | --- | --- |
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
 | 测试 | `npm test` | **468 项全绿**（… → 465 → 468） |
-| 反证 | `node scripts/falsify.mjs` | 161 条**锚点全部静态校验通过**，抽查 8 条 `RED ✔`；**全量未跑**（约 1 小时，且运行期会反复改写工作区源码）——见 §3 末「反证还没跑完」 |
+| 反证 | `node scripts/falsify.mjs` | 161 条**锚点全部静态校验通过**；全量实跑到 15 条时中断（此刻 **15/15 全部 `RED ✔`**，无 `GREEN ✘`、无 `RED?`）；**全量仍未跑完**（一条 ≈ 17 秒，161 条约 46 分钟）——见 §10 |
 | 构建 | `npm run build` | 通过，`.output/chrome-mv3` 851.92 kB（含 `public/store/` 上架素材） |
-| 版本 | `package.json` | **0.2.23（已发版）** |
+| 版本 | `package.json` | **0.2.24（已发版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
-| 发布 | `.github/workflows/release.yml` | `v*` tag → 构建 + Release |
+| 发布 | `.github/workflows/release.yml` | `v*` tag → 构建 + **产物校验** + Release（校验为 v0.2.24 新增的硬门禁） |
 
 **P0 已落地**（见 §3）：15 个文件、+330/−146 行的未提交健壮性修复已补测并入 `main`，
 其中一条被本轮**证伪并纠正**。内容质量抽查后确认方向正确，例如：
@@ -338,6 +338,14 @@ sort_folder + merge_folders 再撤销）抓出**并发批量移动**的坑——
 > 版本节奏（已执行）：P0 的修复没有单独发版，与 P1（撤销）一起打成 **v0.2.2**（头部功能才值得一个版本号）；
 > P2 修掉的撤销缺陷在 v0.2.2 里**已经发布**，因此单独发了补丁版 **v0.2.3**（含说明"修了什么、是否该升级"的发布说明）。
 > **v0.2.4** 收了「撤销覆盖删除」与容量护栏两块（发布说明里写明了升级须知：v0.2.3 及更早写下的旧撤销点没有删除快照，会被如实拒绝整轮撤销）。
+> **v0.2.24**：把 v0.2.23 之后**留在工作区、没发出去**的那批加固真正发布（v0.2.23 的 tag/zip 打的是 441 项 / 135 条的状态），并修好发版通道本身——
+> ①**真实产品 bug：文件夹置顶比较器写反**（`ai/tools.ts` 的 `sort_folder` 与 `bookmark-list.tsx` 的完整页列表都写成 `(b.url?1:0)-(a.url?1:0)`，实测把**书签**排在最前，与注释/README 的声称相反，两处改为 `(a…)-(b…)`）；
+> ②`toSnapshot` 递归深度上限 off-by-one（`depth > 64` 会产出 depth 65 的节点，而 `restoreSubtree` 在同界拒绝——「存得下、还原不了」，改为 `depth >= 64`）；
+> ③反证门禁修好 4 处失效锚点与 3 处 `expectFail` 白名单漂移，并给脚本加**中断自保**（`.falsify-pending.json` + 信号还原 + 启动自愈）与 `--only=关键字` 定向复核；
+> ④补上 MIT 许可（LICENSE + `package.json` + README「许可」章节，此前公开仓库等于「保留所有权利」）；
+> ⑤清掉 `public/store/test.txt`——它此前**真的会打进扩展包**（`npm run build` 清单里就有这一行）；
+> ⑥release workflow 新增「校验产物」**硬门禁**（zip 内 `manifest.json` 与 `package.json`／tag 三方对齐 + MV3 + 五个入口文件，不满足则 Release 根本不会被创建），并改正 `workflow_dispatch` 那行与 `if` 条件相反的误导注释（该分支到上传 artifact 为止，**不建 Release**）。
+> 本地全绿：`compile` / `npm test` 468 项 / `npm run build` 851.92 kB。
 > **v0.2.23**：P4 分发就绪推进、关键缺陷修复与底层工具链加固——
 > ①修复 `resolveConfig` 遗漏 `planMode` 导致后台无法激活计划模式的关键缺陷（T62）；
 > ②编制 Chrome Web Store 上架审核材料清单（`docs/store-listing.md`）与纯 Node 推广横幅生成器（`scripts/generate-promo-tiles.mjs`，440x280 / 1400x560 官方规格）；
@@ -476,4 +484,35 @@ API 额度耗尽失败（403 `insufficient_user_quota`，余额 −$42.96），�
 
 **其他待办**：`public/store/test.txt`（4 字节，内容 `test`）是残留垃圾，会被打进扩展包；
 `docs/error-handling.md` 与 `release-notes` 里的历史计数未逐处复核；真机验证（P3）仍受环境限制。
+
+## 10. v0.2.24 发版记录（2026-09-20）
+
+**这一版发的是什么**：§9 那批「已写完但没发出去」的加固（文件夹置顶真实 bug、`toSnapshot`
+深度 off-by-one、反证门禁自保与定向复核、MIT 许可、上架横幅），加上**发版通道本身的两处加固**。
+v0.2.23 的 tag/zip 打的是 441 项测试 / 135 条反证的状态，v0.2.24 才是 468 项 / 161 条这一批的产物。
+
+**反证的真实状态（不粉饰）**：全量 161 条**实跑到了第 15 条**（耗时约 4 分钟，即 **≈17 秒/条**，
+161 条约 **46 分钟**），此刻 **15/15 全部 `RED ✔`**、没有 `GREEN ✘`、没有 `RED?`。
+随后为了把版本发出去而**主动中断**了这次运行（进程被杀后工作区停在回滚态，已用
+`git checkout -- src/` 还原并复验：compile 通过、468 项全绿、构建 851.92 kB——
+**恢复后的全绿本身就是「源码没有被回滚态污染」的证据**，因为被回滚的实现会让对应用例变红）。
+结论：**161 条里 15 条有实测证据，其余 146 条只有「锚点静态校验通过」。**全量仍欠着。
+
+**发版通道的变化（`.github/workflows/release.yml`）**：
+
+1. 新增「校验产物（manifest 版本 / MV3 / 入口文件）」——在 `npm run zip` 之后、创建 Release 之前，
+   把 zip 内的 `manifest.json` 与 `package.json`、（tag 触发时）tag 名三方对齐，并检查 MV3 与
+   `background.js` / `sidepanel.html` / `page.html` / `popup.html` / `options.html` 五个入口是否齐全；
+   任一条不满足即非零退出，**Release 不会被创建**。这就是 `docs/release.md` §3 那步人工核对的机器化版本——
+   从此「产物是对的」不再依赖人记得去解包。
+2. 改正 `workflow_dispatch` 的注释：它此前写着「手动触发同样发布」，而下一步的 `if` 只认
+   `refs/tags/v`，手动触发**永远进不去**。注释与行为相反，照注释理解就会以为手动跑一次能出 Release。
+3. 校验步骤**按 `package.json` 版本号拼确切文件名**，不用 `ls .output/*.zip | head -1`：
+   `.output` 会攒下每一版 zip（本地有 0.2.2→0.2.23 十几个），而 `ls` 是字典序，
+   `markai-0.2.10-chrome.zip` 排在 `markai-0.2.9-chrome.zip` 前面——`head -1` 会校验到**旧产物**。
+   （CI 上 `.output` 干净、碰不到，但这写法一旦被复制到别处就会骗人。）
+   三条路径本地实测：正常通过 / tag 名不符（`v9.9.9`）退出 1 / 产物文件不存在退出 1。
+
+**沿用 §9 的遗留**：18 条 `ok('…', async () => {…})` 用例仍未改（失败会退化成无名 unhandled rejection）；
+真机验证（P3）仍受环境限制；`docs/error-handling.md` 与历史 release-notes 的计数未逐处复核。
 

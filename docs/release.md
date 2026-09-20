@@ -69,6 +69,10 @@ gh run list --limit 1
 gh run watch <run-id> --exit-status
 ```
 
+> 第 3 步的检查**仓库里已经有一份机器化的**：release workflow 的「校验产物（manifest 版本 / MV3 /
+> 入口文件）」会拿 zip 与 `package.json`、tag 三方对齐，不对就红在那里、Release 根本轮不到创建
+> （2026-09-20 加）。本地仍建议跑一遍——把失败挡在推 tag 之前，比发出去再回滚便宜。
+
 ## 3. 验证（不能省的一步）
 
 发版成功的标准是**拿到了可校验的产物**，不是"tag 推上去了"：
@@ -88,6 +92,9 @@ python3 -c "import json;m=json.load(open('unpacked/manifest.json'));print(m['ver
 - `manifest.json` 的 `version` == tag 去掉 `v` 之后的值；
 - `manifest_version` == 3，`permissions` 与 `wxt.config.ts` 一致（权限意外变多 = 事故）；
 - 入口文件齐全：`background.js`、`sidepanel.html`、`page.html`、`popup.html`、`options.html`。
+
+上面这三条现在**同时由 workflow 自己强制**（见 §5 末两条）。手动这一步的用处是：在本地就发现
+问题，而不是推了 tag 之后靠 CI 红。
 
 ## 4. 回滚
 
@@ -133,6 +140,27 @@ README 声称的平台本来也只有 Chrome / Edge。
 
 教训：**"步骤绿了"不等于"事情做成了"**。发版后要看的不是 workflow 的结论，
 而是 run 的 ANNOTATIONS 与 Release 的资产列表。
+
+## 5.5 另外两个已修陷阱（2026-09-20，发 v0.2.24 前核对 workflow 时发现）
+
+**① 注释与 `if` 条件相反：「手动触发同样发布」。**
+workflow_dispatch 那一行注释写的是"手动触发同样发布（用 package.json 版本号）"，而下一步是
+`if: startsWith(github.ref, 'refs/tags/v')`——手动触发时 `github.ref` 是 `refs/heads/main`，
+**永远进不去**。按注释理解就会以为"手动跑一次也能出 Release"，实际跑到上传 artifact 就结束了。
+现在注释如实写明：手动触发**只构建 + 上传 artifact，不建 Release**。
+
+**② 校验产物时用 `ls .output/*.zip | head -1` 会校验到历史版本。**
+`.output` 会攒下每一版打过的 zip（本地跑过十几次就有十几个），`ls` 是**字典序**不是时间序，
+于是 `markai-0.2.10-chrome.zip` 会排在 `markai-0.2.9-chrome.zip` 前面——`head -1` 挑中的是旧版。
+新加的校验步骤因此**按 `package.json` 的版本号拼出确切文件名**，找不到就红（而不是悄悄校验了别的文件）。
+CI 上 `.output` 是干净的、碰不到这个问题，但这条写法一旦被复制到别处（或本地调试）就会骗人。
+
+**③ 校验现在是硬门禁，不是事后人工。**
+「校验产物（manifest 版本 / MV3 / 入口文件）」这一步在 `npm run zip` 之后、创建 Release 之前：
+拿 zip 里的 `manifest.json` 与 `package.json`、以及（tag 触发时）tag 名三方对齐，并检查 MV3 与五个
+入口文件是否齐全，任一条不满足就非零退出——**Release 根本不会被创建**。
+本地已实测三条路径：正常（v0.2.23 产物）通过；tag 名不符（`v9.9.9`）报错退出 1；
+产物文件不存在报错退出 1。
 
 ## 6. 已知边界（如实记录，别当成已解决）
 

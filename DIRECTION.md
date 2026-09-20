@@ -1,7 +1,7 @@
 # DIRECTION — MarkAI 该往哪走
 
 > 本文由 keepgoal 链在无人值守下自主撰写，每完成一个目标会回看并修订。
-> 最后核实时间：2026-09-14（证据见「现状核实」）。
+> 最后核实时间：2026-09-20（证据见「现状核实」）。
 
 ## 0. 一句话
 
@@ -26,14 +26,15 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 
 ## 2. 现状核实
 
-本次（2026-09-14）实跑，非推测：
+本次（2026-09-20）实跑，非推测：
 
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
-| 测试 | `npm test` | **441 项全绿**（… → 439 → 440 → 441） |
-| 构建 | `npm run build` | 通过，`.output/chrome-mv3` 788.17 kB |
-| 版本 | `package.json` | **0.2.23（发版中）** |
+| 测试 | `npm test` | **468 项全绿**（… → 465 → 468） |
+| 反证 | `node scripts/falsify.mjs` | 161 条**锚点全部静态校验通过**，抽查 8 条 `RED ✔`；**全量未跑**（约 1 小时，且运行期会反复改写工作区源码）——见 §3 末「反证还没跑完」 |
+| 构建 | `npm run build` | 通过，`.output/chrome-mv3` 851.92 kB（含 `public/store/` 上架素材） |
+| 版本 | `package.json` | **0.2.23（已发版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
 | 发布 | `.github/workflows/release.yml` | `v*` tag → 构建 + Release |
 
@@ -337,13 +338,13 @@ sort_folder + merge_folders 再撤销）抓出**并发批量移动**的坑——
 > 版本节奏（已执行）：P0 的修复没有单独发版，与 P1（撤销）一起打成 **v0.2.2**（头部功能才值得一个版本号）；
 > P2 修掉的撤销缺陷在 v0.2.2 里**已经发布**，因此单独发了补丁版 **v0.2.3**（含说明"修了什么、是否该升级"的发布说明）。
 > **v0.2.4** 收了「撤销覆盖删除」与容量护栏两块（发布说明里写明了升级须知：v0.2.3 及更早写下的旧撤销点没有删除快照，会被如实拒绝整轮撤销）。
-> **v0.2.23（发版中）**：P4 分发就绪推进、关键缺陷修复与底层工具链加固——
+> **v0.2.23**：P4 分发就绪推进、关键缺陷修复与底层工具链加固——
 > ①修复 `resolveConfig` 遗漏 `planMode` 导致后台无法激活计划模式的关键缺陷（T62）；
 > ②编制 Chrome Web Store 上架审核材料清单（`docs/store-listing.md`）与纯 Node 推广横幅生成器（`scripts/generate-promo-tiles.mjs`，440x280 / 1400x560 官方规格）；
 > ③增强书签拖放 `resolveDropIndex` 负数与非法数值安全钳位防非法移动；
 > ④建立 `src/lib/format.ts` 边界防护与全面单元测试 T60；
 > ⑤建立通知系统 `src/lib/toast.ts` 去重、变体区分与硬容量上限裁剪反证 T61；
-> ⑥抽取 isSpecialUrl 过滤无外网图标协议，tools.ts isRoot 增强虚拟根 id 0 防护 T63，导出并加固 assertNoCycle 循环嵌套防护 T64，chat-budget 增加负数零预算防御，bookmarkStore collapseOthers 保持自身展开 T65，deletion-executor 收尾对齐 expectedRunId 防护，turn-plan parseArgs 数组防护与 applyPlan 反证 T66，client isRetriableError 重试状态码矩阵 T67，context-menu buildInstruction 指令装配矩阵 T68，全量测试扩充至 441 项全绿，行为反证扩充至 135 条全绿。
+> ⑥抽取 isSpecialUrl 过滤无外网图标协议，tools.ts isRoot 增强虚拟根 id 0 防护 T63，导出并加固 assertNoCycle 循环嵌套防护 T64，chat-budget 增加负数零预算防御，bookmarkStore collapseOthers 保持自身展开 T65，deletion-executor 收尾对齐 expectedRunId 防护，turn-plan parseArgs 数组防护与 applyPlan 反证 T66，client isRetriableError 重试状态码矩阵 T67，context-menu buildInstruction 指令装配矩阵 T68，formatIsoDate 导出防护与 PLAN_MODE_INSTRUCTION 测试守卫，trimPointsToBudget 预算边界钳位，restoreSubtree 与 toSnapshot 递归深度上限防护，rememberTerminalRun 终态容量截断，estimateTokens 空安全防爆，failureMessage 空错误兜底，dedupe 空安全防护，classifyOneUrl 启发式测试覆盖，normalizeBaseUrl 空安全回退，DEFAULT_CONFIG 安全基线校验，THEME_KEY 持久化键名锁定，subtreeContains 递归深度上限防护，truncate 与 safeJsonParse 空安全与钳位防御，TOOL_DEFINITIONS additionalProperties 严格校验，getPreset 预设完整性校验，update_bookmark_url 文件夹防护测试，assertFolder 非书签目录校验，getDeleteMode 模式回落保障，copyNodeDeep 递归深度上限防护，MUTATING_TOOLS 动写工具边界互斥，executeTool 坏 JSON 参数严格反证，executeTool 未知工具拦截严格反证，executeTool Zod 参数校验转译反证，sort_folder 文件夹置顶与短路反证，全量测试扩充至 468 项全绿，行为反证扩充至 161 条全绿（该批加固在工作区、**未随 v0.2.23 发版**：v0.2.23 那个 tag/zip 打的是 441 项 / 135 条的状态）。
 > **v0.2.22** 收口 `docs/error-handling-audit.md` 最后两处细节（`clipboard.ts` 注释误导修正、`themeStore.load` 读取失败不静默回落并弹提示），T59 三条用例 + 1 条反证。
 > **v0.2.21** 修掉「轮次在等待计划确认时被中止/抢占」造成的挂起与撤销日志丢失——
 > `requestPlanApprovalWithAbort` 与 abort 信号赛跑（按未批准结算且清理条目），`chat:send` 抢占上一条也进行结算；
@@ -430,3 +431,49 @@ sort_folder + merge_folders 再撤销）抓出**并发批量移动**的坑——
 2. **阻塞就地解决**：换思路、换做法、缩小范围；绝不请求确认、绝不等待批准。
 3. **宁可承认"未证实"**：拿不到证据的能力，在 README 与 DIRECTION 里标注，而不是含糊带过。
 4. **一次只推进一档**：P0 没落库，不开 P1；防止在半成品上再叠半成品。
+
+## 9. 无人值守链断档后的接手核查（2026-09-20）
+
+**链为什么停**：台账显示 09-13→09-17 完成 110 个目标、受阻 66 个；最后一个成功目标是
+09-17 15:22（本地）。之后「为 sort_folder 建立文件夹置顶单测与反证」这一目标在 09-18 05:28
+被标 `goal-cleared-exhausted`（没能收口），兜底目标同样耗尽；09-19 起 **全部**路由因
+API 额度耗尽失败（403 `insufficient_user_quota`，余额 −$42.96），每 30 分钟重试一次，
+至 09-20 10:29 停摆。**工作区因此停在半成品状态：编译红、测试红、反证门禁红。**
+
+**本次接手修掉的问题（均在工作区，未提交）**：
+
+1. `tests/agent.test.ts` 2 处类型错误（`assert.match(ToolOutput, …)` → 应取 `.result`）；
+2. `src/lib/undo/mutations.ts` `toSnapshot` 深度上限 off-by-one：`depth > 64` 会产出 depth 65
+   的节点，而 `restoreSubtree` 的守卫在同界拒绝 →「存得下、还原不了」。改为 `depth >= 64`；
+3. **真实产品 bug：文件夹置顶比较器写反。** `sort_folder`（`src/lib/ai/tools.ts`）与完整页列表
+   （`src/components/bookmark-list/bookmark-list.tsx`）都写成 `(b.url ? 1 : 0) - (a.url ? 1 : 0)`，
+   而注释与 README 都声称「文件夹置顶」——实测该写法把**书签**排在最前。两处均改为 `(a…) - (b…)`。
+   那条被标 exhausted 的新测试正是因此变红（测试是对的，实现是错的）；
+4. `scripts/falsify.mjs` 4 处**失效锚点** + 3 处**白名单漂移**（`applyPlan`、`SYSTEM_PROMPT`、
+   `assertNoCycle` 三条用例的 `expectFail` 名字与「实际第一个变红的用例」不符）；
+5. `scripts/falsify.mjs` **中断自保**：改写前落盘 `.falsify-pending.json`（文件+原文），恢复后删除；
+   启动时发现残留备份自动还原，另加 SIGINT/SIGTERM/SIGHUP 优雅还原。
+   **这一条是被教训逼出来的**：被强杀的反证进程会把「回滚态」留在工作区，它看起来完全像真代码——
+   本次就让一条被回滚掉的 `await drainPendingWrites();` 留在 `recorder.ts` 里，
+   使 T39（收尾等待在途写入）稳定变红，靠对照工作树 + 逐文件二分才定位到是脚本残留；
+6. 计数与实测对齐：测试 **468 项**（原文档写 465）、构建 851.92 kB、README 的反证计数 18/18 → 161。
+
+**反证还没跑完（如实标注）**：161 条锚点已**逐个静态校验通过**（无失效锚点），
+并抽查 8 条全部 `RED ✔`。**全量未跑**（161 × 全量测试 ≈ 1 小时，且运行期会反复改写工作区源码）。
+为了让这件事不再"因为要等一小时而没人验"，本轮给脚本加了 **`node scripts/falsify.mjs --only=用例名关键字`**
+定向复核开关（可给多个），并让结尾结论区分「定向复核通过（明确标注不是全量结论）」与「全量反证完成」。
+抽查中暴露一个尚未修的结构问题，见下条。
+
+**测试运行器的一个结构性缺口（下一步该做）**：`ok(name, fn)` **不 await** 回调，
+所以写成 `ok('…', async () => {…})` 的用例会**先打印 ✔、先计入 `passed`**，
+断言失败则退化成**无名** unhandled rejection——用例名丢失，反证脚本只能报
+`RED? ~（失败用例不在预期内：[]）`。本文件现有 **18 条**这样的用例
+（`tests/agent.test.ts` 的 790/796/803/846/3227/3330/3965/4356/4372/6146/6888/6908/6925/6932/6947/6991/7032 行，
+`sort_folder` 那条本次已改写为「异步准备在外、用例体同步」），其中 4 条（`update_bookmark_url`、
+`assertFolder`、`copyNodeDeep`、`restoreSubtree`）现在就是反证门禁上的 `RED? ~`。
+两条修法：把 `ok()` 改成能接管 Promise（✔/计数延后到结算，失败走同一条 ✘ 路径），
+或按本次 `sort_folder` 的写法把 18 条用例逐条改成同步用例体。
+
+**其他待办**：`public/store/test.txt`（4 字节，内容 `test`）是残留垃圾，会被打进扩展包；
+`docs/error-handling.md` 与 `release-notes` 里的历史计数未逐处复核；真机验证（P3）仍受环境限制。
+

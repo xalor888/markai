@@ -32,9 +32,10 @@ export function resolveDropIndex(rowIndex: number, position: 'above' | 'below'):
 }
 
 /** 目标 id 是否在 node 的子树内（不含 node 自身） */
-export function subtreeContains(node: BNode, id: string): boolean {
+export function subtreeContains(node: BNode, id: string, depth = 0): boolean {
+  if (!id || depth > 64) return false;
   for (const child of node.children ?? []) {
-    if (child.id === id || subtreeContains(child, id)) return true;
+    if (child.id === id || subtreeContains(child, id, depth + 1)) return true;
   }
   return false;
 }

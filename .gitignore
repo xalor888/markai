@@ -35,3 +35,8 @@ preview-*.png
 .zcode/
 # keepgoal 的内部状态（台账、访问记录），不该进版本库
 .keepgoal/
+# 助手的项目记忆（工作日志/长期约定），属于本地状态，不该进版本库
+.workbuddy/
+# falsify 的中断自保备份（内含某源文件的完整原文，只在运行期间存在；
+# 万一被强杀残留，也不该被误提交）
+.falsify-pending.json

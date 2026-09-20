@@ -15,7 +15,7 @@
  * 维护：新增目标时把「回滚锚点 + 预期变红的用例名」追加到 cases。
  * 锚点随重构失效会显示 SKIP 并以非零码退出——这是刻意的，避免静默失效。
  */
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { execSync } from 'node:child_process';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -425,6 +425,20 @@ const cases = [
     expectFail: ['isSpecialUrl 准确识别特殊与本地协议'],
   },
   {
+    name: 'truncate 放弃空安全防护',
+    file: 'src/lib/format.ts',
+    from: "export function truncate(text?: string, max = 80): string {\n  if (!text) return '';",
+    to: 'export function truncate(text?: string, max = 80): string {\n  // no check',
+    expectFail: ['truncate 与 safeJsonParse 空安全与下限防御'],
+  },
+  {
+    name: 'formatIsoDate 放弃对异常时间戳的空安全防护',
+    file: 'src/lib/format.ts',
+    from: "  if (!timestamp || !Number.isFinite(timestamp) || timestamp <= 0) return '';",
+    to: "  // no timestamp check",
+    expectFail: ['formatIsoDate 安全格式化并抵御异常'],
+  },
+  {
     name: 'isRoot 放弃对虚拟根节点 id 0 的保护',
     file: 'src/lib/ai/tools.ts',
     from: "export function isRoot(id: string): boolean {\n  return id === '0' || ROOT_IDS.has(id);\n}",
@@ -436,7 +450,9 @@ const cases = [
     file: 'src/lib/ai/tools.ts',
     from: "    if (cur === bookmarkId) throw new Error('目标文件夹是自身或自身的子文件夹，会造成循环嵌套');",
     to: '    // cycle check bypassed',
-    expectFail: ['assertNoCycle 拦截自身与子孙嵌套'],
+    // 「assertNoCycle 拦截自身与子孙嵌套」是直接用例，但测试文件里先跑的是
+    // move_bookmarks 那条端到端用例（它同样依赖这个守卫），首次失败落在它身上
+    expectFail: ['move_bookmarks 拦截文件夹移入自身子树', 'assertNoCycle 拦截自身与子孙嵌套'],
   },
   {
     name: 'trimConversationsToBudget 放弃超预算裁剪',
@@ -455,9 +471,14 @@ const cases = [
   {
     name: 'applyPlan 未确认也强行执行（破坏安全默认值）',
     file: 'src/lib/ai/turn-plan.ts',
-    from: '  if (opts?.confirmed !== true) {',
+    from: '  if (opts.confirmed !== true) {',
     to: '  if (false) {',
-    expectFail: ['applyPlan 未确认零执行确认后如实计数'],
+    // 回滚后**第一个**变红的用例是前者（测试文件里它排在前面，而运行器在首次失败处中止），
+    // 后者是同一守卫的另一条断言——两个名字都算预期内
+    expectFail: [
+      'applyPlan 默认不执行：未确认时 executor 零调用、并标 cancelled',
+      'applyPlan 未确认零执行确认后如实计数',
+    ],
   },
   {
     name: 'deletion-executor 收尾指定错误 runId 导致事务无法关闭',
@@ -472,6 +493,178 @@ const cases = [
     from: '  if (status === 429) return true; // 限流：退避后重试',
     to: '  if (status === 429) return false;',
     expectFail: ['isRetriableError 状态码矩阵判定'],
+  },
+  {
+    name: 'SYSTEM_PROMPT 硬编码污染计划模式指令',
+    file: 'src/lib/ai/prompts.ts',
+    from: '你是 MarkAI，运行在用户浏览器里的智能书签管家 Agent。',
+    to: '你是 MarkAI，运行在用户浏览器里的智能书签管家 Agent。请用 submit_plan 先声明计划。',
+    // 回滚后第一个变红的是「planMode 关闭时不含声明计划的指令」——它正是这条污染的守卫
+    expectFail: [
+      'planMode 关闭时，系统提示不含声明计划的指令（不打扰默认路径）',
+      'PLAN_MODE_INSTRUCTION 指令规范与动态附加隔离',
+    ],
+  },
+  {
+    name: 'trimPointsToBudget 放弃单点超预算快速丢弃',
+    file: 'src/lib/undo/journal.ts',
+    from: '    if (size > safeBudget) {',
+    to: '    if (false) {',
+    expectFail: ['trimPointsToBudget 边界防护：0 预算与负数预算安全处理'],
+  },
+  {
+    name: 'restoreSubtree 放弃递归深度上限防护',
+    file: 'src/lib/undo/apply.ts',
+    from: "  if (depth > 64) {\n    throw new Error('快照嵌套层级超过 64 层，可能存在递归异常');\n  }",
+    to: '  // no depth check',
+    expectFail: ['restoreSubtree 递归深度防御：超过 64 层抛错防暴栈'],
+  },
+  {
+    name: 'toSnapshot 放弃递归深度上限防护',
+    file: 'src/lib/undo/mutations.ts',
+    from: '  if (depth >= 64) {',
+    to: '  if (false) {',
+    expectFail: ['toSnapshot 快照转换与深度上限防爆'],
+  },
+  {
+    name: 'rememberTerminalRun 放弃容量截断上限',
+    file: 'src/lib/undo/recorder.ts',
+    from: '  return [runId, ...kept].slice(0, MAX_TERMINAL_RUN_IDS);',
+    to: '  return [runId, ...kept];',
+    expectFail: ['rememberTerminalRun 终态 runId 去重、置顶与容量截断'],
+  },
+  {
+    name: 'estimateTokens 放弃对空值的安全防御',
+    file: 'src/lib/ai/agent.ts',
+    from: "export function estimateTokens(text?: string): number {\n  if (!text) return 0;",
+    to: 'export function estimateTokens(text?: string): number {\n  // no empty check',
+    expectFail: ['estimateTokens 空值与异常安全回退为 0'],
+  },
+  {
+    name: 'failureMessage 丢失空错误友好兜底说明',
+    file: 'src/lib/open-url.ts',
+    from: "  return `${describeTarget(url)}：${detail || '浏览器拒绝了这次打开'}`;",
+    to: '  return `${describeTarget(url)}：${detail}`;',
+    expectFail: ['failureMessage 打开失败友好提示格式化'],
+  },
+  {
+    name: 'normalizeUrl 放弃对空值的安全防御',
+    file: 'src/lib/ai/dedupe.ts',
+    from: "export function normalizeUrl(u?: string): string {\n  if (!u) return '';",
+    to: 'export function normalizeUrl(u?: string): string {\n  // no empty check',
+    expectFail: ['normalizeUrl 与 buildDuplicateGroups 空值安全防御'],
+  },
+  {
+    name: 'classifyOneUrl 放弃根路径与首页判断',
+    file: 'src/lib/ai/tools.ts',
+    from: '  if (depth === 0 || (depth === 1 && INDEX_FILE.test(last))) {',
+    to: '  if (false) {',
+    expectFail: ['classifyOneUrl 启发式分类：覆盖各类深度与参数'],
+  },
+  {
+    name: 'normalizeBaseUrl 放弃对空值的安全防御',
+    file: 'src/lib/providers.ts',
+    from: "export function normalizeBaseUrl(baseUrl?: string): string {\n  if (!baseUrl) return '';",
+    to: 'export function normalizeBaseUrl(baseUrl?: string): string {\n  // no empty check',
+    expectFail: ['normalizeBaseUrl 空值与异常安全回退为 ""'],
+  },
+  {
+    name: 'getPreset 查找预设失效',
+    file: 'src/lib/providers.ts',
+    from: 'export function getPreset(id?: string): ProviderPreset | undefined {\n  if (!id) return undefined;\n  return PROVIDERS.find((p) => p.id === id);\n}',
+    to: 'export function getPreset(id?: string): ProviderPreset | undefined {\n  return undefined;\n}',
+    expectFail: ['getPreset 与 PROVIDERS 预设完整性校验'],
+  },
+  {
+    name: 'update_bookmark_url 放弃文件夹修改拦截',
+    file: 'src/lib/ai/tools.ts',
+    from: "  if (!node.url) throw new Error('文件夹没有 URL，无法修改');",
+    to: '  // no folder check',
+    expectFail: ['update_bookmark_url 修改 URL 与文件夹防护'],
+  },
+  {
+    name: 'assertFolder 放弃书签父级拦截',
+    file: 'src/lib/ai/tools.ts',
+    from: "    if (node.url) throw new Error(`目标 ${pid} 不是文件夹，无法作为父级`);",
+    to: '    // no bookmark check',
+    expectFail: ['assertFolder 校验与书签拦截'],
+  },
+  {
+    name: 'getDeleteMode 放弃 confirm 安全回退',
+    file: 'src/lib/ai/tools.ts',
+    from: "    return cfg?.deleteMode ?? 'confirm';\n  } catch {\n    return 'confirm';",
+    to: "    return 'auto';\n  } catch {\n    return 'auto';",
+    expectFail: ['getDeleteMode：无配置或异常回退 confirm，明确 auto 返回 auto'],
+  },
+  {
+    name: 'copyNodeDeep 放弃递归深度上限防护',
+    file: 'src/lib/ai/tools.ts',
+    from: "  if (depth > 64) {\n    throw new Error('复制节点嵌套层级超过 64 层，可能存在递归异常');\n  }",
+    to: '  // no depth check',
+    expectFail: ['copyNodeDeep 递归深度上限防护'],
+  },
+  {
+    name: 'MUTATING_TOOLS 误把只读工具标记为写入',
+    file: 'src/lib/ai/tools.ts',
+    from: "export const MUTATING_TOOLS = new Set([\n  'create_folder',",
+    to: "export const MUTATING_TOOLS = new Set([\n  'list_bookmarks',\n  'create_folder',",
+    expectFail: ['MUTATING_TOOLS 动写工具集合与读类工具严格互斥'],
+  },
+  {
+    name: 'executeTool 吞掉非法 JSON 参数（静默回落空对象）',
+    file: 'src/lib/ai/tools.ts',
+    from: "  } catch {\n    throw new Error('工具参数不是合法 JSON');\n  }",
+    to: '  } catch {\n    args = {};\n  }',
+    expectFail: ['executeTool 拒绝非法 JSON 参数'],
+  },
+  {
+    name: 'executeTool 绕过未知工具报错（静默返回空结果）',
+    file: 'src/lib/ai/tools.ts',
+    from: "  const entry = TOOL_MAP[name];\n  if (!entry) throw new Error(`未知工具：${name}`);",
+    to: '  const entry = TOOL_MAP[name];\n  if (!entry) return { result: "{}" };',
+    expectFail: ['executeTool 拒绝未知工具'],
+  },
+  {
+    name: 'executeTool 丢失 Zod 参数校验中文转译',
+    file: 'src/lib/ai/tools.ts',
+    from: "    if (e instanceof z.ZodError) {\n      throw new Error(`参数不合法：${e.issues.map((i) => i.message).join('；')}`);\n    }",
+    to: '    // raw zod error',
+    expectFail: ['executeTool 参数校验失败时转换为清晰的中文「参数不合法」提示'],
+  },
+  {
+    name: 'sortFolder 放弃文件夹强制置顶',
+    file: 'src/lib/ai/tools.ts',
+    from: "    const folderDiff = (a.url ? 1 : 0) - (b.url ? 1 : 0);\n    if (folderDiff !== 0) return folderDiff;",
+    to: '    // no folder pinning',
+    expectFail: ['sort_folder 排序规则：文件夹强制置顶与子项不足提前返回'],
+  },
+  {
+    name: 'DEFAULT_CONFIG deleteMode 安全默认值篡改',
+    file: 'src/stores/configStore.ts',
+    from: "  deleteMode: 'confirm',",
+    to: "  deleteMode: 'auto',",
+    expectFail: ['DEFAULT_CONFIG 关键安全默认值校验'],
+  },
+  {
+    name: 'THEME_KEY 持久化键名篡改',
+    file: 'src/stores/themeStore.ts',
+    from: "export const THEME_KEY = 'markai.theme';",
+    to: "export const THEME_KEY = 'theme';",
+    expectFail: ['THEME_KEY 存储键名锁定为 markai.theme'],
+  },
+  {
+    name: 'subtreeContains 放弃子孙深度递归查找',
+    file: 'src/lib/bookmark-dnd.ts',
+    from: '    if (child.id === id || subtreeContains(child, id, depth + 1)) return true;',
+    to: '    if (child.id === id) return true;',
+    expectFail: ['subtreeContains 递归深度与空 id 防御', 'isSelfOrDescendant 拦截深层后代'],
+  },
+  {
+    name: 'TOOL_DEFINITIONS 破坏 additionalProperties: false 规范',
+    file: 'src/lib/ai/prompts.ts',
+    from: "        additionalProperties: false,\n      },\n    },\n  },\n  {\n    type: 'function',",
+    to: "        additionalProperties: true,\n      },\n    },\n  },\n  {\n    type: 'function',",
+    expectFail: ['所有工具定义参数严格遵守 additionalProperties: false 规范'],
   },
   {
     name: 'buildInstruction 丢失失效节点友好提示',
@@ -497,7 +690,7 @@ const cases = [
   {
     name: '预算裁剪失效（超预算不再丢最旧）',
     file: 'src/lib/undo/journal.ts',
-    from: '    if (total + size <= budgetBytes) {',
+    from: '    if (total + size <= safeBudget) {',
     to: '    if (true) {',
     expectFail: ['预算内按新→旧保留，超出预算丢最旧的', '超预算时丢最旧的'],
   },
@@ -690,8 +883,8 @@ const cases = [
   {
     name: '落点补偿 off-by-one（历史 bug：向后拖拽静默失效）',
     file: 'src/lib/bookmark-dnd.ts',
-    from: "  return position === 'above' ? rowIndex : rowIndex + 1;",
-    to: "  return position === 'below' ? Math.max(0, rowIndex - 1) : rowIndex;",
+    from: "  return position === 'above' ? safe : safe + 1;",
+    to: "  return position === 'below' ? Math.max(0, safe - 1) : safe;",
     expectFail: ['resolveDropIndex：上方=行下标', '向后拖一格真的生效'],
   },
   {
@@ -1000,8 +1193,95 @@ const cases = [
   },
 ];
 
+/**
+ * 定向复核：`node scripts/falsify.mjs --only=关键字`（可多次给，命中用例名即选）。
+ * 存在的理由：全量 161 条 ≈ 1 小时（每条都要跑一遍全量测试），而"刚改过哪几处实现"
+ * 通常只关心那几条；没有这个开关时，验一条也得等一小时，实际结果就是**没人验**。
+ * 不带 `--only` 时行为完全不变（跑全量）。
+ */
+const only = process.argv
+  .filter((a) => a.startsWith('--only='))
+  .map((a) => a.slice('--only='.length))
+  .filter(Boolean);
+const selected = only.length ? cases.filter((c) => only.some((k) => c.name.includes(k))) : cases;
+
 let allGood = true;
-for (const c of cases) {
+
+/**
+ * 中断自保（两层）。
+ *
+ * 本脚本会**真实改写工作区源码**，原本只靠 `finally` 恢复——但 `finally` 挡不住
+ * 进程被杀：SIGTERM/SIGINT 有信号处理兜底，**SIGKILL / 进程组回收则什么都跑不了**。
+ * 被中断后源码停在"回滚态"，而它看起来完全像真代码：下一次跑测试会看到**假的失败**。
+ * 本项目真实踩过两次：被回滚掉的 `await drainPendingWrites();` 与一处
+ * `setErrorHint` 早退留在工作区，分别让一个无关的 pending 写入竞态用例稳定变红、
+ * 让两条反证用例给出 `RED?`（失败集合为空）。定位它们花的时间远超跑一遍反证。
+ *
+ * 因此：
+ * 1. **落盘备份**（`.falsify-pending.json`）：改写前写下「文件 + 原文」，
+ *    恢复后删掉；即使被 SIGKILL 也能在**下次启动时自愈**（不依赖任何信号处理）；
+ * 2. **信号处理**：SIGINT/SIGTERM/SIGHUP 优雅还原后退出，不留半截状态。
+ */
+const BACKUP = `${REPO}/.falsify-pending.json`;
+let patched = null; // { path, orig }
+
+function clearBackup() {
+  try {
+    unlinkSync(BACKUP);
+  } catch {
+    /* 不存在即无需清理 */
+  }
+}
+
+function restorePatched() {
+  if (!patched) return;
+  try {
+    writeFileSync(patched.path, patched.orig);
+  } catch {
+    /* 还原失败也继续退出：不能让信号处理本身卡住 */
+  }
+  patched = null;
+  clearBackup();
+}
+
+// 上一次被强杀留下的回滚态：先自愈再继续，避免"用被污染的源码"跑反证
+try {
+  const stale = JSON.parse(readFileSync(BACKUP, 'utf8'));
+  if (stale?.file && typeof stale.orig === 'string') {
+    writeFileSync(`${REPO}/${stale.file}`, stale.orig);
+    console.log(`⚠️  上次运行被强制中断，已自动还原 ${stale.file}（否则反证会用被回滚的源码跑）`);
+  }
+} catch {
+  /* 没有备份文件 = 上次正常结束 */
+}
+clearBackup();
+
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => {
+    const where = patched?.path ?? null;
+    restorePatched();
+    console.log(
+      `\n⚠️  收到 ${sig}：${where ? `已把 ${where} 还原为原文` : '当前没有待还原的文件'}，退出。`,
+    );
+    process.exit(130);
+  });
+}
+process.on('exit', restorePatched);
+process.on('uncaughtException', (e) => {
+  restorePatched();
+  console.error(e);
+  process.exit(1);
+});
+
+if (only.length) {
+  console.log(`定向复核：${selected.length} / ${cases.length} 条（--only=${only.join(' --only=')}）\n`);
+}
+if (selected.length === 0) {
+  console.log('⚠️  --only 没有命中任何用例：请检查关键字（命中规则是"用例名包含该关键字"）');
+  allGood = false;
+}
+
+for (const c of selected) {
   const path = `${REPO}/${c.file}`;
   const orig = readFileSync(path, 'utf8');
   if (!orig.includes(c.from)) {
@@ -1009,6 +1289,8 @@ for (const c of cases) {
     allGood = false;
     continue;
   }
+  patched = { path, orig };
+  writeFileSync(BACKUP, JSON.stringify({ file: c.file, orig }));
   writeFileSync(path, orig.replace(c.from, c.to));
   let red = false;
   let out = '';
@@ -1019,6 +1301,8 @@ for (const c of cases) {
     out = `${e.stdout ?? ''}${e.stderr ?? ''}`;
   } finally {
     writeFileSync(path, orig);
+    patched = null;
+    clearBackup();
   }
 
   const failed = out
@@ -1044,5 +1328,11 @@ try {
   console.log('\n恢复后测试未通过 ✘');
   allGood = false;
 }
-console.log(allGood ? '\n反证完成：每条测试都能被对应回滚证伪 ✔' : '\n反证存在缺口 ✘');
+console.log(
+  allGood
+    ? only.length
+      ? `\n定向复核通过：${selected.length} 条回滚后都按预期变红 ✔（**这不是全量结论**，全量共 ${cases.length} 条）`
+      : `\n反证完成：${cases.length} 条测试都能被对应回滚证伪 ✔`
+    : '\n反证存在缺口 ✘',
+);
 process.exit(allGood ? 0 : 1);

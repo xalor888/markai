@@ -59,7 +59,15 @@ async function restoreParentOrder(parentId: string, order: string[]): Promise<vo
 }
 
 /** 按快照递归重建子树，返回新建节点的 id */
-async function restoreSubtree(snap: BookmarkSnapshot, parentId: string, index?: number): Promise<string> {
+export async function restoreSubtree(
+  snap: BookmarkSnapshot,
+  parentId: string,
+  index?: number,
+  depth = 0,
+): Promise<string> {
+  if (depth > 64) {
+    throw new Error('快照嵌套层级超过 64 层，可能存在递归异常');
+  }
   const node = await chrome.bookmarks.create({
     parentId,
     title: snap.title,
@@ -67,7 +75,7 @@ async function restoreSubtree(snap: BookmarkSnapshot, parentId: string, index?: 
     ...(index !== undefined ? { index } : {}),
   });
   for (const child of snap.children ?? []) {
-    await restoreSubtree(child, node.id);
+    await restoreSubtree(child, node.id, undefined, depth + 1);
   }
   return node.id;
 }

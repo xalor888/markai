@@ -8,7 +8,7 @@ import { getPreset, resolveConfig } from '@/lib/providers';
 /** storage key（background 通过该 key 直接读取配置，请勿改动） */
 export const CONFIG_STORAGE_KEY = 'markai.config';
 
-const DEFAULT_CONFIG: AIConfig = {
+export const DEFAULT_CONFIG: AIConfig = {
   providerId: 'deepseek',
   baseUrl: '',
   apiKey: '',

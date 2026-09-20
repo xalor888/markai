@@ -26,8 +26,9 @@ export function opWeight(op: UndoOp): number {
 }
 
 /** 快照里的节点总数（含自身） */
-export function countSnapshotNodes(snap: BookmarkSnapshot): number {
-  return 1 + (snap.children ?? []).reduce((acc, c) => acc + countSnapshotNodes(c), 0);
+export function countSnapshotNodes(snap: BookmarkSnapshot, depth = 0): number {
+  if (depth > 64) return 1;
+  return 1 + (snap.children ?? []).reduce((acc, c) => acc + countSnapshotNodes(c, depth + 1), 0);
 }
 
 /** 按类型统计的中文摘要，如「移动 3 项、新建 2 项」（按影响条数计，不按操作条数） */
@@ -170,17 +171,18 @@ export function trimPointsToBudget(
   points: UndoPoint[],
   budgetBytes: number = UNDO_BUDGET_BYTES,
 ): UndoTrimResult {
+  const safeBudget = Number.isFinite(budgetBytes) ? Math.max(0, budgetBytes) : 0;
   const kept: UndoPoint[] = [];
   const droppedTooLarge: UndoPoint[] = [];
   const droppedNoRoom: UndoPoint[] = [];
   let total = 0;
   for (const p of points) {
     const size = pointBytes(p);
-    if (size > budgetBytes) {
+    if (size > safeBudget) {
       droppedTooLarge.push(p);
       continue;
     }
-    if (total + size <= budgetBytes) {
+    if (total + size <= safeBudget) {
       kept.push(p);
       total += size;
     } else {

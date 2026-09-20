@@ -315,7 +315,7 @@ export interface UndoState {
 export const MAX_TERMINAL_RUN_IDS = 50;
 
 /** 把一个 runId 记为终态（最近的在前，超出上界就截断） */
-function rememberTerminalRun(prev: string[] | undefined, runId: string): string[] {
+export function rememberTerminalRun(prev: string[] | undefined, runId: string): string[] {
   const kept = (prev ?? []).filter((r) => r !== runId);
   return [runId, ...kept].slice(0, MAX_TERMINAL_RUN_IDS);
 }

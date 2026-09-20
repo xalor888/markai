@@ -23,7 +23,7 @@ import { useCallback, useEffect, useRef, useState, type CSSProperties, type Keyb
 import { useAIStore } from '@/stores/aiStore';
 import { useBookmarkStore, findNode, resolveTitlePath } from '@/stores/bookmarkStore';
 import { useConfigStore } from '@/stores/configStore';
-import { formatRelativeTime } from '@/lib/format';
+import { formatRelativeTime, formatIsoDate } from '@/lib/format';
 import { describeUndoHistory, summarizeOps, undoReadiness } from '@/lib/undo/journal';
 import { resolveConfig, PROVIDERS } from '@/lib/providers';
 import { cn } from '@/lib/utils';
@@ -261,7 +261,7 @@ export function ChatPanel({
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `MarkAI-对话-${new Date().toISOString().slice(0, 10)}.md`;
+    a.download = `MarkAI-对话-${formatIsoDate(Date.now()) || 'export'}.md`;
     a.click();
     // 延迟释放，避免下载被中断
     setTimeout(() => URL.revokeObjectURL(url), 1000);

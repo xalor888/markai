@@ -31,7 +31,8 @@ export interface DupeGroup {
  * 注意**协议差异按设计保留**（http 与 https 视为不同）：
  * 自动改写协议或据此判重都可能在用户不知情时改变收藏的语义。
  */
-export function normalizeUrl(u: string): string {
+export function normalizeUrl(u?: string): string {
+  if (!u) return '';
   try {
     const parsed = new URL(u.trim());
     parsed.hash = '';
@@ -51,7 +52,8 @@ export function normalizeUrl(u: string): string {
 }
 
 /** 按归一化 URL 分组，只返回有重复的组（组内多的在前） */
-export function buildDuplicateGroups(nodes: DupeNode[]): DupeGroup[] {
+export function buildDuplicateGroups(nodes?: DupeNode[]): DupeGroup[] {
+  if (!nodes || nodes.length === 0) return [];
   const byUrl = new Map<string, DupeNode[]>();
   const walk = (list: DupeNode[]) => {
     for (const n of list) {

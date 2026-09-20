@@ -90,12 +90,24 @@ export function recordMoveBatch(params: {
   });
 }
 
-/** 把一个节点（含全部后代）转成可持久化的快照 */
-function toSnapshot(node: chrome.bookmarks.BookmarkTreeNode): BookmarkSnapshot {
+/**
+ * 把一个节点（含全部后代）转成可持久化的快照。
+ *
+ * 深度上限 64 **必须与 `restoreSubtree` 的守卫同界**（那里是 `depth > 64` 抛错，
+ * 即允许最深节点落在 depth 64）：截断点若写成 `depth > 64`，快照能产出 depth 65 的节点，
+ * 而还原时会被自己的守卫拒绝——「存得下、还原不了」的坏组合。
+ */
+export function toSnapshot(node: chrome.bookmarks.BookmarkTreeNode, depth = 0): BookmarkSnapshot {
+  if (depth >= 64) {
+    return {
+      title: node.title,
+      ...(node.url ? { url: node.url } : {}),
+    };
+  }
   return {
     title: node.title,
     ...(node.url ? { url: node.url } : {}),
-    ...(node.children?.length ? { children: node.children.map(toSnapshot) } : {}),
+    ...(node.children?.length ? { children: node.children.map((c) => toSnapshot(c, depth + 1)) } : {}),
   };
 }
 

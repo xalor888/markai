@@ -36,17 +36,32 @@ export function formatRelativeTime(timestamp?: number): string {
 }
 
 /** 截断长文本 */
-export function truncate(text: string, max = 80): string {
-  if (text.length <= max) return text;
-  return `${text.slice(0, max)}…`;
+export function truncate(text?: string, max = 80): string {
+  if (!text) return '';
+  const safeMax = Number.isFinite(max) ? Math.max(0, max) : 80;
+  if (text.length <= safeMax) return text;
+  return `${text.slice(0, safeMax)}…`;
 }
 
 /** 安全解析 JSON，失败返回 null */
-export function safeJsonParse<T>(text: string): T | null {
+export function safeJsonParse<T>(text?: string): T | null {
+  if (!text) return null;
   try {
     return JSON.parse(text) as T;
   } catch {
     return null;
+  }
+}
+
+/** 安全格式化 YYYY-MM-DD 日期，异常时间戳安全返回空字符串，杜绝 toISOString 抛 RangeError */
+export function formatIsoDate(timestamp?: number): string {
+  if (!timestamp || !Number.isFinite(timestamp) || timestamp <= 0) return '';
+  try {
+    const d = new Date(timestamp);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toISOString().slice(0, 10);
+  } catch {
+    return '';
   }
 }
 

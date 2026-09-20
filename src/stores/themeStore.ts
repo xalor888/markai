@@ -6,7 +6,7 @@ import { pushToast } from '@/lib/toast';
 
 export type Theme = 'light' | 'dark' | 'system';
 
-const THEME_KEY = 'markai.theme';
+export const THEME_KEY = 'markai.theme';
 
 interface ThemeState {
   theme: Theme;

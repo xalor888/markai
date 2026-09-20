@@ -67,7 +67,8 @@ export const PROVIDERS: ProviderPreset[] = [
   },
 ];
 
-export function getPreset(id: string): ProviderPreset | undefined {
+export function getPreset(id?: string): ProviderPreset | undefined {
+  if (!id) return undefined;
   return PROVIDERS.find((p) => p.id === id);
 }
 
@@ -131,7 +132,8 @@ export function getModelContextWindow(model: string): number {
 }
 
 /** 去除 Base URL 末尾斜杠；无协议时自动补：localhost 等本机地址用 http，其余 https */
-export function normalizeBaseUrl(baseUrl: string): string {
+export function normalizeBaseUrl(baseUrl?: string): string {
+  if (!baseUrl) return '';
   let url = baseUrl.trim().replace(/\/+$/, '');
   if (url && !/^https?:\/\//i.test(url)) {
     url = /^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)(:\d+)?(\/|$)/i.test(url) ? `http://${url}` : `https://${url}`;

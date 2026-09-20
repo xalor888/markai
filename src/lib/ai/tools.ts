@@ -1,7 +1,7 @@
 /** ── Agent 工具执行器（仅在 background Service Worker 内运行） ── */
 
 import { z } from 'zod';
-import { uid } from '../format';
+import { uid, formatIsoDate } from '../format';
 import type { DeletionProposal } from './types';
 import { CONFIG_STORAGE_KEY } from '@/stores/configStore';
 import { jCreate, jMove, jRemove, jUpdate, recordMoveBatch } from '@/lib/undo/mutations';
@@ -83,7 +83,7 @@ async function resolvePaths(ids: string[]): Promise<Map<string, string>> {
 }
 
 /** 校验父文件夹存在且确实是文件夹 */
-async function assertFolder(parentId?: string): Promise<string> {
+export async function assertFolder(parentId?: string): Promise<string> {
   const pid = parentId ?? '1'; // 默认书签栏（root id 通常为 "1"，动态兜底见下）
   if (parentId) {
     const nodes = await chrome.bookmarks.get(pid).catch(() => []);
@@ -477,10 +477,10 @@ const classifyUrlsSchema = z.object({ urls: z.array(z.string().min(1)).min(1).ma
 const INDEX_FILE = /^(index|default|home)(\.\w+)?$/;
 
 /** URL 类型启发式（不联网）：供 classify_urls 与 cleanup_sweep 共用 */
-function classifyOneUrl(raw: string): { url: string; type: 'root' | 'page' | 'sub' | 'deep' | 'unknown'; pathDepth: number; note: string } {
+export function classifyOneUrl(raw: string): { url: string; type: 'root' | 'page' | 'sub' | 'deep' | 'unknown'; pathDepth: number; note: string } {
   let parsed: URL;
   try {
-    parsed = new URL(raw);
+    parsed = new URL(raw.trim());
   } catch {
     return { url: raw, type: 'unknown', pathDepth: -1, note: 'URL 格式无效' };
   }
@@ -1226,7 +1226,9 @@ async function sortFolder(args: unknown): Promise<ToolOutput> {
     return { result: JSON.stringify({ folder: pid, by, sorted: children.length, note: '子项不足，无需排序。' }) };
   }
   const sorted = [...children].sort((a, b) => {
-    const folderDiff = (b.url ? 1 : 0) - (a.url ? 1 : 0);
+    // 文件夹置顶：`a.url ? 1 : 0` 让"没有 url 的文件夹"取 0、书签取 1，
+    // 相减为负 → 文件夹排在前面。写成 `(b.url…) - (a.url…)` 会把书签顶到最前（与注释相反的静默反向）。
+    const folderDiff = (a.url ? 1 : 0) - (b.url ? 1 : 0);
     if (folderDiff !== 0) return folderDiff;
     switch (by) {
       case 'title':
@@ -1601,7 +1603,7 @@ async function exportBookmarks(args: unknown): Promise<ToolOutput> {
         flat.push({
           title: n.title || n.url,
           url: n.url,
-          date: n.dateAdded ? new Date(n.dateAdded).toISOString().slice(0, 10) : '',
+          date: formatIsoDate(n.dateAdded),
           id: n.id,
         });
       }
@@ -1713,18 +1715,22 @@ async function mergeFolders(args: unknown): Promise<ToolOutput> {
 }
 
 /** 深拷贝节点到目标文件夹（文件夹递归复制全部子项），返回新节点 id */
-async function copyNodeDeep(
+export async function copyNodeDeep(
   node: chrome.bookmarks.BookmarkTreeNode,
   parentId: string,
   index?: number,
+  depth = 0,
 ): Promise<string> {
+  if (depth > 64) {
+    throw new Error('复制节点嵌套层级超过 64 层，可能存在递归异常');
+  }
   if (node.url) {
     const created = await jCreate({ parentId, title: node.title, url: node.url, index });
     return created.id;
   }
   const folder = await jCreate({ parentId, title: node.title, index });
   for (const child of node.children ?? []) {
-    await copyNodeDeep(child, folder.id);
+    await copyNodeDeep(child, folder.id, undefined, depth + 1);
   }
   return folder.id;
 }
@@ -1735,7 +1741,7 @@ const proposeSchema = z.object({
 });
 
 /** 读取删除执行模式（confirm=需确认 / auto=自动执行） */
-async function getDeleteMode(): Promise<'confirm' | 'auto'> {
+export async function getDeleteMode(): Promise<'confirm' | 'auto'> {
   try {
     const data = await chrome.storage.local.get(CONFIG_STORAGE_KEY);
     const cfg = data[CONFIG_STORAGE_KEY] as { deleteMode?: 'confirm' | 'auto' } | undefined;

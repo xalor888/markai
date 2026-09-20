@@ -776,25 +776,37 @@ function ok(name: string, fn: () => void) {
     ok('元信息不包含未定义的工具', () => {
       for (const n of metaNames) assert.ok(defNames.includes(n), `多余的元信息: ${n}`);
     });
-    ok('executeTool 拒绝未知工具', async () => {
-      let threw = false;
-      try {
-        await executeTool('hack_tool', '{}');
-      } catch {
-        threw = true;
+
+    ok('所有工具定义参数严格遵守 additionalProperties: false 规范', () => {
+      for (const def of TOOL_DEFINITIONS) {
+        assert.equal(
+          def.function.parameters.additionalProperties,
+          false,
+          def.function.name + ' 必须声明 additionalProperties: false',
+        );
       }
-      assert.ok(threw);
+    });
+
+    ok('executeTool 拒绝未知工具', async () => {
+      await assert.rejects(
+        () => executeTool('hack_tool', '{}'),
+        /未知工具：hack_tool/,
+      );
     });
     ok('executeTool 拒绝非法 JSON 参数', async () => {
-      let threw = false;
-      try {
-        await executeTool('list_bookmarks', '{broken');
-      } catch (e) {
-        threw = true;
-        assert.ok(String(e).includes('JSON'));
-      }
-      assert.ok(threw);
+      await assert.rejects(
+        () => executeTool('list_bookmarks', '{broken'),
+        /工具参数不是合法 JSON/,
+      );
     });
+
+    ok('executeTool 参数校验失败时转换为清晰的中文「参数不合法」提示', async () => {
+      await assert.rejects(
+        () => executeTool('move_bookmark', '{}'),
+        /参数不合法/,
+      );
+    });
+
     ok('zod v4 的 z.string().url() 行为正常', () => {
       assert.equal(z.string().url().parse('https://a.com/b'), 'https://a.com/b');
       let threw = false;
@@ -940,6 +952,13 @@ function ok(name: string, fn: () => void) {
       const en = estimateTokens('hello world');
       assert.equal(en, 3); // 11 字符 × 1/4 = 2.75 → ceil 3
     });
+
+    ok('estimateTokens 空值与异常安全回退为 0', () => {
+      assert.equal(estimateTokens(''), 0);
+      assert.equal(estimateTokens(undefined as any), 0);
+      assert.equal(estimateTokens(null as any), 0);
+    });
+
   }
 
   /* ── T10: 可恢复错误自动重连 ── */
@@ -1238,13 +1257,20 @@ function ok(name: string, fn: () => void) {
   /* ── T15: 配置解析（Base URL / resolveConfig / 上下文窗口） ── */
   console.log('\n[T15] 配置解析');
   {
-    const { normalizeBaseUrl, resolveConfig, getModelContextWindow } = await import('../src/lib/providers');
+    const { normalizeBaseUrl, resolveConfig, getModelContextWindow, getPreset, PROVIDERS } = await import('../src/lib/providers');
     ok('normalizeBaseUrl 补协议与去尾斜杠', () => {
       assert.equal(normalizeBaseUrl('api.example.com/v1/'), 'https://api.example.com/v1');
       assert.equal(normalizeBaseUrl('https://a.com'), 'https://a.com');
       assert.equal(normalizeBaseUrl('localhost:11434/v1'), 'http://localhost:11434/v1', '本机地址用 http');
       assert.equal(normalizeBaseUrl('127.0.0.1:8080'), 'http://127.0.0.1:8080');
     });
+
+    ok('normalizeBaseUrl 空值与异常安全回退为 ""', () => {
+      assert.equal(normalizeBaseUrl(''), '');
+      assert.equal(normalizeBaseUrl(undefined), '');
+      assert.equal(normalizeBaseUrl(null as any), '');
+    });
+
     ok('getModelContextWindow 段级前缀匹配', () => {
       assert.equal(getModelContextWindow('qwen3:32b'), 128_000);
       assert.equal(getModelContextWindow('qwen3'), 128_000, 'qwen3 短名取主流窗口（显式条目）');
@@ -1264,6 +1290,33 @@ function ok(name: string, fn: () => void) {
       assert.ok(cfg.model, '模型回落预设默认');
       assert.equal(cfg.contextWindow, 1_048_576, '上下文长度默认 1024K（无需手动填写）');
     });
+
+    const { DEFAULT_CONFIG } = await import('../src/stores/configStore');
+    ok('DEFAULT_CONFIG 关键安全默认值校验', () => {
+      assert.equal(DEFAULT_CONFIG.deleteMode, 'confirm');
+      assert.equal(DEFAULT_CONFIG.planMode, false);
+      assert.equal(DEFAULT_CONFIG.providerId, 'deepseek');
+      assert.equal(DEFAULT_CONFIG.compressThreshold, 0.8);
+    });
+
+    ok('getPreset 与 PROVIDERS 预设完整性校验', () => {
+      assert.ok(PROVIDERS.length >= 6);
+      const deepseek = getPreset('deepseek');
+      assert.ok(deepseek);
+      assert.equal(deepseek?.name, 'DeepSeek');
+      assert.equal(deepseek?.needsKey, true);
+      assert.equal(deepseek?.defaultModel, 'deepseek-v4-flash');
+
+      const ollama = getPreset('ollama');
+      assert.ok(ollama);
+      assert.equal(ollama?.needsKey, false, 'Ollama 本地预设不需要 key');
+
+      assert.equal(getPreset('unknown-provider'), undefined);
+      assert.equal(getPreset(''), undefined);
+      assert.equal(getPreset(undefined), undefined);
+    });
+
+
   }
 
   /* ── T16: 用户任务端到端链路（导出→分类→实测→提议） ── */
@@ -1725,7 +1778,7 @@ function ok(name: string, fn: () => void) {
   /* ── T22: 拖放语义 / 未提交修复回归（每条都必须在修复回滚后变红） ── */
   console.log('\n[T22] 拖放语义与修复回归');
   {
-    const { resolveDropIndex, isSelfOrDescendant } = await import('../src/lib/bookmark-dnd');
+    const { resolveDropIndex, isSelfOrDescendant, subtreeContains } = await import('../src/lib/bookmark-dnd');
     const node = (
       id: string,
       url?: string,
@@ -1795,6 +1848,14 @@ function ok(name: string, fn: () => void) {
     ok('isSelfOrDescendant 拦截深层后代', () => assert.ok(isSelfOrDescendant(outer, 'deep')));
     ok('isSelfOrDescendant 放行无关文件夹', () => assert.ok(!isSelfOrDescendant(outer, 'zzz')));
     ok('isSelfOrDescendant 不拦书签（无子树）', () => assert.ok(!isSelfOrDescendant(node('bm', 'https://x'), 'bm')));
+
+    ok('subtreeContains 递归深度与空 id 防御', () => {
+      assert.equal(subtreeContains(outer, ''), false);
+      assert.equal(subtreeContains(outer, 'deep'), true);
+      let deepTree: any = { id: 'leaf' };
+      for (let i = 0; i < 70; i++) deepTree = { id: 'n', children: [deepTree] };
+      assert.equal(subtreeContains(deepTree, 'non-existent'), false);
+    });
 
     // ── E. move_bookmark：fromPath 必须是「移动前」的路径，且不含元根 ──
     const E1 = (await mockBookmarks.create({ parentId: '2', title: 'T22-SRC' })).id;
@@ -2861,6 +2922,8 @@ function ok(name: string, fn: () => void) {
       readUndoState,
       resetUndoTransactionForTest,
       setUndoBudgetBytes,
+      rememberTerminalRun,
+      MAX_TERMINAL_RUN_IDS,
     } = await import('../src/lib/undo/recorder');
     const { useAIStore } = await import('../src/stores/aiStore');
     const { useToastStore } = await import('../src/lib/toast');
@@ -2932,6 +2995,26 @@ function ok(name: string, fn: () => void) {
       assert.equal(UNDO_BUDGET_BYTES, 4 * 1024 * 1024);
       assert.ok(UNDO_BUDGET_BYTES < 10 * 1024 * 1024, '必须小于 storage.local 的 10 MiB 配额');
     });
+
+    ok('trimPointsToBudget 边界防护：0 预算与负数预算安全处理', () => {
+      const p = mkPoint('1', 100);
+      const zero = trimPointsToBudget([p], 0);
+      assert.equal(zero.kept.length, 0);
+      assert.equal(zero.droppedTooLarge.length, 1);
+      const neg = trimPointsToBudget([p], -100);
+      assert.equal(neg.kept.length, 0);
+    });
+
+    ok('rememberTerminalRun 终态 runId 去重、置顶与容量截断', () => {
+      assert.deepEqual(rememberTerminalRun(undefined, 'r1'), ['r1']);
+      assert.deepEqual(rememberTerminalRun(['r1', 'r2'], 'r2'), ['r2', 'r1']);
+      const list = Array.from({ length: 60 }, (_, i) => 'run-' + i);
+      const trimmed = rememberTerminalRun(list, 'new-run');
+      assert.equal(trimmed.length, MAX_TERMINAL_RUN_IDS);
+      assert.equal(trimmed[0], 'new-run');
+    });
+
+
 
     // ── 落盘层：超预算丢最旧并留下 notice ──
     storageMap.delete(UNDO_STORAGE_KEY);
@@ -3241,6 +3324,35 @@ function ok(name: string, fn: () => void) {
     ok('手工删除后撤销：整棵树含顺序逐节点复原（含被删文件夹的子树）', () => {
       assert.ok(undoA.ok, `撤销应成功，实际 ${JSON.stringify(undoA)}`);
       assert.equal(undoA.failures.length, 0);
+    });
+
+    const { restoreSubtree } = await import('../src/lib/undo/apply');
+    ok('restoreSubtree 递归深度防御：超过 64 层抛错防暴栈', async () => {
+      let deepSnap = { title: 'Leaf', url: 'https://deep.test' };
+      for (let i = 0; i < 66; i++) {
+        deepSnap = { title: 'Level', children: [deepSnap] } as any;
+      }
+      await assert.rejects(
+        () => restoreSubtree(deepSnap as any, '1'),
+        /快照嵌套层级超过 64 层/,
+      );
+    });
+    const { toSnapshot } = await import('../src/lib/undo/mutations');
+    ok('toSnapshot 快照转换与深度上限防爆', () => {
+      const leaf = toSnapshot({ id: 'x', title: 'Google', url: 'https://google.com' } as any);
+      assert.equal(leaf.title, 'Google');
+      let deepNode: any = { id: 'l', title: 'L' };
+      for (let i = 0; i < 70; i++) deepNode = { id: 'n', title: 'D', children: [deepNode] };
+      let count = 0;
+      let cur: any = toSnapshot(deepNode);
+      while (cur?.children?.[0]) {
+        count++;
+        cur = cur.children[0];
+      }
+      assert.equal(count, 64, '快照子树递归深度必须在 64 层截断');
+    });
+
+    ok('手工删除后撤销差异比对验证整树无异', () => {
       const diff = firstTreeDiff(beforeA, afterA, '', { ignoreIds: true });
       assert.equal(diff, null, `第一处差异：${diff ?? ''}`);
     });
@@ -3446,6 +3558,14 @@ function ok(name: string, fn: () => void) {
       assert.notEqual(normalizeUrl('http://example.com/a'), normalizeUrl('https://example.com/a'),
         '协议差异按设计保留（不擅自改写用户收藏的协议）');
     });
+
+    ok('normalizeUrl 与 buildDuplicateGroups 空值安全防御', () => {
+      assert.equal(normalizeUrl(''), '');
+      assert.equal(normalizeUrl(undefined), '');
+      assert.deepEqual(buildDuplicateGroups([]), []);
+      assert.deepEqual(buildDuplicateGroups(undefined), []);
+    });
+
 
     ok('分组：只返回有重复的组，且组内多的在前', () => {
       const groups = buildDuplicateGroups([
@@ -5319,7 +5439,7 @@ function ok(name: string, fn: () => void) {
   /* ── T48: 打开链接失败必须可见，且批量提示不得撒谎 ── */
   console.log('\n[T48] 打开链接的失败反馈');
   {
-    const { openUrl, openUrls, describeTarget } = await import('../src/lib/open-url');
+    const { openUrl, openUrls, describeTarget, failureMessage } = await import('../src/lib/open-url');
     const { useToastStore } = await import('../src/lib/toast');
 
     tabsFail.all = false;
@@ -5419,6 +5539,14 @@ function ok(name: string, fn: () => void) {
       assert.equal(describeTarget('chrome://extensions/shortcuts'), 'chrome');
       assert.equal(describeTarget('不是 URL'), '该链接');
     });
+
+    ok('failureMessage 打开失败友好提示格式化', () => {
+      assert.equal(failureMessage('https://example.com/p', new Error('tab error')), 'https://example.com：tab error');
+      assert.equal(failureMessage('chrome://flags', new Error('denied')), 'chrome：denied');
+      assert.equal(failureMessage('invalid-url', new Error('')), '该链接：浏览器拒绝了这次打开');
+      assert.equal(failureMessage('invalid-url', ''), '该链接：浏览器拒绝了这次打开');
+    });
+
 
     // ── H. 源码守卫：UI 不得再退回"吞掉 tabs.create 失败"，弹窗必须有 toast 视口 ──
     ok('UI 里不得再有吞掉 tabs.create 失败的写法（统一走 openUrl/openUrls）', () => {
@@ -5660,11 +5788,13 @@ function ok(name: string, fn: () => void) {
     g.window = { matchMedia: () => ({ matches: false, addEventListener: () => {}, removeEventListener: () => {} }) };
     g.document = { documentElement: { classList: { toggle: () => {} } } };
 
-    const { useThemeStore } = await import('../src/stores/themeStore');
+    const { useThemeStore, THEME_KEY } = await import('../src/stores/themeStore');
     const { useToastStore } = await import('../src/lib/toast');
 
+    ok('THEME_KEY 存储键名锁定为 markai.theme', () => assert.equal(THEME_KEY, 'markai.theme'));
+
     useToastStore.setState({ toasts: [] });
-    storageSetFailKeys = ['markai.theme'];
+    storageSetFailKeys = [THEME_KEY];
     storageSetFailTimes = Number.POSITIVE_INFINITY;
     await useThemeStore.getState().setTheme('dark');
     storageSetFailKeys = null;
@@ -6610,7 +6740,7 @@ function ok(name: string, fn: () => void) {
   /* ── T60: 通用格式化工具 (format.ts) 单元测试与边界防护 ── */
   console.log('\n[T60] 通用格式化工具边界与正确性');
   {
-    const { getHost, isSpecialUrl, formatRelativeTime, truncate, safeJsonParse, uid } = await import('../src/lib/format');
+    const { getHost, isSpecialUrl, formatIsoDate, formatRelativeTime, truncate, safeJsonParse, uid } = await import('../src/lib/format');
     ok('isSpecialUrl 准确识别特殊与本地协议', () => {
       assert.equal(isSpecialUrl('https://github.com'), false);
       assert.equal(isSpecialUrl('chrome://bookmarks'), true);
@@ -6618,6 +6748,14 @@ function ok(name: string, fn: () => void) {
       assert.equal(isSpecialUrl('about:blank'), true);
       assert.equal(isSpecialUrl(''), true);
     });
+
+    ok('formatIsoDate 安全格式化并抵御异常', () => {
+      assert.equal(formatIsoDate(1700000000000), '2023-11-14');
+      assert.equal(formatIsoDate(Number.NaN), '');
+      assert.equal(formatIsoDate(-100), '');
+      assert.equal(formatIsoDate(1e16), '');
+    });
+
 
     ok('getHost：正确提取标准与多级域名，剥离 www，处理无效输入', () => {
       assert.equal(getHost('https://www.google.com/search?q=1'), 'google.com');
@@ -6656,6 +6794,13 @@ function ok(name: string, fn: () => void) {
       assert.equal(safeJsonParse('{invalid json}'), null);
       assert.equal(safeJsonParse(''), null);
     });
+
+    ok('truncate 与 safeJsonParse 空安全与下限防御', () => {
+      assert.equal(truncate(undefined), '');
+      assert.equal(truncate('hello', -5), '…');
+      assert.equal(safeJsonParse(undefined), null);
+    });
+
 
     ok('uid：生成符合规范的标准 UUID v4 字符串', () => {
       const id1 = uid();
@@ -6719,12 +6864,20 @@ function ok(name: string, fn: () => void) {
       assert.equal(resolveConfig({}).planMode, false);
       assert.equal(resolveConfig({ planMode: false }).planMode, false);
     });
+
+    const { PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT } = await import('../src/lib/ai/prompts');
+    ok('PLAN_MODE_INSTRUCTION 指令规范与动态附加隔离', () => {
+      assert.match(PLAN_MODE_INSTRUCTION, /submit_plan/);
+      assert.match(PLAN_MODE_INSTRUCTION, /先声明计划，再动手/);
+      assert.ok(!SYSTEM_PROMPT.includes('submit_plan'), '默认 SYSTEM_PROMPT 不得污染计划模式指令');
+    });
+
   }
 
   /* ── T63: tools 根文件夹保护（isRoot 涵盖 id 0 与根子目录） ── */
   console.log('\n[T63] tools 根文件夹保护与拒绝策略');
   {
-    const { isRoot, executeTool } = await import('../src/lib/ai/tools');
+    const { isRoot, executeTool, classifyOneUrl, assertFolder, getDeleteMode, copyNodeDeep, MUTATING_TOOLS } = await import('../src/lib/ai/tools');
 
     ok('isRoot：明确判定虚拟根节点 id 0 与子根文件夹为根节点', () => {
       assert.equal(isRoot('0'), true, '虚拟根 0 必须被判定为根');
@@ -6739,9 +6892,97 @@ function ok(name: string, fn: () => void) {
       );
       await assert.rejects(
         () => executeTool('rename_bookmark', JSON.stringify({ bookmarkId: '1', title: '新名称' })),
-        /浏览器根文件夹不可重命名/,
       );
     });
+
+    ok('classifyOneUrl 启发式分类：覆盖各类深度与参数', () => {
+      assert.equal(classifyOneUrl('https://example.com').type, 'root');
+      assert.equal(classifyOneUrl('https://example.com/index.html').type, 'root');
+      assert.equal(classifyOneUrl('https://example.com/about').type, 'page');
+      assert.equal(classifyOneUrl('https://example.com/docs/guide').type, 'sub');
+      assert.equal(classifyOneUrl('https://example.com/a/b/c').type, 'deep');
+      assert.equal(classifyOneUrl('https://example.com/search?q=1').type, 'deep');
+      assert.equal(classifyOneUrl('invalid-url').type, 'unknown');
+    });
+
+    ok('update_bookmark_url 修改 URL 与文件夹防护', async () => {
+      const bm = await mockBookmarks.create({ parentId: '1', title: 'TestBM', url: 'https://old.test' });
+      const res = await executeTool('update_bookmark_url', JSON.stringify({ bookmarkId: bm.id, url: 'https://new.test' }));
+      assert.match(res.result, /https:\/\/new\.test/);
+
+      const folder = await mockBookmarks.create({ parentId: '1', title: 'TestDir' });
+      await assert.rejects(
+        () => executeTool('update_bookmark_url', JSON.stringify({ bookmarkId: folder.id, url: 'https://any.test' })),
+        /文件夹没有 URL，无法修改/,
+      );
+
+      await assert.rejects(
+        () => executeTool('update_bookmark_url', JSON.stringify({ bookmarkId: 'missing-id', url: 'https://any.test' })),
+        /书签不存在/,
+      );
+    });
+
+    ok('assertFolder 校验与书签拦截', async () => {
+      assert.equal(await assertFolder('1'), '1');
+      const bm = await mockBookmarks.create({ parentId: '1', title: 'BM', url: 'https://bm.test' });
+      await assert.rejects(() => assertFolder(bm.id), /不是文件夹，无法作为父级/);
+      await assert.rejects(() => assertFolder('missing-folder'), /父文件夹不存在/);
+    });
+
+    ok('getDeleteMode：无配置或异常回退 confirm，明确 auto 返回 auto', async () => {
+      storageMap.delete('markai.config');
+      assert.equal(await getDeleteMode(), 'confirm');
+      storageMap.set('markai.config', { deleteMode: 'auto' });
+      assert.equal(await getDeleteMode(), 'auto');
+      const origGet = (chrome.storage.local as any).get;
+      (chrome.storage.local as any).get = async () => { throw new Error('fail'); };
+      try {
+        assert.equal(await getDeleteMode(), 'confirm');
+      } finally {
+        (chrome.storage.local as any).get = origGet;
+        storageMap.delete('markai.config');
+      }
+    });
+
+    ok('copyNodeDeep 递归深度上限防护', async () => {
+      const leafId = await copyNodeDeep({ id: 'x', title: 'BM', url: 'https://copy.test' } as any, '1');
+      assert.ok(leafId);
+      let deepNode: any = { id: 'leaf', title: 'Leaf' };
+      for (let i = 0; i < 70; i++) deepNode = { id: 'n', title: 'D', children: [deepNode] };
+      await assert.rejects(() => copyNodeDeep(deepNode as any, '1'), /复制节点嵌套层级超过 64 层/);
+    });
+
+    ok('MUTATING_TOOLS 动写工具集合与读类工具严格互斥', () => {
+      assert.ok(MUTATING_TOOLS.has('create_bookmark'));
+      assert.ok(MUTATING_TOOLS.has('move_bookmark'));
+      assert.ok(MUTATING_TOOLS.has('rename_bookmark'));
+      assert.ok(MUTATING_TOOLS.has('update_bookmark_url'));
+      assert.ok(!MUTATING_TOOLS.has('list_bookmarks'), 'list_bookmarks 绝非写入工具');
+      assert.ok(!MUTATING_TOOLS.has('search_bookmarks'), 'search_bookmarks 绝非写入工具');
+      assert.ok(!MUTATING_TOOLS.has('stats'), 'stats 绝非写入工具');
+      assert.ok(!MUTATING_TOOLS.has('open_bookmark'), 'open_bookmark 绝非写入工具');
+    });
+
+    // 异步准备工作放在外层、用例体保持同步：`ok()` **不 await** 回调，
+    // 写成 async 回调会让 ✔ 先于断言打印，失败退化成**无名** unhandled rejection
+    // （既看不到用例名，反证脚本也匹配不到 expectFail）——本文件其余 async 用例同理。
+    const sortParent = await mockBookmarks.create({ parentId: '1', title: 'SortDir' });
+    const sortEmptyOut = await executeTool('sort_folder', JSON.stringify({ parentId: sortParent.id }));
+    const sortBm = await mockBookmarks.create({ parentId: sortParent.id, title: 'AppleBM', url: 'https://apple.com' });
+    const sortFd = await mockBookmarks.create({ parentId: sortParent.id, title: 'ZebraFolder' });
+    await executeTool('sort_folder', JSON.stringify({ parentId: sortParent.id, by: 'title' }));
+    const sortChildren = await mockBookmarks.getChildren(sortParent.id);
+    ok('sort_folder 排序规则：文件夹强制置顶与子项不足提前返回', () => {
+      assert.match(sortEmptyOut.result, /子项不足，无需排序/);
+      assert.equal(sortChildren[0]?.id, sortFd.id, '文件夹必须排在书签前');
+      assert.equal(sortChildren[1]?.id, sortBm.id);
+    });
+
+
+
+
+
+
   }
 
   /* ── T64: assertNoCycle 循环嵌套防护 ── */

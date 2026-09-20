@@ -43,7 +43,7 @@ export function describeTarget(url: string): string {
 }
 
 /** 打开失败时的统一人话说明（不含完整 URL） */
-function failureMessage(url: string, error: unknown): string {
+export function failureMessage(url: string, error: unknown): string {
   const detail = error instanceof Error ? error.message : String(error);
   return `${describeTarget(url)}：${detail || '浏览器拒绝了这次打开'}`;
 }

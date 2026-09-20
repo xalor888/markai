@@ -97,7 +97,8 @@ function extractText(m: ChatMessage): string {
  * 估算文本 token 数（中英混合近似）：
  * 中文/全角约 0.75 token/字（主流 tokenizer 实测区间），假名/谚文约 1 token，其他约 1/4 token。
  */
-export function estimateTokens(text: string): number {
+export function estimateTokens(text?: string): number {
+  if (!text) return 0;
   let cjk = 0;
   let cjkExt = 0;
   let other = 0;

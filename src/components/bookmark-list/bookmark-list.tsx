@@ -132,8 +132,9 @@ export function BookmarkList({ className, compact = false }: { className?: strin
       }
     };
     list.sort((a, b) => {
-      // 文件夹优先
-      const folderDiff = (b.url ? 1 : 0) - (a.url ? 1 : 0);
+      // 文件夹优先：`a.url ? 1 : 0` → 文件夹取 0、书签取 1，相减为负 → 文件夹在前。
+      // 写成 `(b.url…) - (a.url…)` 会反过来把书签排在文件夹之前（与注释相反的静默反向）。
+      const folderDiff = (a.url ? 1 : 0) - (b.url ? 1 : 0);
       if (folderDiff !== 0) return folderDiff;
       if (sortBy === 'dateAdded') return (b.dateAdded ?? 0) - (a.dateAdded ?? 0);
       if (sortBy === 'dateLastUsed') return (b.dateLastUsed ?? 0) - (a.dateLastUsed ?? 0);

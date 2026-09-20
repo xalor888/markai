@@ -121,3 +121,8 @@ src/
 - 隐私与权限：数据存哪、什么会离开你的机器、如何清除见 [`docs/privacy.md`](docs/privacy.md)；
   每个权限的用途与去掉的后果见 [`docs/permissions.md`](docs/permissions.md)
   （后者的权限清单由测试与 `wxt.config.ts` 强制核对，改一边不改另一边会失败）
+
+## 许可
+
+[MIT License](LICENSE) © 2026 xalor888。可自由使用、修改、再分发（含商用），
+只需保留版权与许可声明；软件按"原样"提供，不附带任何担保。

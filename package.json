@@ -2,6 +2,7 @@
   "name": "markai",
   "description": "MarkAI —— 智能书签管家（自由对话的 AI Agent）",
   "private": true,
+  "license": "MIT",
   "version": "0.2.23",
   "type": "module",
   "scripts": {

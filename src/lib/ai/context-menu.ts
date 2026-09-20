@@ -1,5 +1,9 @@
 /**
- * 书签右键菜单的编排逻辑（从 background 抽出来，便于用替身直接单测）。
+ * 右键菜单点击的编排逻辑（从 background 抽出来，便于用替身直接单测）。
+ *
+ * 入口是**扩展图标（action）右键**：打开管理面板 / 在完整页打开 / 让 MarkAI 整理全部书签。
+ * 原生书签管理器的右键菜单在 Chrome 上无法实现（没有 bookmark 上下文，也注入不进 chrome://
+ * 页面），书签维度的整理/分析走 MarkAI 自己的书签树右键，见 lib/ai/context-menus.ts 顶部说明。
  *
  * 为什么要有这个模块：这段逻辑做的是"写一条指令 → 打开侧边栏 → 广播"的交接，
  * 而**写入可能失败**。原先 `.catch(() => {})` 吞掉失败后照样打开侧边栏，
@@ -40,15 +44,35 @@ export interface ContextMenuClickInfo {
 
 const ERROR_TITLE = 'MarkAI：右键指令未能保存，请重新选择书签后重试';
 
-/** 组织成发给 Agent 的指令文本 */
+/**
+ * 组织成发给 Agent 的指令文本。
+ *
+ * 关键前提（曾经踩过）：扩展图标右键（action 上下文）的点击数据里**没有 bookmarkId**，
+ * 因此这些菜单项必须先在这里被处理——否则会落到下面那条"右键的书签已被删除"的
+ * 失效节点提示上，用户明明点的是"整理全部书签"，却收到一句"书签已被删除"。
+ */
 export function buildInstruction(
   menuItemId: string,
   node: chrome.bookmarks.BookmarkTreeNode | undefined,
 ): { text: string; folderId?: string; notice?: string } {
+  // 打开界面不需要指令：handleContextMenuClick 会顺手清掉可能残留的旧种子
+  if (menuItemId === 'markai:open') return { text: '' };
+
+  // 整库整理：与具体书签无关，因此**不能**依赖 node
+  if (menuItemId === 'markai:tidy-all') {
+    return {
+      text: '请整理我的全部书签：先浏览整棵书签树，找出分类混乱、命名含糊、失效或重复的条目，创建语义清晰的分类文件夹，并把书签归类移动到位。',
+    };
+  }
+
   const title = node?.title || '此书签';
-  // 书签上下文菜单但目标已不存在（菜单打开后书签被删）：给用户可见提示，而不是静默无反馈
+  // 目标已不存在（菜单打开后书签被删）：给用户可见提示，而不是静默无反馈
   if (!node) return { text: '', notice: '右键的书签已被删除或不可用，请重新选择。' };
 
+  // 注：以下两个 id 当前**没有任何菜单注册它们**——Chrome 没有 bookmark 上下文，
+  // 原生书签管理器右键在 Chrome 上无法实现（见 lib/ai/context-menus.ts 顶部说明）。
+  // 装配逻辑与失效节点提示保留在这里：它们是"书签维度指令话术"的唯一出处（有测试守护），
+  // 一旦上游支持 bookmark 上下文，注册进来即可直接用。
   if (menuItemId === 'markai:organize') {
     if (node.url) {
       // 单个书签：归位到合适分类（与文件夹的"整理全部子项"语义区分）

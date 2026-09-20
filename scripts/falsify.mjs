@@ -671,7 +671,9 @@ const cases = [
     file: 'src/lib/ai/context-menu.ts',
     from: "  if (!node) return { text: '', notice: '右键的书签已被删除或不可用，请重新选择。' };",
     to: "  if (!node) return { text: '' };",
-    expectFail: ['buildInstruction 针对单书签、文件夹与失效节点的指令装配'],
+    // 第一个变红的是 T40 的 notice 路径用例（它先于 T68 执行）；此前的 expectFail 写成 T68 那条
+    // 但从未实跑过（只有锚点静态校验），2026-09-20 定向复核时才暴露，已按实际首败更正。
+    expectFail: ['右键的书签已不存在时仍走 notice 路径'],
   },
   {
     name: 'Toast 队列不再限制硬上限（移除 slice 裁剪）',
@@ -1190,6 +1192,29 @@ const cases = [
     from: "      pushToast('无法读取主题设置', {",
     to: "      void 0; if (false) pushToast('无法读取主题设置', {",
     expectFail: ['themeStore.load 读取失败时必须给出警告提示（不静默回落）'],
+  },
+  {
+    // 真实故障：菜单项曾用 contexts: ['bookmark']（Firefox 独有取值），
+    // Chrome 于是把 5 项全部拒绝——症状只有控制台一条未捕获的 Promise 拒绝。
+    name: '菜单项退回 Chrome 不支持的 bookmark 上下文（右键入口整体消失）',
+    file: 'src/lib/ai/context-menus.ts',
+    from: "  { id: 'markai:open', title: '打开 MarkAI 管理面板', contexts: ['action'] },",
+    to: "  { id: 'markai:open', title: '打开 MarkAI 管理面板', contexts: ['bookmark'] },",
+    expectFail: ['所有菜单项只用 Chrome 支持的上下文'],
+  },
+  {
+    name: '注册失败又被静默吞掉（失败项不记账）',
+    file: 'src/lib/ai/context-menus.ts',
+    from: '      failed.push({ id: spec.id, message: e instanceof Error ? e.message : String(e) });',
+    to: '      void e;',
+    expectFail: ['MV3 的 Promise 拒绝被如实记账'],
+  },
+  {
+    name: '扩展图标右键无书签上下文时退回失效提示（用户点「整理全部书签」却被告知书签已删除）',
+    file: 'src/lib/ai/context-menu.ts',
+    from: "  if (menuItemId === 'markai:open') return { text: '' };",
+    to: '  // reverted',
+    expectFail: ['扩展图标右键没有 bookmarkId'],
   },
 ];
 

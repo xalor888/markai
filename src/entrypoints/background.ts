@@ -1,7 +1,7 @@
 /**
  * ── MarkAI background Service Worker ──
  * 职责：
- *  1. 浏览器原生书签右键菜单（contextMenus）→ 打开侧边栏并注入种子指令
+ *  1. 扩展图标（action）右键菜单 → 打开侧边栏/完整页，或注入种子指令（注册逻辑见 lib/ai/context-menus.ts）
  *  2. 一次性消息：AI 连接测试 / 删除执行（转交 deletion-executor，会记入操作日志因此可撤销）/ 侧边栏打开 / 种子消费
  *  3. 聊天长连接 Port：Agent 流式代理（工具调用循环在后台闭环，UI 零 CORS 压力）
  */
@@ -16,6 +16,7 @@ import {
   handleContextMenuClick as runContextMenuClick,
   type ContextMenuClickInfo,
 } from '@/lib/ai/context-menu';
+import { ACTION_MENUS, registerContextMenus } from '@/lib/ai/context-menus';
 import { executeDeletions as runDeletions } from '@/lib/ai/deletion-executor';
 import { normalizeBaseUrl, resolveConfig } from '@/lib/providers';
 import { CONFIG_STORAGE_KEY } from '@/stores/configStore';
@@ -38,31 +39,31 @@ export default defineBackground(() => {
   // 并带一条"上一轮被中断"的提示。
   void recoverInterruptedTransaction();
 
-  // ── 1. 浏览器原生书签右键菜单 ──
-  // 注：'bookmark' 上下文是较新的 Chrome API，@types/chrome 尚未收录，通过断言助手创建
-  // 只在安装/更新时注册（onInstalled），避免 SW 重启后重复 id 报错；重复注册兜底吞错
+  // ── 1. 扩展图标（action）右键菜单 ──
+  // 注：Chrome 的 contextMenus **没有 bookmark 上下文**（那是 Firefox menus API 的取值），
+  // 也无法向 chrome://bookmarks 注入——原生书签管理器的右键菜单在 Chrome 上无法实现。
+  // 书签维度的「整理此文件夹 / 分析此书签」在 MarkAI 自己的书签树右键里
+  // （src/components/sidebar/bookmark-tree.tsx）；这里只注册扩展图标上的入口。
+  // 只在安装/更新时注册（onInstalled），避免 SW 重启后重复 id 报错；成败逐项如实上报。
   chrome.runtime.onInstalled.addListener(async () => {
-    // 先清空再注册，彻底避免重复 id 报错（onInstalled 在 install/update 时触发）
-    await chrome.contextMenus.removeAll().catch(() => {});
-    const createChecked = (props: chrome.contextMenus.CreateProperties, label: string) => {
-      chrome.contextMenus.create(props);
-      // MV3 下 create 是同步的，lastError 在每次调用后被重置：每项都查，不静默
-      if (chrome.runtime.lastError) {
-        console.warn(`[MarkAI] contextMenus 注册失败（${label}）:`, chrome.runtime.lastError.message);
-      }
-    };
-    createChecked(bookmarkMenuProps('markai:organize', '让 MarkAI 整理此文件夹'), 'organize');
-    createChecked(bookmarkMenuProps('markai:analyze', '让 MarkAI 分析此书签'), 'analyze');
-    createChecked(
+    const { ok, failed } = await registerContextMenus(
       {
-        id: 'markai:sep',
-        type: 'separator',
-        contexts: ['bookmark'],
-      } as unknown as chrome.contextMenus.CreateProperties,
-      'separator',
+        removeAll: () => chrome.contextMenus.removeAll(),
+        create: (props) => chrome.contextMenus.create(props),
+        lastError: () => (chrome.runtime.lastError as { message?: string } | undefined)?.message,
+      },
+      ACTION_MENUS,
     );
-    createChecked(bookmarkMenuProps('markai:open', '打开 MarkAI 管理面板'), 'open');
-    createChecked(bookmarkMenuProps('markai:fullpage', '在 MarkAI 完整页打开'), 'fullpage');
+    if (failed.length === 0) return;
+    console.warn(
+      `[MarkAI] 右键菜单注册失败 ${failed.length}/${ok.length + failed.length} 项：` +
+        failed.map((f) => `${f.id}（${f.message}）`).join('；'),
+    );
+    // 全部失败 = 扩展图标右键入口整体消失（本项目真实发生过：'bookmark' 上下文让 5 项全废，
+    // 而症状只在控制台里）。"功能看起来本该有、其实没有"这类失败必须让人看得见。
+    if (ok.length === 0) {
+      await toolbarError('MarkAI：扩展右键菜单未能注册，请重新加载扩展或查看后台控制台');
+    }
   });
   chrome.contextMenus.onClicked.addListener(handleContextMenuClick);
 
@@ -168,11 +169,6 @@ export default defineBackground(() => {
 
   void ensureRoots().catch(() => {});
 });
-
-/** 书签上下文菜单选项（'bookmark' 上下文为较新 API，@types/chrome 未收录，断言绕过） */
-function bookmarkMenuProps(id: string, title: string): chrome.contextMenus.CreateProperties {
-  return { id, title, contexts: ['bookmark'] } as unknown as chrome.contextMenus.CreateProperties;
-}
 
 /** ── contextMenus 点击处理：编排逻辑在 src/lib/ai/context-menu.ts（可单测） ── */
 async function handleContextMenuClick(info: chrome.contextMenus.OnClickData, tab?: chrome.tabs.Tab): Promise<void> {

@@ -14,7 +14,7 @@ manifest-permissions: bookmarks, storage, tabs, tabGroups, contextMenus, sidePan
 | `storage` | 保存配置（含 API Key）、聊天记录、撤销记录、主题（`markai.*` 键，见 [privacy.md](./privacy.md)） | 配置与对话无法保存 |
 | `tabs` | 打开书签（`chrome.tabs.create`）、读取当前窗口以打开侧边栏（`chrome.tabs.query`） | 「打开书签」「打开全部」「打开侧边栏」失效 |
 | `tabGroups` | 右键文件夹 →「在新标签页组中打开全部」（`src/components/sidebar/bookmark-tree.tsx`） | 只影响这一个菜单项 |
-| `contextMenus` | 书签右键集成：整理此文件夹 / 分析此书签（`src/entrypoints/background.ts`） | 右键入口消失，聊天仍可用 |
+| `contextMenus` | 扩展图标（action）右键集成：打开管理面板 / 在完整页打开 / 让 MarkAI 整理全部书签（`src/lib/ai/context-menus.ts`、注册失败会告警）。**注**：原生书签管理器（`chrome://bookmarks`）的右键菜单在 Chrome 上无法实现——`contextMenus` 没有 `bookmark` 上下文（Firefox `menus` API 才有），`chrome://` 页面也不接受扩展注入；书签维度的「整理 / 分析」在扩展内的书签树右键里 | 扩展图标右键入口消失，聊天与书签树右键仍可用 |
 | `sidePanel` | 侧边栏形态（`side_panel.default_path`，`chrome.sidePanel.open`） | 只剩完整页形态 |
 
 **没有申请**：`history`、`downloads`、`management`、`cookies`、`webRequest`、`scripting`、

@@ -31,10 +31,10 @@ Chrome/Edge MV3 浏览器扩展（WXT + React 19 + TS + Tailwind v4 + Zustand）
 | 检查 | 命令 | 结果 |
 | --- | --- | --- |
 | 类型 | `npm run compile` | 通过（tsc 无输出，exit 0） |
-| 测试 | `npm test` | **468 项全绿**（… → 465 → 468） |
-| 反证 | `node scripts/falsify.mjs` | 161 条**锚点全部静态校验通过**；全量实跑到 15 条时中断（此刻 **15/15 全部 `RED ✔`**，无 `GREEN ✘`、无 `RED?`）；**全量仍未跑完**（一条 ≈ 17 秒，161 条约 46 分钟）——见 §10 |
-| 构建 | `npm run build` | 通过，`.output/chrome-mv3` 851.92 kB（含 `public/store/` 上架素材） |
-| 版本 | `package.json` | **0.2.24（已发版）** |
+| 测试 | `npm test` | **478 项全绿**（… → 468 → 478） |
+| 反证 | `node scripts/falsify.mjs` | 164 条锚点全部静态校验通过；本版对**改动涉及的 9 条**定向实跑（含 3 条新增），**9/9 全部 `RED ✔`**；**全量仍未跑完**（一条 ≈ 17 秒，164 条约 46 分钟）——见 §10/§11 |
+| 构建 | `npm run build` | 通过，`.output/chrome-mv3` 853.22 kB（含 `public/store/` 上架素材） |
+| 版本 | `package.json` | **0.2.25（本版）** |
 | CI | `.github/workflows/ci.yml` | push/PR 跑 compile + test + build |
 | 发布 | `.github/workflows/release.yml` | `v*` tag → 构建 + **产物校验** + Release（校验为 v0.2.24 新增的硬门禁） |
 
@@ -515,4 +515,51 @@ v0.2.23 的 tag/zip 打的是 441 项测试 / 135 条反证的状态，v0.2.24 �
 
 **沿用 §9 的遗留**：18 条 `ok('…', async () => {…})` 用例仍未改（失败会退化成无名 unhandled rejection）；
 真机验证（P3）仍受环境限制；`docs/error-handling.md` 与历史 release-notes 的计数未逐处复核。
+
+## 11. 右键菜单注册失效的修复（v0.2.25，报告来自用户）
+
+**症状（用户报的）**：扩展装上去后控制台吐一条未捕获拒绝——
+
+```
+Uncaught (in promise) TypeError: Error in invocation of contextMenus.create(...)
+  Error at property 'contexts': Error at index 0: Value must be one of action, all, audio, ...
+```
+
+**根因（两个，叠在一起才这么难查）**：
+
+1. 5 个菜单项用的是 `contexts: ['bookmark']`，而 **Chrome 的 `contextMenus` 没有 `bookmark` 上下文**——
+   它是 Firefox `menus` API 的取值。旧代码那句注释（"'bookmark' 上下文是较新的 Chrome API，
+   @types/chrome 尚未收录"）正是被 Firefox 文档带偏的产物，`as unknown as` 断言把类型检查也一起绕过了。
+   Chrome 合法取值只有 14 个：`all / page / frame / selection / link / editable / image / video /
+   audio / launcher / browser_action / page_action / action / tab`。**结论：这 5 个菜单项从上线起
+   一次都没注册成功**，"书签右键集成"是不存在的能力（README 已如实改写）。
+2. 旧代码注册后只查 `chrome.runtime.lastError`。MV3 下不传 callback 时 `create` 返回 **Promise**，
+   校验失败走 **Promise 拒绝**——那句 `console.warn` 是死代码，一次都没打过。所以失败的唯一出口
+   就是控制台里那条 uncaught，用户不问就永远不知道。
+
+**Chrome 的能力边界（不是这次没做好，是做不了）**：扩展无法向 `chrome://bookmarks` 注入，
+`contextMenus` 也没有书签上下文——原生书签管理器右键在 Chrome 上**无法实现**。书签维度的
+「整理此文件夹 / 分析此书签」一直在 MarkAI 自己的书签树右键里（`bookmark-tree.tsx`），能力没丢。
+
+**修法**：
+
+- 入口换成**扩展图标（action）右键**：打开管理面板 / 在完整页打开 / 让 MarkAI 整理全部书签；
+- 注册逻辑抽成可单测的 `src/lib/ai/context-menus.ts`：注册前按 **Chrome 上下文白名单**校验
+  （写错的取值在本地就被拦下、不发放给浏览器）、逐项独立记账、**同时覆盖 Promise 拒绝与 lastError
+  两种运行形态**、返回成败清单由调用方呈现；全部失败时用工具栏提示**主动告警**（不再只躺在控制台）；
+- 顺带修掉一个连带 bug：`buildInstruction` 原先在检查 `node` 之前不区分菜单项，而 action 上下文
+  **不带 bookmarkId**——点「整理全部书签」会收到"右键的书签已被删除或不可用"的假提示；
+- 文档口径同步更正（README 能力表与使用示例、`docs/permissions.md`、`docs/store-listing.md`、
+  `docs/error-handling.md` §1 新增一行"功能整体注册失败必须可见"）。
+
+**证据**：T69 十条用例（白名单 / id 唯一 / 逐项记账 / 两种失败形态 / bookmark 取值被本地拦下 /
+无书签上下文不报假提示）+ 3 条新反证；发版前对**改动涉及的 9 条**反证定向实跑，**9/9 全部 `RED ✔`**
+（回滚锚点分别是 `contexts: ['action']`→`['bookmark']`、失败项不记账、`markai:open` 早退，另含
+context-menu/background 上既有的 6 条），恢复后全绿。顺带**修正一条历史遗留的 expectFail**：
+`buildInstruction 丢失失效节点友好提示` 只有锚点静态校验、从未实跑，首败用例名写错（实际首败是
+T40 的 notice 路径用例），已更正并复核。
+测试 468 → **478 项全绿**；反证 161 → **164 条**（实测累计 18 条）。
+
+**边界如实标注**：`markai:organize` / `markai:analyze` 的指令装配与失效节点提示**保留但当前没有任何
+菜单注册它们**（Chrome 上无处可挂）；若上游将来支持书签上下文，注册进来即可直接用。
 

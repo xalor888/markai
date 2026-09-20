@@ -7072,6 +7072,145 @@ function ok(name: string, fn: () => void) {
     });
   }
 
+  /* ── T69: 扩展图标右键菜单的注册（Chrome 上下文白名单 + 失败如实上报） ── */
+  console.log('\n[T69] 原生右键菜单注册：Chrome 上下文白名单与失败如实上报');
+  {
+    const { ACTION_MENUS, CHROME_CONTEXT_TYPES, FIREFOX_ONLY_CONTEXTS, registerContextMenus } =
+      await import('../src/lib/ai/context-menus');
+    const { buildInstruction } = await import('../src/lib/ai/context-menu');
+
+    ok('所有菜单项只用 Chrome 支持的上下文（bookmark 只有 Firefox 有，写了必然注册失败）', () => {
+      for (const spec of ACTION_MENUS) {
+        assert.ok(spec.contexts.length > 0, `菜单项 ${spec.id} 缺少 contexts`);
+        for (const c of spec.contexts) {
+          assert.ok(
+            (CHROME_CONTEXT_TYPES as readonly string[]).includes(c),
+            `菜单项 ${spec.id} 用了 Chrome 不支持的上下文「${c}」——浏览器会抛 "Value must be one of ..."`,
+          );
+        }
+      }
+      // 白名单与「Firefox 独有」清单必须互斥：同时命中说明其中一份写错了
+      for (const f of FIREFOX_ONLY_CONTEXTS) {
+        assert.ok(
+          !(CHROME_CONTEXT_TYPES as readonly string[]).includes(f),
+          `${f} 不该出现在 Chrome 白名单里（它只在 Firefox 的 menus API 中有效）`,
+        );
+      }
+    });
+
+    ok('菜单 id 唯一且非空（重复 id 会让后来者注册失败）', () => {
+      const ids = ACTION_MENUS.map((s) => s.id);
+      assert.equal(new Set(ids).size, ids.length, 'id 必须唯一');
+      for (const id of ids) assert.ok(id.trim().length > 0, 'id 不能为空');
+    });
+
+    // 替身同时覆盖两种真实形态：MV3 的 Promise 拒绝 与 旧实现的同步 lastError（见 context-menus.ts 顶部）
+    const mkApi = (opts: {
+      reject?: (id: string) => boolean;
+      syncFail?: (id: string) => boolean;
+      removeAllFails?: boolean;
+    } = {}) => {
+      const created: string[] = [];
+      let last: string | undefined;
+      return {
+        created,
+        api: {
+          removeAll: async () => {
+            if (opts.removeAllFails) throw new Error('removeAll 失败');
+          },
+          create: (props: chrome.contextMenus.CreateProperties) => {
+            const id = String(props.id);
+            last = undefined;
+            if (opts.reject?.(id)) return Promise.reject(new TypeError(`Error at property 'contexts'（${id}）`));
+            if (opts.syncFail?.(id)) {
+              last = `同步注册失败（${id}）`;
+              return id;
+            }
+            created.push(id);
+            return id;
+          },
+          lastError: () => last,
+        },
+      };
+    };
+
+    const happy = mkApi();
+    const happyResult = await registerContextMenus(happy.api, ACTION_MENUS);
+    ok('正常注册：逐项成功，顺序与菜单定义一致', () => {
+      assert.deepEqual(happyResult.failed, []);
+      assert.deepEqual(happyResult.ok, ACTION_MENUS.map((s) => s.id));
+      assert.deepEqual(happy.created, ACTION_MENUS.map((s) => s.id));
+    });
+
+    const rejectOne = mkApi({ reject: (id) => id === 'markai:open' });
+    const rejectResult = await registerContextMenus(rejectOne.api, ACTION_MENUS);
+    ok('MV3 的 Promise 拒绝被如实记账，且不牵连其余菜单项', () => {
+      assert.equal(rejectResult.failed.length, 1, `应恰好一项失败，实际 ${rejectResult.failed.length}`);
+      assert.equal(rejectResult.failed[0]!.id, 'markai:open');
+      assert.match(rejectResult.failed[0]!.message, /contexts/);
+      assert.equal(rejectResult.failed.length + rejectResult.ok.length, ACTION_MENUS.length, '成败项必须覆盖全部菜单');
+      assert.ok(rejectOne.created.includes('markai:fullpage'), '一项失败不得阻断其余项');
+    });
+
+    const legacyFail = mkApi({ syncFail: (id) => id === 'markai:sep' });
+    const legacyResult = await registerContextMenus(legacyFail.api, ACTION_MENUS);
+    ok('同步形态的 runtime.lastError 同样被记账（两种运行形态都覆盖）', () => {
+      assert.deepEqual(legacyResult.failed.map((f) => f.id), ['markai:sep']);
+      assert.match(legacyResult.failed[0]!.message, /同步注册失败/);
+      assert.equal(legacyResult.ok.length, ACTION_MENUS.length - 1);
+    });
+
+    const rmFail = mkApi({ removeAllFails: true });
+    const rmResult = await registerContextMenus(rmFail.api, ACTION_MENUS);
+    ok('清空旧菜单失败不阻断注册（一次清理异常不该让右键入口整体消失）', () => {
+      assert.deepEqual(rmResult.failed, []);
+      assert.equal(rmResult.ok.length, ACTION_MENUS.length);
+    });
+
+    // 本次故障的直接守卫：Firefox 独有的 bookmark 必须在本地被拦下，**不交给浏览器抛错**
+    const firefoxOnly = mkApi();
+    const badResult = await registerContextMenus(firefoxOnly.api, [
+      { id: 'markai:bad', title: 'x', contexts: ['bookmark'] },
+    ] as unknown as typeof ACTION_MENUS);
+    ok('Firefox 独有的 bookmark 上下文在本地白名单被拦下（不再发放给浏览器）', () => {
+      assert.deepEqual(firefoxOnly.created, [], '非法取值不得发放到 create');
+      assert.equal(badResult.ok.length, 0);
+      assert.equal(badResult.failed.length, 1);
+      assert.match(badResult.failed[0]!.message, /bookmark/);
+    });
+
+    const emptyCtx = mkApi();
+    const emptyResult = await registerContextMenus(emptyCtx.api, [
+      { id: 'markai:empty', title: 'x', contexts: [] },
+    ]);
+    ok('缺少 contexts 的菜单项在本地被拦下（Chrome 要求至少一项）', () => {
+      assert.deepEqual(emptyCtx.created, []);
+      assert.match(emptyResult.failed[0]!.message, /contexts 为空/);
+    });
+
+    ok('扩展图标右键没有 bookmarkId：整库指令与打开面板都不得落到「书签已被删除」的假提示', () => {
+      const tidy = buildInstruction('markai:tidy-all', undefined);
+      assert.match(tidy.text, /整理我的全部书签/);
+      assert.equal(tidy.notice, undefined, '整库指令与具体书签无关，不该报失效');
+      assert.equal(tidy.folderId, undefined);
+
+      const open = buildInstruction('markai:open', undefined);
+      assert.equal(open.text, '');
+      assert.equal(open.notice, undefined, '打开面板与书签无关，不该报"书签已被删除"');
+    });
+
+    ok('除提前处理的「完整页打开」外，每个菜单项都有指令装配分支（掉进失效提示即为 bug）', () => {
+      // markai:fullpage 由 handleContextMenuClick 提前处理（直接开标签页，不装配指令；
+      // 无书签上下文也不该报失效——T40 的「完整页正常路径」用例守着这一点）
+      const handledUpstream = new Set(['markai:fullpage']);
+      for (const spec of ACTION_MENUS) {
+        if (spec.type === 'separator' || handledUpstream.has(spec.id)) continue;
+        const r = buildInstruction(spec.id, undefined);
+        assert.equal(r.notice, undefined, `菜单项 ${spec.id} 在无书签上下文时收到了失效节点提示`);
+      }
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

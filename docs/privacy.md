@@ -67,6 +67,6 @@ profile 的人或恶意软件可以读到它——请像对待其他本地凭据
 
 ## 5. 这份文档的边界
 
-- 面向 Chrome / Edge（Manifest V3）。**Firefox 未验证**，因此不发布 Firefox 产物（见 release.md）。
+- 面向 Chrome / Edge（Manifest V3）。**Firefox 未验证**，因此不发布 Firefox 产物
 - 扩展**没有**做端到端加密：发给服务商的内容按该服务商的策略处理，请自行阅读其条款。
 - 若你使用第三方代理地址作为 Base URL，那份数据的经手方就是该代理——这是你的配置选择。

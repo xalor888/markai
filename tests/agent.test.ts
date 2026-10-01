@@ -2052,7 +2052,7 @@ function ok(name: string, fn: () => void) {
     await mockBookmarks.removeTree(F).catch(() => {});
   }
 
-  /* ── T23: 操作日志与撤销（DIRECTION P1） ── */
+  /* ── T23: 操作日志与撤销 ── */
   console.log('\n[T23] 操作日志与撤销');
   {
     const { summarizeOps, undoReadiness, undoableOps, reverseOps } = await import('../src/lib/undo/journal');
@@ -2460,7 +2460,7 @@ function ok(name: string, fn: () => void) {
     }
   }
 
-  /* ── T26: 撤销的边界与一致性（DIRECTION P2） ── */
+  /* ── T26: 撤销的边界与一致性 ── */
   console.log('\n[T26] 撤销的边界与一致性');
   {
     const { useAIStore, initCrossWindowSync } = await import('../src/stores/aiStore');
@@ -3204,7 +3204,7 @@ function ok(name: string, fn: () => void) {
       const rel = readFileSync(resolve(rootDir, '.github/workflows/release.yml'), 'utf8');
       assert.ok(
         !/zip:firefox|build:firefox/.test(rel),
-        'Firefox 从未在真实 Firefox 里验证过，不该继续作为发布产物（见 docs/release.md）',
+        'Firefox 从未在真实 Firefox 里验证过，不该继续作为发布产物',
       );
     });
 

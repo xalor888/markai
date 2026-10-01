@@ -43,7 +43,7 @@ npm run dev # 开发模式：自动打开 Chrome 并加载扩展
 
 ```bash
 npm run build # 构建到 .output/chrome-mv3
-npm run zip # 生成可分发 zip（发版流程见 docs/release.md）
+npm run zip # 生成可分发 zip（发版靠 v* tag 触发 GitHub Release，见 .github/workflows/release.yml）
 ```
 
 > 若 `npm run dev` 未自动打开浏览器，手动到 `chrome://extensions` → 开发者模式 → 加载已解压的扩展程序 → 选择 `.output/chrome-mv3` 目录。

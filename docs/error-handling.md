@@ -20,10 +20,10 @@
 
 | 位置 | 症状 | 修法 |
 | --- | --- | --- |
-| `undo/recorder.writeUndoPoints` | 超配额导致撤销点丢失，界面显示"没有可撤销的操作" | 容量护栏（4 MiB）+ 丢弃如实说明 + 失败上报，见 DIRECTION §4A |
+| `undo/recorder.writeUndoPoints` | 超配额导致撤销点丢失，界面显示"没有可撤销的操作" | 容量护栏（4 MiB）+ 丢弃如实说明 + 失败上报 |
 | `aiStore._persist` | 对话写盘失败被空 catch 吞掉，界面照常显示历史 | 6 MiB 预算 + 常驻警示条 + `getBytesInUse` 真实占用 |
 | `configStore.update` | 设置（含 **API Key** 与 **删除模式**）保存失败被空 catch 吞掉，UI 已显示新值 | 如实上报 + 设置页可见警示（删除模式额外点名安全风险）+ 重试入口 |
-| `undo` 被中断的轮次 | Service Worker 被杀时已完成的改动没有任何撤销点 | 增量落盘 + 启动恢复（见 DIRECTION §4A） |
+| `undo` 被中断的轮次 | Service Worker 被杀时已完成的改动没有任何撤销点 | 增量落盘 + 启动恢复 |
 | `undo` 正式点与 pending 的**交接** | 收尾/恢复先删 pending 再写正式点：写失败时唯一快照已被删，改动彻底不可撤销（且恢复仍返回"成功"） | 正式点**写成功后才清 pending**；写失败则保留并补全 pending、返回 null；恢复按 `runId` 去重，避免"清了 pending 失败"变成两个可回放点（`undo/recorder.ts`，T37 七条用例 + 三条反证） |
 | `undo` 消费失败可**重复回放** | `takeUndoPoint` 忽略消费写入失败，`applyUndo` 仍可能报成功；原点留在存储里，再点一次会重复执行——删除类逆操作会重复重建子树 | `takeUndoPoint` 如实回报 `removed`；消费失败**先自动重试一次**，仍失败则返回 `ok:false` 并明确警告"不要重复点击"；同一 SW 会话内记住已执行过的点并拒绝重复应用（`undo/apply.ts`，T38 七条用例 + 四条反证）。**残留风险**：跨会话（SW 重启）后这道内存保护会消失，届时重复点击仍可能重复执行——已如实标注，未修复 |
 | 已消费的点被残留 pending 复活 | 去重只扫描当前 points：点被**消费**后 runId 随之消失，若 pending 清理失败且进程又被杀，下次启动会把它提升成**新 id 的可执行点**——删除类逆操作可被重复回放 | `markai.undo` 增加有界 `terminalRunIds`；`takeUndoPoint` 把移除与记账放在同一次写入（原子）；恢复前先查终态，已终结者只清 pending 不生成新点（T47 七条 + 两条反证） |

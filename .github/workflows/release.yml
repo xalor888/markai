@@ -38,10 +38,10 @@ jobs:
       - name: 打包 Chrome zip
         run: npm run zip
 
-      # 不再发布 Firefox 产物：它从未在真实 Firefox 里验证过（见 docs/release.md）。
-      # 重新纳入的条件写在同处：先在 Firefox 里装一次并跑通核心路径，再加回这一步。
+      # 不再发布 Firefox 产物：它从未在真实 Firefox 里验证过。
+      # 重新纳入的条件：先在真实 Firefox 里装一次并跑通核心路径，再加回这一步。
 
-      # 产物的"健康探针"（docs/release.md §3 那一步的机器化版本）。
+      # 产物的"健康探针"（把发版后人工解包核对那一步机器化）。
       # 在此之前，"产物是对的"只靠人发版后手动解包核对——漏做也没人拦。
       # 现在不对就红在这里，Release 根本轮不到创建。
       - name: 校验产物（manifest 版本 / MV3 / 入口文件）

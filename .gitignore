@@ -20,6 +20,11 @@ preview-*.png
 .env.*
 *.local
 
+# 扩展签名的**私钥**（manifest.key 里放的是公钥，可以公开）。
+# 私钥只用于本机生成固定扩展 ID，一旦泄漏任何人都能伪造出同 ID 的扩展。
+# 丢了也不影响已发布版本——ID 已经由公钥固定下来了。
+.keys/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

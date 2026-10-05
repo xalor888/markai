@@ -1289,6 +1289,23 @@ const cases = [
     to: '/* reverted: moz 侧把手规则被删除 */\n',
     expectFail: ['滑块必须走 Slider 基元 + .markai-slider 样式'],
   },
+  {
+    // 真实故障：manifest 没有 key → Chrome 用加载目录的绝对路径派生扩展 ID →
+    // chrome.storage.local 按 ID 隔离 → 每次更新都读不到 API Key / 模型 / 对话记录。
+    // 没有任何运行时错误，只有用户投诉"每次都要重填配置"。
+    name: 'manifest 的 key 被删（扩展 ID 随加载目录变化 → 每次更新都丢配置）',
+    file: 'wxt.config.ts',
+    from: "    key: 'MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3TNHgP/OL3lqvdwJtL3B0lTr5/8nXIa40wuUhuTAHCWAXU5KiPpXL+PqpYjbRLRFt2bvuHIDj2mlI+2kdIreMlfTEpAKzOiloTJ2rFf2sap+ZQth8uASTY0eX0+Ln7+wi3NHk5wI1TaFx8gFdRiXEPqSwdtkx7sWMBgtT2sdTFjrZ/BOlBDmvt+NHW+0Hb5A4j87FfJXdIYF7L2V5MpVRy0DK/DxmS3jzwxInBqbABE19l7CeeI81VBjKR+wDFQPI/516E55SjeBxpc2Tfm2ZshdGYVtaD3ax5AXE+swC2+D7doGsO2uMZOYi2eGasK6mzVgbgQ14uEfLr8t7ndSQwIDAQAB',\n",
+    to: '    // reverted: key 被删除\n',
+    expectFail: ['manifest 必须固定 key'],
+  },
+  {
+    name: '扩展私钥目录 .keys/ 被移出 .gitignore（私钥泄漏即可伪造同 ID 扩展）',
+    file: '.gitignore',
+    from: '.keys/',
+    to: '# reverted: .keys/ 不再被排除',
+    expectFail: ['扩展签名的私钥不得进版本库'],
+  },
 ];
 
 /**

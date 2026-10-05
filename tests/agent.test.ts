@@ -7653,6 +7653,39 @@ function ok(name: string, fn: () => void) {
     });
   }
 
+  /* ── T73: 扩展 ID 必须固定（否则每次更新都要重填配置）──
+     真实故障：manifest 里没有 key 字段。Chrome 在没有 key 时用**加载目录的绝对路径**
+     做 SHA-256 派生扩展 ID，而 chrome.storage.local 是按扩展 ID 隔离的。于是每次把
+     新版 zip 解压到新目录加载 → 路径变 → ID 变 → API Key / 模型 / 主题 / 对话记录
+     全部读不到，用户表现为「每次更新都要重新填一遍配置」。
+     这类问题**没有任何运行时报错**，所以只能靠守卫钉住。 */
+  console.log('\n[T73] 扩展 ID：manifest 必须带 key，否则每次更新都会丢配置');
+  {
+    const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const wxtSrc = readFileSync(resolve(rootDir, 'wxt.config.ts'), 'utf8');
+    const keyMatch = /\bkey:\s*'([A-Za-z0-9+/=]+)'/.exec(wxtSrc);
+    ok('manifest 必须固定 key（否则扩展 ID 随加载目录变化，配置每次都丢）', () => {
+      assert.ok(keyMatch, 'wxt.config.ts 的 manifest 里找不到 key 字段');
+      const pub = keyMatch[1]!;
+      // base64 形态校验：长度须为 RSA-2048 公钥 DER 的典型值，且只含 base64 字符
+      assert.match(pub, /^[A-Za-z0-9+/]+={0,2}$/, 'key 必须是单行 base64 的公钥，不能有换行或引号杂质');
+      assert.ok(pub.length > 300 && pub.length < 600, `key 长度异常（${pub.length}），不像 RSA-2048 公钥`);
+      // 关键安全边界：manifest 里放的必须是**公钥**。私钥（"BEGIN RSA PRIVATE KEY"）
+      // 一旦提交进仓库，任何人都能签出同 ID 的扩展。公钥则以 "MIIB" 开头（DER SubjectPublicKeyInfo）。
+      assert.ok(pub.startsWith('MIIB'), 'manifest.key 必须是公钥（DER SubjectPublicKeyInfo，以 MIIB 开头）');
+      assert.ok(!/PRIVATE KEY/.test(wxtSrc), 'wxt.config.ts 里不得出现私钥');
+    });
+
+    // 私钥必须被 git 排除：它只用于本机生成固定 ID，泄漏等于任何人都能伪造同 ID 扩展
+    ok('扩展签名的私钥不得进版本库（.keys/ 必须被 .gitignore 排除）', () => {
+      const ignore = readFileSync(resolve(rootDir, '.gitignore'), 'utf8');
+      assert.ok(
+        /^\.keys\/?\s*$/m.test(ignore),
+        '.gitignore 必须整行排除 .keys/（扩展私钥所在目录）',
+      );
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

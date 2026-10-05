@@ -14,6 +14,13 @@ stats-*.json
 .wxt
 web-ext.config.ts
 
+# 宣传片：README 里那张动图是 assets/promo.gif（**已提交**）。
+# 制作过程（成片 mp4 / comp.html / look.json / sfx_score.py / 抽帧图 / 播放页）
+# 全部留在本地 promo-line/，不进版本库。整目录排除，别指望按文件名逐个挡。
+promo-line/
+promo-15s/
+docs/promo.md
+
 # 本地预览/临时文件与密钥
 preview-*.png
 .env

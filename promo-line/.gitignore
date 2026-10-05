@@ -1,7 +1,0 @@
-# onetake 动作库：PolyForm Noncommercial 许可，**不属于本仓库**（MIT）。
-# 它随 onetake skill 分发；本目录的 comp.html 从 skill 的 lib/ 复制一份即可播放。
-motion.js
-# 可再生的中间产物（由 look.py / sfx_score.py / render.py 重新生成）
-look.js
-sfx.wav
-*.render.json

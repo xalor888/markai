@@ -112,18 +112,18 @@ export function DeletionsDialog({ open, onOpenChange }: { open: boolean; onOpenC
       }
     >
       {pending.length === 0 ? (
-        <p className="py-4 text-center text-xs text-muted-foreground">
+        <p className="py-6 text-center text-xs text-muted-foreground">
           当前没有待确认的删除提议。让 Agent 扫描清理后，提议会出现在这里。
         </p>
       ) : (
         <>
-          <div className="max-h-72 overflow-y-auto rounded-sm border border-border">
+          <div className="max-h-72 overflow-y-auto rounded-md border border-border">
             {pending.map((p) => (
-              <div key={p.id} className="flex items-start gap-2 border-b border-border/60 px-2.5 py-2 last:border-b-0">
-                <div className="mt-0.5">
+              <div key={p.id} className="flex items-start gap-2.5 border-b border-border/60 px-3 py-2.5 last:border-b-0">
+                <div className="mt-px">
                   <Checkbox checked={checked.has(p.id)} disabled={executing} onCheckedChange={() => toggle(p.id)} aria-label={`选择删除 ${p.title}`} />
                 </div>
-                <Favicon url={p.url} size={14} />
+                <Favicon url={p.url} size={16} />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1">
                     <p className="truncate text-xs text-foreground">{p.title}</p>
@@ -138,16 +138,16 @@ export function DeletionsDialog({ open, onOpenChange }: { open: boolean; onOpenC
                       <LocateFixed className="h-3 w-3" />
                     </button>
                   </div>
-                  <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">
+                  <p className="mt-1 text-2xs leading-4 text-muted-foreground">
                     {truncate(p.reason, 90)}
                     {p.url && ` · ${getHost(p.url)}`}
                   </p>
                 </div>
-                <span className="shrink-0 text-[11px] text-muted-foreground">{formatRelativeTime(p.createdAt)}</span>
+                <span className="shrink-0 text-2xs text-muted-foreground">{formatRelativeTime(p.createdAt)}</span>
               </div>
             ))}
           </div>
-          <div className="mt-3 flex items-center gap-2">
+          <div className="mt-3.5 flex items-center gap-2">
             <Checkbox checked={allChecked} disabled={executing} onCheckedChange={toggleAll} aria-label="全选" />
             <span className="text-xs text-muted-foreground">全选</span>
             <Badge className="ml-auto" variant="outline">

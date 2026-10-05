@@ -1252,6 +1252,22 @@ const cases = [
     to: '      const pendingTail = false;',
     expectFail: ['最后一个 SSE 行被拦腰截断'],
   },
+  {
+    // 对应真实故障：chat-panel 的撤销徽标用 bg-primary，而 main.css 从未定义 primary。
+    // Tailwind v4 对未定义颜色静默不生成 CSS，编译/测试/构建全绿，只有真机才看出徽标没背景色。
+    name: '自定义色只在浅色定义（深色下 bg-bubble 静默沿用近白底，浅底深字）',
+    file: 'src/assets/main.css',
+    from: '  --color-bubble: #1a2029;',
+    to: '  /* reverted: 深色侧不再定义 bubble */',
+    expectFail: ['深色主题必须与浅色定义同一套 token'],
+  },
+  {
+    name: '深色主题底色回到紫色系（与浅色 Slate 铁律不同源，两套主题像两个产品）',
+    file: 'src/assets/main.css',
+    from: '  --color-background: #0e1116;',
+    to: '  --color-background: #0f0911;',
+    expectFail: ['深色主题底色不得偏紫'],
+  },
 ];
 
 /**

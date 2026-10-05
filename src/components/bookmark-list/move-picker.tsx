@@ -108,7 +108,7 @@ export function MovePicker({
           autoFocus
         />
       </div>
-      <div className="max-h-64 overflow-y-auto rounded-sm border border-border">
+      <div className="max-h-64 overflow-y-auto rounded-md border border-border">
         {filtered.length === 0 ? (
           <p className="py-6 text-center text-xs text-muted-foreground">没有匹配的文件夹</p>
         ) : (
@@ -120,10 +120,10 @@ export function MovePicker({
                 type="button"
                 disabled={busy || banned}
                 onClick={() => moveTo(f.id, f.title)}
-                className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-foreground transition-colors hover:bg-muted/70 disabled:pointer-events-none disabled:opacity-40"
+                className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-foreground transition-colors hover:bg-muted/70 disabled:pointer-events-none disabled:opacity-40"
                 title={banned ? '不能移动到自身或其子文件夹' : f.path}
               >
-                <FolderInput className="h-3 w-3 shrink-0 text-muted-foreground" />
+                <FolderInput className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
                 <span className="truncate">{f.path}</span>
               </button>
             );

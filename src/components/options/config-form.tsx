@@ -231,8 +231,8 @@ export function ConfigForm() {
   return (
     <div className="mx-auto w-full max-w-md space-y-5">
       {/* ── AI 服务 ── */}
-      <section className="space-y-3 rounded-lg border border-border bg-card p-4">
-        <h2 className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+      <section className="space-y-4 rounded-lg border border-border bg-card p-5">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
           <Plug className="h-3.5 w-3.5 text-accent" />
           AI 服务
         </h2>
@@ -261,7 +261,7 @@ export function ConfigForm() {
               </option>
             ))}
           </select>
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-2xs text-muted-foreground">
             {preset?.needsKey ? '该服务商需要 API Key。' : '本地服务（如 Ollama）无需 API Key。'}
           </p>
         </div>
@@ -281,7 +281,7 @@ export function ConfigForm() {
             placeholder={preset?.baseUrl || 'api.example.com/v1（可省略 https://）'}
             spellCheck={false}
           />
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-2xs text-muted-foreground">
             兼容 OpenAI 协议；本地 Ollama 默认 http://localhost:11434/v1
           </p>
         </div>
@@ -322,7 +322,7 @@ export function ConfigForm() {
               type="button"
               disabled={fetchingModels}
               onClick={() => void fetchModels()}
-              className="flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-[11px] text-accent transition-colors hover:bg-accent-muted disabled:pointer-events-none disabled:opacity-40"
+              className="flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-2xs text-accent transition-colors hover:bg-accent-muted disabled:pointer-events-none disabled:opacity-40"
               title="从服务商拉取最新模型列表（GET /models）"
             >
               {fetchingModels ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
@@ -353,7 +353,7 @@ export function ConfigForm() {
             ))}
           </datalist>
           {remoteModels.length > 0 && (
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-2xs text-muted-foreground">
               已从服务商拉取 {remoteModels.length} 个模型，可在输入框下拉选择。
             </p>
           )}
@@ -369,8 +369,8 @@ export function ConfigForm() {
               role="status"
               className={
                 testResult.ok
-                  ? 'flex items-center gap-1 text-[11px] text-success'
-                  : 'text-[11px] text-destructive'
+                  ? 'flex items-center gap-1 text-2xs text-success'
+                  : 'text-2xs text-destructive'
               }
             >
               {testResult.ok && <CheckCircle2 className="h-3 w-3" />}
@@ -381,8 +381,8 @@ export function ConfigForm() {
       </section>
 
       {/* ── 删除与上下文 ── */}
-      <section className="space-y-3 rounded-lg border border-border bg-card p-4">
-        <h2 className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+      <section className="space-y-4 rounded-lg border border-border bg-card p-5">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
           <SlidersHorizontal className="h-3.5 w-3.5 text-accent" />
           删除与上下文
         </h2>
@@ -391,7 +391,7 @@ export function ConfigForm() {
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
             <Label htmlFor="delete-mode">删除确认</Label>
-            <span className="text-[11px] text-muted-foreground">
+            <span className="text-2xs text-muted-foreground">
               {config.deleteMode === 'auto' ? '无需确认（自动执行）' : '始终需确认（推荐）'}
             </span>
           </div>
@@ -404,7 +404,7 @@ export function ConfigForm() {
             <option value="confirm">始终需确认（推荐）</option>
             <option value="auto">无需确认（AI 提议自动执行）</option>
           </select>
-          <p className="text-[11px] leading-4 text-muted-foreground">
+          <p className="text-2xs leading-4 text-muted-foreground">
             {config.deleteMode === 'auto'
               ? '⚠ Agent 的删除提议与「删除全部」将立即执行，不再经过界面确认。'
               : 'Agent 只能提交删除提议，你在聊天卡片或待删清单确认后才真正删除。'}
@@ -415,7 +415,7 @@ export function ConfigForm() {
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
             <Label htmlFor="plan-mode">执行前先看计划</Label>
-            <span className="text-[11px] text-muted-foreground">
+            <span className="text-2xs text-muted-foreground">
               {config.planMode ? '每个写操作回次先确认' : '关闭（直接执行）'}
             </span>
           </div>
@@ -428,7 +428,7 @@ export function ConfigForm() {
             <option value="off">关闭（Agent 直接执行写操作）</option>
             <option value="on">开启（先展示计划，确认后才改动书签）</option>
           </select>
-          <p className="text-[11px] leading-4 text-muted-foreground">
+          <p className="text-2xs leading-4 text-muted-foreground">
             {config.planMode
               ? 'Agent 每次要改动书签前，会先把计划列在聊天里等你确认；取消则这一步不会执行。删除提议仍按其自己的确认设置处理。'
               : 'Agent 会直接执行移动/新建/重命名等写操作（仍可用「撤销本次操作」回退）。'}
@@ -443,7 +443,7 @@ export function ConfigForm() {
               type="button"
               onClick={() => void fetchModels()}
               disabled={fetchingModels}
-              className="flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-[11px] text-accent transition-colors hover:bg-accent-muted disabled:pointer-events-none disabled:opacity-40"
+              className="flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-2xs text-accent transition-colors hover:bg-accent-muted disabled:pointer-events-none disabled:opacity-40"
               title="从服务商拉取模型信息（若返回 context_window 会自动填入）"
             >
               {fetchingModels ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
@@ -469,19 +469,19 @@ export function ConfigForm() {
               className="h-8 w-24 text-xs"
               aria-label="模型上下文长度（千 token）"
             />
-            <span className="text-[11px] text-muted-foreground">K tokens（千 token）</span>
+            <span className="text-2xs text-muted-foreground">K tokens（千 token）</span>
             {!isAuto && (
               <button
                 type="button"
                 onClick={resetCtxToModel}
-                className="ml-auto rounded-sm px-1.5 py-0.5 text-[11px] text-accent transition-colors hover:bg-accent-muted"
+                className="ml-auto rounded-sm px-1.5 py-0.5 text-2xs text-accent transition-colors hover:bg-accent-muted"
                 title={`清除手动值，改回跟随模型（${autoHint}）`}
               >
                 跟随模型
               </button>
             )}
           </div>
-          <p className="text-[11px] leading-4 text-muted-foreground">
+          <p className="text-2xs leading-4 text-muted-foreground">
             {isAuto ? (
               <>
                 当前<strong className="text-foreground">跟随模型</strong>：{config.model || preset?.defaultModel || '未选模型'} → {autoHint}。
@@ -498,7 +498,7 @@ export function ConfigForm() {
         <div className="space-y-1.5">
           <div className="flex items-center justify-between">
             <Label htmlFor="compress-threshold">自动压缩阈值</Label>
-            <span className="text-[11px] text-muted-foreground">
+            <span className="text-2xs text-muted-foreground">
               {Math.round((config.compressThreshold ?? 0.8) * 100)}%
               · 预算 {formatTokens(Math.round(effectiveWindow * (config.compressThreshold ?? 0.8)))}
             </span>
@@ -513,7 +513,7 @@ export function ConfigForm() {
             onChange={(e) => void update({ compressThreshold: Number(e.target.value) / 100 })}
             className="w-full accent-[--color-accent]"
           />
-          <p className="text-[11px] leading-4 text-muted-foreground">
+          <p className="text-2xs leading-4 text-muted-foreground">
             对话历史用量达到「上下文长度 × 阈值」时，自动把早期消息压缩为摘要（需开启下面的自动压缩），保证不超出模型上下文。
           </p>
         </div>
@@ -527,22 +527,22 @@ export function ConfigForm() {
             className="h-3.5 w-3.5 accent-[--color-accent]"
           />
           <span className="text-xs text-foreground">自动压缩上下文</span>
-          <span className="ml-auto text-[11px] text-muted-foreground">
+          <span className="ml-auto text-2xs text-muted-foreground">
             {config.autoCompress ? '长对话自动摘要早期消息' : '关闭'}
           </span>
         </label>
-        <p className="text-[11px] leading-4 text-muted-foreground">
+        <p className="text-2xs leading-4 text-muted-foreground">
           开启后，历史消息超过上限时会先把早期消息压缩为摘要，再继续对话（避免长会话丢失记忆）。
         </p>
       </section>
 
       {/* ── 安全说明 ── */}
-      <section className="rounded-lg border border-border bg-card p-4">
-        <h2 className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+      <section className="rounded-lg border border-border bg-card p-5">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
           <ShieldCheck className="h-3.5 w-3.5 text-accent" />
           安全机制
         </h2>
-        <ul className="mt-2 space-y-1.5 text-[11px] leading-4 text-muted-foreground">
+        <ul className="mt-2 space-y-1.5 text-2xs leading-4 text-muted-foreground">
           <li>· API Key 仅存储在浏览器本地（chrome.storage.local），不会同步到云端。</li>
           <li>· AI 请求由浏览器后台直接发给所选服务商，扩展不经过任何中间服务器。</li>
           <li>· Agent 可以执行移动/新建/重命名；删除默认需你确认，可切换为「无需确认」模式。</li>
@@ -553,8 +553,8 @@ export function ConfigForm() {
       <Separator />
 
       {/* ── 外观 ── */}
-      <section className="rounded-lg border border-border bg-card p-4">
-        <h2 className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+      <section className="rounded-lg border border-border bg-card p-5">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
           <Palette className="h-3.5 w-3.5 text-accent" />
           外观
         </h2>
@@ -611,8 +611,8 @@ export function ConfigForm() {
       )}
 
       {/* ── 数据管理 ── */}
-      <section className="space-y-2 rounded-lg border border-border bg-card p-4">
-        <h2 className="flex items-center gap-1.5 text-sm font-medium text-foreground">
+      <section className="space-y-3 rounded-lg border border-border bg-card p-5">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
           <Database className="h-3.5 w-3.5 text-accent" />
           数据管理
         </h2>
@@ -620,11 +620,11 @@ export function ConfigForm() {
           <div className="min-w-0">
             <p className="text-xs text-foreground">
               对话记录与待删除清单
-              <span className="ml-1.5 text-[11px] text-muted-foreground">
+              <span className="ml-1.5 text-2xs text-muted-foreground">
                 {dataCounts.messages} 条消息 · {dataCounts.pending} 项待删
               </span>
             </p>
-            <p className="text-[11px] text-muted-foreground">清空后不可恢复</p>
+            <p className="text-2xs text-muted-foreground">清空后不可恢复</p>
           </div>
           <Button size="sm" variant="destructive" onClick={() => setConfirmClear(true)}>
             <Trash2 className="h-3 w-3" />
@@ -658,7 +658,7 @@ export function ConfigForm() {
         }
       />
 
-      <p className="pb-4 text-center text-[11px] text-muted-foreground">
+      <p className="pb-4 text-center text-2xs text-muted-foreground">
         MarkAI v{appVersion()} · 支持 OpenAI / DeepSeek / Moonshot / Ollama 及任意 OpenAI 兼容服务
         {' · '}
         <button

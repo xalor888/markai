@@ -59,29 +59,29 @@ export const DeletionCard = memo(function DeletionCard({ proposals }: { proposal
   };
 
   return (
-    <div className="mt-2 rounded-sm border border-destructive/30 bg-destructive/5">
+    <div className="mt-2 overflow-hidden rounded-md border border-destructive/30 bg-destructive/5">
       {/* 卡片头部：中性标题，危险色仅用于操作区 */}
-      <div className="flex items-center gap-1.5 border-b border-border px-2.5 py-1.5">
-        <Trash2 className="h-3 w-3 text-destructive" />
-        <span className="text-xs font-medium text-foreground">删除提议 · {proposals.length} 项</span>
+      <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+        <Trash2 className="h-3.5 w-3.5 text-destructive" />
+        <span className="text-xs font-semibold text-foreground">删除提议 · {proposals.length} 项</span>
         {pending.length > 1 && (
           <button
             type="button"
             onClick={toggleAll}
-            className="rounded-sm px-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            className="rounded-sm px-1 text-2xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             title={allChecked ? '取消全选' : '全选'}
           >
             {allChecked ? '取消全选' : '全选'}
           </button>
         )}
-        <span className="ml-auto text-[11px] text-muted-foreground">确认后才执行</span>
+        <span className="ml-auto text-2xs text-muted-foreground">确认后才执行</span>
       </div>
 
       {/* 提议列表 */}
       <div className="max-h-56 overflow-auto">
         {proposals.map((p) => (
-          <div key={p.id} className="flex items-start gap-2 border-b border-border/50 px-2.5 py-1.5 last:border-b-0">
-            <div className="mt-0.5">
+          <div key={p.id} className="flex items-start gap-2.5 border-b border-border/50 px-3 py-2 last:border-b-0">
+            <div className="mt-px">
               <Checkbox
                 checked={checked.has(p.id) && p.status === 'pending'}
                 disabled={p.status !== 'pending'}
@@ -103,7 +103,7 @@ export const DeletionCard = memo(function DeletionCard({ proposals }: { proposal
                   <LocateFixed className="h-3 w-3" />
                 </button>
               </div>
-              <p className="mt-0.5 text-[11px] leading-4 text-muted-foreground">{p.reason}</p>
+              <p className="mt-0.5 text-2xs leading-4 text-muted-foreground">{p.reason}</p>
             </div>
             {p.status === 'executed' && <Badge variant="success">已删除</Badge>}
             {p.status === 'confirmed' && <Badge>执行中</Badge>}
@@ -114,7 +114,7 @@ export const DeletionCard = memo(function DeletionCard({ proposals }: { proposal
 
       {/* 操作区 */}
       {pending.length > 0 ? (
-        <div className="flex items-center gap-2 border-t border-border px-2.5 py-2">
+        <div className="flex items-center gap-2 border-t border-border px-3 py-2.5">
           <Button
             size="sm"
             variant="destructive"
@@ -137,7 +137,7 @@ export const DeletionCard = memo(function DeletionCard({ proposals }: { proposal
           </Button>
         </div>
       ) : (
-        <div className="px-2.5 py-1.5 text-[11px] text-muted-foreground">
+        <div className="px-3 py-2 text-2xs text-muted-foreground">
           {executedCount > 0 ? `已删除 ${executedCount} 项。` : '本组提议已处理。'}
         </div>
       )}

@@ -626,19 +626,19 @@ export function BookmarkList({ className, compact = false }: { className?: strin
   return (
     <div className={cn('flex h-full min-h-0 min-w-0 flex-col bg-background', className)}>
       {/* 工具栏：面包屑 + 排序 + 搜索 */}
-      <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border px-2.5">
+      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
         {browsing ? (
           <div className="flex min-w-0 items-center gap-1">
             <button
               type="button"
               onClick={() => useBookmarkStore.getState().selectFolder(null)}
-              className="shrink-0 rounded-sm px-1 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              className="shrink-0 rounded-sm px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             >
               全部
             </button>
             {selectedFolderId && <BreadcrumbTrail roots={roots} folderId={selectedFolderId} />}
             {children && (
-              <span className="shrink-0 text-[11px] text-muted-foreground/60">{children.length} 项</span>
+              <span className="shrink-0 text-2xs text-muted-foreground/60">{children.length} 项</span>
             )}
           </div>
         ) : (
@@ -646,7 +646,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
             <Search className="h-3 w-3 shrink-0" />
             <span className="truncate">搜索「{query}」</span>
             {searchResults && (
-              <span className="shrink-0 text-[11px] text-muted-foreground/70">
+              <span className="shrink-0 text-2xs text-muted-foreground/70">
                 · {searchResults.length}{searchResults.length >= 100 ? '+' : ''} 条
               </span>
             )}
@@ -676,7 +676,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
               title="打开全部搜索结果"
               className={compact ? 'h-7 w-7' : 'h-7'}
             >
-              <ExternalLink className="h-3 w-3" />
+              <ExternalLink className="h-3.5 w-3.5" />
               {!compact && '打开全部'}
             </Button>
           )}
@@ -738,8 +738,8 @@ export function BookmarkList({ className, compact = false }: { className?: strin
 
       {/* 多选操作条（compact 窄布局下用图标按钮，避免溢出） */}
       {selectedIds.length > 0 && (
-        <div className="flex h-8 shrink-0 items-center gap-1.5 border-b border-border bg-accent-muted/60 px-2.5">
-          <span className="text-[11px] font-medium text-accent">
+        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-accent-muted/60 px-3">
+          <span className="text-2xs font-medium text-accent">
             {compact ? selectedIds.length : `已选 ${selectedIds.length} 项`}
           </span>
           <div className="ml-auto flex items-center gap-1.5">
@@ -749,7 +749,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
                   <Sparkles className="h-3 w-3" />
                 </Button>
                 <Button size="icon" variant="secondary" onClick={openSelected} title="打开所选" className="h-6 w-6">
-                  <ExternalLink className="h-3 w-3" />
+                  <ExternalLink className="h-3.5 w-3.5" />
                 </Button>
                 <Button size="icon" variant="secondary" onClick={copySelectedUrls} title="复制网址" className="h-6 w-6">
                   <Copy className="h-3 w-3" />
@@ -780,7 +780,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
                   让 MarkAI 整理
                 </Button>
                 <Button size="sm" variant="secondary" onClick={openSelected} className="h-6">
-                  <ExternalLink className="h-3 w-3" />
+                  <ExternalLink className="h-3.5 w-3.5" />
                   打开
                 </Button>
                 <Button size="sm" variant="secondary" onClick={copySelectedUrls} className="h-6">
@@ -831,7 +831,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
           autoScrollDrag(e.clientY);
         }}
         onDrop={handleListDrop}
-        className="min-h-0 flex-1 overflow-y-auto p-1.5 outline-none"
+        className="min-h-0 flex-1 overflow-y-auto p-2 outline-none"
       >
         {loading ? (
           <p className="px-2 py-4 text-center text-xs text-muted-foreground">加载中…</p>
@@ -859,7 +859,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
             />
           ))
         ) : (
-          <div className="flex h-full flex-col items-center justify-center gap-1.5 px-4 text-center">
+          <div className="flex h-full flex-col items-center justify-center gap-2 px-5 text-center">
             {browsing ? (
               <FolderOpen className="h-5 w-5 text-muted-foreground/40" />
             ) : (
@@ -879,15 +879,15 @@ export function BookmarkList({ className, compact = false }: { className?: strin
                 查看书签栏
               </Button>
             )}
-            <p className="mt-2 text-[11px] text-muted-foreground/70">
+            <p className="mt-2 text-2xs text-muted-foreground/70">
               / 搜索 · Enter 打开 · Ctrl+C 复制 · Delete 删除 · F2 重命名 · Ctrl+A 全选
             </p>
             {browsing && selectedFolderId && (
               <>
-                <p className="text-[11px] leading-4 text-muted-foreground/70">
+                <p className="text-2xs leading-4 text-muted-foreground/70">
                   右键文件夹可在树中新建子文件夹，或让 MarkAI 帮你整理。
                 </p>
-                <div className="mt-2 flex items-center gap-1.5">
+                <div className="mt-2.5 flex items-center gap-2">
                   <Button size="sm" variant="outline" onClick={() => openDialog({ kind: 'create-bookmark', parentId: selectedFolderId })}>
                     <BookmarkPlus className="h-3 w-3" />
                     新建书签
@@ -1065,13 +1065,13 @@ const BookmarkRow = memo(function BookmarkRow({
       onMouseEnter={() => onActivate(index)}
       onContextMenu={(e) => onContextMenu(e, node.id)}
       className={cn(
-        'group relative flex h-9 cursor-pointer items-center gap-1.5 rounded-sm px-2 transition-colors hover:bg-muted/60',
+        'group relative flex h-10 cursor-pointer items-center gap-2 rounded-sm px-2.5 transition-colors hover:bg-muted/60',
         // 选中（多选/当前文件夹）与键盘高亮互斥：选中态用 accent 底，键盘高亮用描边
         selected ? 'bg-accent-muted/50' : active && 'bg-muted/80',
       )}
     >
       {/* 选中左指示条 */}
-      {selected && <span className="pointer-events-none absolute top-1.5 bottom-1.5 left-0 w-0.5 rounded-full bg-accent" />}
+      {selected && <span className="pointer-events-none absolute top-2 bottom-2 left-0 w-[3px] rounded-full bg-accent" />}
       {/* 行间拖放定位条（与选中指示条区分：半透明） */}
       {isDropTarget && dropTarget!.position === 'above' && (
         <span className="pointer-events-none absolute -top-0.5 right-1 left-1 h-0.5 rounded-full bg-accent/60" />
@@ -1081,20 +1081,20 @@ const BookmarkRow = memo(function BookmarkRow({
       )}
       <Checkbox checked={selected} onCheckedChange={(_c, shift) => onToggle(index, !!shift)} aria-label={`选择 ${node.title}`} />
       {isFolder ? (
-        <Folder className="h-3.5 w-3.5 shrink-0 text-indigo-500/80" />
+        <Folder className="h-4 w-4 shrink-0 text-accent/70" />
       ) : (
-        <Favicon url={node.url} size={14} />
+        <Favicon url={node.url} size={16} />
       )}
       <div className="min-w-0 flex-1">
-        <p className="truncate text-xs text-foreground" onDoubleClick={() => onRename(node.id)}>
+        <p className="truncate text-[13px] leading-[18px] text-foreground" onDoubleClick={() => onRename(node.id)}>
           {highlightText(node.title || '(未命名)', query)}
         </p>
         {isFolder ? (
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-2xs text-muted-foreground">
             {folderCount === undefined ? '文件夹' : `文件夹 · ${folderCount} 项`}
           </p>
         ) : (
-          <p className="truncate text-[11px] text-muted-foreground">
+          <p className="truncate text-2xs text-muted-foreground">
             {searching ? (
               // 搜索模式：显示来源文件夹路径（可点击定位），浏览模式显示域名与时间
               node.parentId ? (
@@ -1124,7 +1124,7 @@ const BookmarkRow = memo(function BookmarkRow({
           className="shrink-0 rounded-sm p-1 text-muted-foreground opacity-0 transition-all group-hover:opacity-100 group-hover:bg-muted"
           title="在新标签页打开"
         >
-          <ExternalLink className="h-3 w-3" />
+          <ExternalLink className="h-3.5 w-3.5" />
         </span>
       )}
     </div>

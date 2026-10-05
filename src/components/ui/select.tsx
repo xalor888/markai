@@ -12,14 +12,15 @@ export function Select({
     <div className="relative">
       <select
         className={cn(
-          'h-8 w-full appearance-none rounded-sm border border-input bg-card pl-2 pr-6 text-xs text-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
+          'h-8 w-full appearance-none rounded-sm border border-input bg-card px-2.5 pr-7 text-xs text-foreground transition-colors',
+          'hover:border-input focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/20 focus-visible:outline-none',
           className,
         )}
         {...props}
       >
         {children}
       </select>
-      <ChevronDown className="pointer-events-none absolute top-1/2 right-1.5 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
+      <ChevronDown className="pointer-events-none absolute top-1/2 right-2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
     </div>
   );
 }

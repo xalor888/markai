@@ -12,7 +12,6 @@ import {
   ScanSearch,
   Search,
   Send,
-  Settings,
   Square,
   Trash2,
   TrendingUp,
@@ -270,26 +269,26 @@ export function ChatPanel({
   return (
     <div className={cn('flex h-full min-h-0 flex-col bg-card', className)} style={style}>
       {/* 头部：紧凑单行，文件夹/模型截断显示，不互相挤压 */}
-      <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border px-2.5">
-        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-sm bg-accent text-white">
-          <Bot className="h-3 w-3" strokeWidth={2.2} />
+      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
+        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-accent text-accent-foreground">
+          <Bot className="h-3.5 w-3.5" strokeWidth={2.2} />
         </span>
-        <span className="shrink-0 text-xs font-medium text-foreground">Agent</span>
+        <span className="shrink-0 text-xs font-semibold text-foreground">Agent</span>
         {streaming ? (
           <span
             className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-accent"
             title="正在生成回复…"
           />
         ) : (
-          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success/70" title="就绪" />
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-success" title="就绪" />
         )}
-        <span className="mx-0.5 h-3 w-px shrink-0 bg-border" />
+        <span className="h-3.5 w-px shrink-0 bg-border" />
         {/* 当前上下文文件夹（Agent 的操作范围提示，占剩余宽度，点击可在树中定位） */}
         {selectedFolderId && folderTitle && (
           <button
             type="button"
             onClick={() => useBookmarkStore.getState().revealInTree(selectedFolderId)}
-            className="min-w-0 flex-1 truncate rounded-sm px-1 text-left text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            className="min-w-0 flex-1 truncate rounded-sm px-1 text-left text-2xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             title={`当前上下文：${folderTitle}（点击在树中定位）`}
           >
             {folderTitle}
@@ -299,13 +298,14 @@ export function ChatPanel({
           <button
             type="button"
             onClick={() => void chrome.runtime.openOptionsPage()}
-            className="max-w-[35%] shrink truncate rounded-sm px-1 text-[11px] text-muted-foreground/60 transition-colors hover:bg-muted hover:text-foreground"
+            className="max-w-[35%] shrink truncate rounded-sm px-1 text-2xs text-muted-foreground/60 transition-colors hover:bg-muted hover:text-foreground"
             title={`当前模型：${config.model}（点击修改配置）`}
           >
             {config.model}
           </button>
         )}
-        <div className="ml-auto flex shrink-0 items-center gap-0.5">
+        {/* 操作区：设置入口不在这里重复（工作区顶栏已有），只留本面板自己的动作 */}
+        <div className="ml-auto flex shrink-0 items-center gap-1">
           <Button
             variant="ghost"
             size="icon"
@@ -327,7 +327,9 @@ export function ChatPanel({
           >
             <Undo2 className="h-3.5 w-3.5" />
             {undoReady.undoable && (
-              <span className="absolute -top-0.5 -right-0.5 rounded-full bg-primary px-1 text-[9px] leading-[14px] text-primary-foreground">
+              /* ring-card：徽标压在按钮上时靠一圈面板色描边与图标分离（此前 bg-primary
+                 是未定义 token，整枚徽标没有背景色，浅色模式下几乎看不见） */
+              <span className="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-2xs leading-none font-medium text-accent-foreground ring-2 ring-card">
                 {undoReady.count}
               </span>
             )}
@@ -362,15 +364,6 @@ export function ChatPanel({
           >
             <Download className="h-3.5 w-3.5" />
           </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            title="AI 设置"
-            aria-label="AI 设置"
-            onClick={() => void chrome.runtime.openOptionsPage()}
-          >
-            <Settings className="h-3.5 w-3.5" />
-          </Button>
         </div>
       </div>
 
@@ -380,7 +373,7 @@ export function ChatPanel({
         {(persistError || persistNotice) && (
           <div
             className={cn(
-              'flex shrink-0 items-start gap-1.5 border-b px-2.5 py-1.5 text-[11px]',
+              'flex shrink-0 items-start gap-2 border-b px-3 py-2 text-2xs',
               persistError
                 ? 'border-destructive/40 bg-destructive/10 text-destructive'
                 : 'border-border bg-muted/40 text-muted-foreground',
@@ -390,7 +383,7 @@ export function ChatPanel({
             <span className="min-w-0 flex-1">{persistError?.message ?? persistNotice}</span>
             <button
               type="button"
-              className="shrink-0 text-[10px] underline"
+              className="shrink-0 text-2xs underline"
               onClick={() => useAIStore.setState({ persistError: null, persistNotice: null })}
             >
               知道了
@@ -400,7 +393,7 @@ export function ChatPanel({
 
         {undoHistoryOpen && (
           <div className="absolute inset-0 z-20 flex flex-col bg-card">
-            <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border px-2.5">
+            <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
               <Button
                 variant="ghost"
                 size="icon"
@@ -411,15 +404,15 @@ export function ChatPanel({
                 <ArrowDown className="h-3.5 w-3.5 rotate-180" />
               </Button>
               <span className="text-xs font-medium text-foreground">撤销历史</span>
-              <span className="text-[11px] text-muted-foreground">最近 {undoHistory.length} 步</span>
+              <span className="text-2xs text-muted-foreground">最近 {undoHistory.length} 步</span>
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+            <div className="min-h-0 flex-1 overflow-y-auto p-2">
               {undoUnknown ? (
-                <p className="px-2 py-3 text-center text-[11px] text-destructive">
+                <p className="px-2 py-3 text-center text-2xs text-destructive">
                   撤销记录读取失败，当前状态未知（这不等于「没有可撤销的操作」）。请稍后重试或重新打开面板。
                 </p>
               ) : undoHistory.length === 0 ? (
-                <p className="px-2 py-3 text-center text-[11px] text-muted-foreground">
+                <p className="px-2 py-3 text-center text-2xs text-muted-foreground">
                   还没有可撤销的操作。Agent 每次整理（以及你手工确认的删除）都会在这里留下一步。
                 </p>
               ) : (
@@ -434,16 +427,16 @@ export function ChatPanel({
                       void undoLast(row.id);
                     }}
                     className={cn(
-                      'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left transition-colors',
+                      'flex w-full items-center gap-2 rounded-sm px-2.5 py-2 text-left transition-colors',
                       row.undoable && !streaming ? 'hover:bg-muted/60' : 'cursor-not-allowed opacity-55',
                     )}
                   >
-                    <span className="w-6 shrink-0 text-[10px] text-muted-foreground/70">
+                    <span className="w-6 shrink-0 text-2xs text-muted-foreground/70">
                       {i === 0 ? '最新' : `−${i}`}
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className="block truncate text-xs text-foreground">{row.summary}</span>
-                      <span className="block truncate text-[10px] text-muted-foreground">
+                      <span className="block truncate text-2xs text-muted-foreground">
                         {row.undoable ? `还原 ${row.count} 项` : (row.reason ?? '无法撤销')}
                         {' · '}
                         {formatRelativeTime(row.createdAt)}
@@ -455,7 +448,7 @@ export function ChatPanel({
               )}
             </div>
             {undoNotice && (
-              <p className="shrink-0 border-t border-border px-2.5 py-1.5 text-[10px] text-muted-foreground">
+              <p className="shrink-0 border-t border-border px-2.5 py-1.5 text-2xs text-muted-foreground">
                 {undoNotice}
               </p>
             )}
@@ -464,16 +457,16 @@ export function ChatPanel({
 
         {sessionsOpen && (
           <div className="absolute inset-0 z-20 flex flex-col bg-card">
-            <div className="flex h-10 shrink-0 items-center gap-1.5 border-b border-border px-2.5">
+            <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
               <Button variant="ghost" size="icon" onClick={() => setSessionsOpen(false)} title="返回聊天" aria-label="返回聊天">
                 <ArrowDown className="h-3.5 w-3.5 rotate-180" />
               </Button>
               <span className="text-xs font-medium text-foreground">会话</span>
-              <span className="text-[11px] text-muted-foreground">{conversations.length} 个</span>
+              <span className="text-2xs text-muted-foreground">{conversations.length} 个</span>
             </div>
             {/* 会话搜索（会话多时快速定位） */}
-            <div className="relative border-b border-border px-2.5 py-1.5">
-              <Search className="absolute top-1/2 left-[19px] h-3 w-3 -translate-y-1/2 text-muted-foreground" />
+            <div className="relative border-b border-border px-3 py-2">
+              <Search className="absolute top-1/2 left-5 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
               <input
                 value={sessionQuery}
                 onChange={(e) => setSessionQuery(e.target.value)}
@@ -481,7 +474,7 @@ export function ChatPanel({
                 className="h-7 w-full rounded-sm border border-input bg-card pr-1.5 pl-6 text-xs text-foreground outline-none placeholder:text-muted-foreground/60 focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring"
               />
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto p-1.5">
+            <div className="min-h-0 flex-1 overflow-y-auto p-2">
               {/* 最近活跃的会话置顶（支持标题搜索过滤） */}
               {[...conversations]
                 .sort((a, b) => b.updatedAt - a.updatedAt)
@@ -490,7 +483,7 @@ export function ChatPanel({
                 <div
                   key={c.id}
                   className={cn(
-                    'group relative flex items-center gap-1.5 rounded-sm px-2 py-1.5',
+                    'group relative flex items-center gap-2 rounded-sm px-2.5 py-2',
                     c.id === activeId ? 'bg-accent-muted' : 'hover:bg-muted/60',
                   )}
                 >
@@ -537,7 +530,7 @@ export function ChatPanel({
                       >
                         {c.title || '新会话'}
                       </button>
-                      <p className="text-[10px] text-muted-foreground/60">
+                      <p className="text-2xs text-muted-foreground/60">
                         {c.messages.length} 条消息 · {formatRelativeTime(c.updatedAt)}
                       </p>
                     </div>
@@ -562,7 +555,7 @@ export function ChatPanel({
                         deleteConversation(c.id);
                         setConfirmDeleteSession(null);
                       }}
-                      className="shrink-0 rounded-sm px-1.5 py-0.5 text-[11px] font-medium text-destructive transition-colors hover:bg-destructive/10"
+                      className="shrink-0 rounded-sm px-1.5 py-0.5 text-2xs font-medium text-destructive transition-colors hover:bg-destructive/10"
                       title="再次点击确认删除该会话"
                     >
                       确认删除？
@@ -587,10 +580,10 @@ export function ChatPanel({
                 </div>
               ))}
               {conversations.length === 0 && (
-                <p className="px-2 py-3 text-center text-[11px] text-muted-foreground">还没有会话</p>
+                <p className="px-2 py-3 text-center text-2xs text-muted-foreground">还没有会话</p>
               )}
             </div>
-            <div className="border-t border-border p-1.5">
+            <div className="border-t border-border p-2">
               <Button
                 size="sm"
                 className="w-full"
@@ -605,18 +598,18 @@ export function ChatPanel({
             </div>
           </div>
         )}
-        <div ref={scrollRef} onScroll={handleScroll} className="h-full overflow-y-auto px-3 py-3">
+        <div ref={scrollRef} onScroll={handleScroll} className="h-full overflow-y-auto px-3 py-3.5">
           {messages.length === 0 ? (
             <EmptyState chips={chips} onChip={(p) => void send(p)} configured={chatConfigured} />
           ) : (
-            <div className="space-y-3">
+            <div className="space-y-3.5">
               {messages.map((m, i) => (
                 <div key={m.id}>
                   {/* 与上一条消息间隔较长时显示时间分隔（长会话导航） */}
                   {i > 0 && m.createdAt - messages[i - 1]!.createdAt > 10 * 60_000 && (
                     <div className="mb-3 flex items-center gap-2">
                       <span className="h-px flex-1 bg-border" />
-                      <span className="text-[10px] text-muted-foreground/60">{formatClock(m.createdAt)}</span>
+                      <span className="text-2xs text-muted-foreground/60">{formatClock(m.createdAt)}</span>
                       <span className="h-px flex-1 bg-border" />
                     </div>
                   )}
@@ -630,7 +623,7 @@ export function ChatPanel({
               ))}
               {streaming && messages[messages.length - 1]?.role === 'assistant' &&
                 messages[messages.length - 1]?.blocks.length === 0 && (
-                  <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+                  <div className="flex items-center gap-2 text-2xs text-muted-foreground">
                     <Bot className="h-3 w-3 animate-pulse text-accent" />
                     Agent 正在思考…
                   </div>
@@ -640,11 +633,11 @@ export function ChatPanel({
         </div>
         {/* 计划模式：待确认的写操作清单。**确认前一步都不会执行**；取消则零写入。 */}
         {pendingPlan && (
-          <div className="shrink-0 border-t border-border bg-muted/40 px-3 py-2">
+          <div className="shrink-0 border-t border-border bg-muted/40 px-3 py-2.5">
             <div className="mb-1.5 flex items-center gap-1.5">
               <ScanSearch className="h-3.5 w-3.5 shrink-0 text-accent" />
               <span className="text-xs font-medium text-foreground">计划：等待你确认</span>
-              <span className="min-w-0 flex-1 truncate text-[11px] text-muted-foreground">
+              <span className="min-w-0 flex-1 truncate text-2xs text-muted-foreground">
                 共 {pendingPlan.steps.length} 步，确认前不会改动任何书签
               </span>
             </div>
@@ -652,7 +645,7 @@ export function ChatPanel({
               {pendingPlan.steps.map((step, i) => (
                 <li
                   key={`${step.name}-${i}`}
-                  className="flex items-center gap-1.5 text-[11px] text-foreground"
+                  className="flex items-center gap-1.5 text-2xs text-foreground"
                 >
                   <span className="shrink-0 text-muted-foreground/60">{i + 1}.</span>
                   <span className="min-w-0 flex-1 truncate" title={step.summary}>
@@ -675,7 +668,7 @@ export function ChatPanel({
               <Button size="sm" variant="outline" onClick={cancelPlan}>
                 取消
               </Button>
-              <span className="text-[11px] text-muted-foreground">取消则本轮没有执行任何写操作</span>
+              <span className="text-2xs text-muted-foreground">取消则本轮没有执行任何写操作</span>
             </div>
           </div>
         )}
@@ -700,11 +693,11 @@ export function ChatPanel({
       </div>
 
       {/* 输入区 */}
-      <div className="shrink-0 border-t border-border p-2.5">
+      <div className="shrink-0 border-t border-border p-3">
         {/* 快捷指令（对话中也可一键触发；流式时隐藏） */}
         {!streaming && messages.length > 0 && (
           <div className="mb-1.5 flex flex-wrap items-center gap-x-0.5">
-            <span className="mr-0.5 text-[11px] text-muted-foreground/60">快捷：</span>
+            <span className="shrink-0 text-2xs text-muted-foreground/70">快捷</span>
             {chips.map((chip) => (
               <button
                 key={chip.label}
@@ -712,14 +705,14 @@ export function ChatPanel({
                 disabled={chip.disabled}
                 title={chip.title}
                 onClick={() => void send(chip.prompt)}
-                className="rounded-sm px-1.5 py-0.5 text-[11px] text-accent transition-colors hover:bg-accent-muted disabled:pointer-events-none disabled:opacity-40"
+                className="rounded-full border border-border bg-card px-2 py-0.5 text-2xs text-muted-foreground transition-colors hover:border-accent/40 hover:text-accent disabled:pointer-events-none disabled:opacity-40"
               >
                 {chip.label}
               </button>
             ))}
           </div>
         )}
-        <div className="flex items-end gap-1.5">
+        <div className="flex items-end gap-2">
           <Textarea
             ref={inputRef}
             value={input}
@@ -728,11 +721,11 @@ export function ChatPanel({
             onKeyDown={onKeyDown}
             placeholder={streaming ? 'Agent 正在回复…' : '与 MarkAI 对话，例如「帮我把技术类书签整理一下」'}
             rows={1}
-            className="max-h-24 min-h-8 flex-1"
+            className="max-h-24 min-h-8 flex-1 rounded-md"
           />
           {streaming ? (
-            <Button variant="secondary" size="icon" onClick={cancel} title="停止生成" aria-label="停止生成">
-              <Square className="h-3 w-3" />
+            <Button variant="secondary" size="icon" onClick={cancel} title="停止生成" aria-label="停止生成" className="h-8 w-8 rounded-md">
+              <Square className="h-3.5 w-3.5" />
             </Button>
           ) : (
             <>
@@ -746,8 +739,9 @@ export function ChatPanel({
                   }}
                   title="清空输入"
                   aria-label="清空输入"
+                  className="h-8 w-8 rounded-md"
                 >
-                  <X className="h-3 w-3" />
+                  <X className="h-3.5 w-3.5" />
                 </Button>
               )}
               <Button
@@ -756,14 +750,14 @@ export function ChatPanel({
                 onClick={submit}
                 title="发送"
                 aria-label="发送"
-                className="h-8 w-8"
+                className="h-8 w-8 rounded-md"
               >
-                <Send className="h-3 w-3" />
+                <Send className="h-3.5 w-3.5" />
               </Button>
             </>
           )}
         </div>
-        <p className="mt-1.5 text-[11px] text-muted-foreground">
+        <p className="mt-2 text-2xs leading-4 text-muted-foreground">
           {resolveConfig(config).deleteMode === 'auto'
             ? '当前为「无需确认」模式：删除建议会自动执行。'
             : '移动、新建、重命名会直接执行；删除必须经你确认。'}
@@ -809,21 +803,24 @@ function EmptyState({
   configured: boolean;
 }) {
   return (
-    <div className="flex h-full flex-col items-center justify-center gap-4 px-4 text-center">
+    <div className="flex h-full flex-col items-center justify-center gap-5 px-5 py-6 text-center">
       <BrandMark size="md" />
-      <p className="max-w-[240px] text-xs leading-5 text-muted-foreground">
-        我是你的书签管家。可以聊天让我整理、扫描、清理书签，也可以从下方快捷指令开始。
-      </p>
+      <div className="space-y-1">
+        <p className="text-sm font-medium text-foreground">我是你的书签管家</p>
+        <p className="max-w-[248px] text-xs leading-5 text-muted-foreground">
+          让我整理、扫描、清理收藏夹。直接说你要什么，或从下面挑一个开始。
+        </p>
+      </div>
       {!configured && (
         <button
           type="button"
           onClick={() => void chrome.runtime.openOptionsPage()}
-          className="rounded-sm px-2 py-1 text-[11px] text-accent transition-colors hover:bg-accent-muted"
+          className="rounded-sm border border-accent/30 bg-accent-muted px-2.5 py-1 text-2xs text-accent transition-colors hover:bg-accent/15"
         >
           尚未配置 AI 服务，点击前往设置 →
         </button>
       )}
-      <div className="flex flex-col gap-1.5">
+      <div className="flex w-full max-w-[248px] flex-col gap-2">
         {chips.map((chip) => (
           <Button
             key={chip.label}
@@ -832,8 +829,9 @@ function EmptyState({
             disabled={chip.disabled}
             title={chip.title}
             onClick={() => onChip(chip.prompt)}
+            className="h-8 justify-start gap-2 px-2.5"
           >
-            <chip.icon className="h-3 w-3" />
+            <chip.icon className="h-3.5 w-3.5 text-accent" />
             {chip.label}
           </Button>
         ))}

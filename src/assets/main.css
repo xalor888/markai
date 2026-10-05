@@ -4,39 +4,59 @@
 @custom-variant dark (&:is(.dark *));
 
 @theme {
-  /* ── 色彩系统：Slate 石板灰主色，零紫色、零品红 ── */
-  --color-background: #f8fafc;
-  --color-foreground: #0f172a;
+  /* ── 色彩系统：Slate 石板灰主色，零紫色、零品红 ──
+     浅色与深色必须同一色系：历史上深色主题偏紫（#0f0911 / #16111c），
+     与浅色的 Slate 铁律不一致，两套主题放在一起像两个产品。现已统一为冷灰。 */
+  --color-background: #f7f8fa;
+  --color-foreground: #101828;
   --color-card: #ffffff;
-  --color-card-foreground: #0f172a;
-  --color-muted: #f1f5f9;
-  --color-muted-foreground: #64748b;
-  --color-border: #e2e8f0;
-  --color-input: #cbd5e1;
-  --color-ring: #6366f1;
+  --color-card-foreground: #101828;
+  --color-muted: #eef1f5;
+  /* 助手气泡底色：介于 card(#fff) 与 muted(#eef1f5) 之间的一档，
+     用半透明 opacity 在深色模式下几乎看不出来，所以单独给一个实心 token */
+  --color-bubble: #f2f4f8;
+  /* 小字号（11~12px）需要比 #64748b 更高的对比才不显脏 */
+  --color-muted-foreground: #5a6572;
+  --color-border: #e4e8ee;
+  --color-input: #c8d0da;
+  --color-ring: #4f46e5;
 
-  /* 强调色：Indigo 靛蓝（低饱和点缀） */
+  /* 强调色：Indigo 靛蓝（低饱和点缀），与 ring 同值避免焦点环与强调色打架 */
   --color-accent: #4f46e5;
   --color-accent-foreground: #ffffff;
-  --color-accent-muted: #eef2ff;
+  --color-accent-muted: #eef1ff;
 
   /* 语义色：红色仅用于危险操作，绿色仅用于成功反馈 */
-  --color-destructive: #b91c1c;
-  --color-success: #15803d;
+  --color-destructive: #b42318;
+  --color-success: #157347;
 
-  /* ── 圆角铁律：容器上限 8px（rounded-lg），按钮/输入框 4px（rounded-sm）── */
-  --radius-sm: 0.25rem;
-  --radius-md: 0.375rem;
-  --radius-lg: 0.5rem;
+  /* ── 圆角标尺（四档，全局只用这四档）──
+     xs=4 徽标/小标签 · sm=6 控件与行 · md=8 卡片与气泡 · lg=10 浮层 · xl=12 大容器 */
+  --radius-xs: 0.25rem;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.625rem;
+  --radius-xl: 0.75rem;
+  --radius-2xl: 0.875rem;
 
-  /* ── 阴影铁律：全部禁用，层级靠 1px 实线边框 ── */
+  /* ── 阴影：常规界面一律禁用，层级靠 1px 实线边框；
+     只有浮层（对话框 / Toast / 右键菜单）用一层极浅阴影与内容分层 ── */
   --shadow-xs: none;
   --shadow-sm: none;
   --shadow: none;
   --shadow-md: none;
-  --shadow-lg: none;
-  --shadow-xl: none;
-  --shadow-2xl: none;
+  --shadow-lg: 0 10px 28px -10px rgb(16 24 40 / 0.22);
+  --shadow-xl: 0 16px 40px -12px rgb(16 24 40 / 0.28);
+  --shadow-2xl: 0 24px 56px -16px rgb(16 24 40 / 0.32);
+
+  /* ── 字级标尺：2xs=11px 元信息 · xs=12px 次要 · sm=14px 正文 ──
+     11px 以下（9/10px）一律不再使用，窄面板里靠留白而不是靠缩小字号换密度 */
+  --text-2xs: 0.6875rem;
+  --text-2xs--line-height: 1rem;
+  --text-xs: 0.75rem;
+  --text-xs--line-height: 1.0625rem;
+  --text-sm: 0.875rem;
+  --text-sm--line-height: 1.375rem;
 
   /* 字体：系统字体栈 */
   --font-sans:
@@ -44,22 +64,23 @@
     'PingFang SC', 'Microsoft YaHei', sans-serif;
 }
 
-/* ── 深色模式 token（极深灰，略带冷色倾向，非纯黑）── */
+/* ── 深色模式 token（冷灰，与浅色同色系）── */
 .dark {
-  --color-background: #0f0911;
-  --color-foreground: #e2e8f0;
-  --color-card: #16111c;
-  --color-card-foreground: #e2e8f0;
-  --color-muted: #1d1628;
-  --color-muted-foreground: #94a3b8;
-  --color-border: #2a2333;
-  --color-input: #3d3546;
+  --color-background: #0e1116;
+  --color-foreground: #e3e8ef;
+  --color-card: #151a21;
+  --color-card-foreground: #e3e8ef;
+  --color-muted: #1c222b;
+  --color-bubble: #1a2029;
+  --color-muted-foreground: #98a3b2;
+  --color-border: #262d38;
+  --color-input: #38414f;
   --color-ring: #818cf8;
   --color-accent: #6366f1;
   --color-accent-foreground: #ffffff;
-  --color-accent-muted: #262044;
-  --color-destructive: #f87171;
-  --color-success: #4ade80;
+  --color-accent-muted: #232a4d;
+  --color-destructive: #f97066;
+  --color-success: #5fd08a;
 }
 
 @layer base {
@@ -108,15 +129,27 @@
   * {
     -webkit-tap-highlight-color: transparent;
   }
+}
 
-  /* 细滚动条（Slate 系，贴合整体气质） */
-  * {
-    scrollbar-width: thin;
-    scrollbar-color: #cbd5e1 transparent;
-  }
-  .dark * {
-    scrollbar-color: #3d3546 transparent;
-  }
+/* ── 细滚动条：只在这里定义一次（此前 @layer base 内还有一份重复规则，
+   两份互相覆盖，深色模式靠特异性才碰巧正确）── */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-border);
+  border-radius: 4px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted-foreground);
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
 }
 
 /* ── 轻量出现动画（150ms，克制原生节奏） ── */
@@ -138,11 +171,24 @@
     transform: scale(1);
   }
 }
+@keyframes markai-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
 .animate-fade-in {
   animation: markai-fade-in 150ms ease-out;
 }
 .animate-scale-in {
   animation: markai-scale-in 150ms ease-out;
+}
+.animate-slide-up {
+  animation: markai-slide-up 180ms ease-out;
 }
 
 /* 流式输出光标（克制闪烁） */
@@ -160,31 +206,20 @@
   animation: markai-blink 1s step-end infinite;
 }
 
-/* 细滚动条（浅/深主题自适应，浏览器原生观感） */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: var(--color-border) transparent;
-}
-*::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-*::-webkit-scrollbar-thumb {
-  background: var(--color-border);
-  border-radius: 4px;
-}
-*::-webkit-scrollbar-thumb:hover {
-  background: var(--color-muted-foreground);
-}
-*::-webkit-scrollbar-track {
-  background: transparent;
+@media (prefers-reduced-motion: reduce) {
+  .animate-fade-in,
+  .animate-scale-in,
+  .animate-slide-up,
+  .stream-cursor {
+    animation: none;
+  }
 }
 
 /* ── AI 回复 Markdown 渲染（react-markdown + remark-gfm）──
-   规范：无紫/品红、圆角≤8px、字重 400/500、1px 边框分层 */
+   规范：无紫/品红、圆角 ≤8px、字重 400/500/600、1px 边框分层 */
 .markdown {
   font-size: 13px;
-  line-height: 1.6;
+  line-height: 1.65;
 }
 .markdown > :first-child {
   margin-top: 0;
@@ -193,29 +228,40 @@
   margin-bottom: 0;
 }
 .markdown p {
-  margin: 4px 0;
+  margin: 5px 0;
 }
 .markdown h1,
 .markdown h2,
 .markdown h3,
 .markdown h4,
 .markdown h5 {
-  margin: 10px 0 4px;
-  font-size: 13px;
-  font-weight: 500;
-  border-left: 2px solid color-mix(in srgb, var(--color-accent) 40%, transparent);
-  padding-left: 6px;
+  margin: 12px 0 5px;
+  font-weight: 600;
+  color: var(--color-foreground);
 }
+/* 标题靠字号与字重分层，不再统一挂左边框（旧写法让 h1~h5 长得一模一样） */
 .markdown h1 {
+  font-size: 15px;
+  line-height: 1.4;
+}
+.markdown h2 {
   font-size: 14px;
+  line-height: 1.4;
+}
+.markdown h3,
+.markdown h4,
+.markdown h5 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-foreground);
 }
 .markdown ul,
 .markdown ol {
-  margin: 4px 0;
+  margin: 5px 0;
   padding-left: 18px;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 3px;
 }
 .markdown ul {
   list-style: disc;
@@ -233,37 +279,39 @@
   margin: 0;
 }
 .markdown blockquote {
-  margin: 4px 0;
+  margin: 6px 0;
   border-left: 2px solid var(--color-border);
-  padding-left: 8px;
+  padding-left: 10px;
   color: var(--color-muted-foreground);
 }
 .markdown code {
   background: var(--color-muted);
+  border: 1px solid var(--color-border);
   border-radius: 4px;
-  padding: 1px 4px;
-  font-size: 11px;
+  padding: 0 4px;
+  font-size: 11.5px;
   font-weight: 400;
 }
 .markdown pre {
-  margin: 6px 0;
+  margin: 7px 0;
   overflow-x: auto;
   border: 1px solid var(--color-border);
-  border-radius: 4px;
+  border-radius: 6px;
   background: var(--color-muted);
-  padding: 8px;
-  font-size: 11px;
-  line-height: 1.5;
+  padding: 9px 10px;
+  font-size: 11.5px;
+  line-height: 1.55;
   white-space: pre;
 }
 .markdown pre code {
   background: transparent;
   padding: 0;
+  border: 0;
   border-radius: 0;
-  font-size: 11px;
+  font-size: 11.5px;
 }
 .markdown table {
-  margin: 6px 0;
+  margin: 7px 0;
   width: 100%;
   border-collapse: collapse;
   font-size: 12px;
@@ -271,15 +319,15 @@
 .markdown th,
 .markdown td {
   border: 1px solid var(--color-border);
-  padding: 4px 8px;
+  padding: 5px 9px;
   text-align: left;
 }
 .markdown th {
   background: var(--color-muted);
-  font-weight: 500;
+  font-weight: 600;
 }
 .markdown hr {
-  margin: 8px 0;
+  margin: 10px 0;
   border: 0;
   border-top: 1px solid var(--color-border);
 }
@@ -287,4 +335,7 @@
   accent-color: var(--color-accent);
   margin-right: 4px;
   vertical-align: -1px;
+}
+.markdown strong {
+  font-weight: 600;
 }

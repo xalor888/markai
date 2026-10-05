@@ -7475,6 +7475,144 @@ function ok(name: string, fn: () => void) {
     });
   }
 
+  /* ── T72: 设计 token 一致性 ──
+     真实故障：`chat-panel.tsx` 的撤销计数徽标用了 bg-primary / text-primary-foreground，
+     而 main.css 里根本没有 primary 这个 token —— Tailwind v4 对未定义的颜色静默不生成 CSS，
+     于是那枚徽标没有背景色、文字也是继承色，浅色模式下几乎看不见。编译、测试、构建全绿，
+     只有真机看一眼才发现。这条守卫把「类名 → token 定义」的关系钉死。 */
+  console.log('\n[T72] 设计 token：断裂的 token 不生成任何 CSS');
+  {
+    const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const cssSrc = readFileSync(resolve(rootDir, 'src/assets/main.css'), 'utf8');
+
+    const colorTokens = new Set<string>();
+    for (const m of cssSrc.matchAll(/--color-([a-z0-9-]+)\s*:/g)) colorTokens.add(m[1]!);
+    const shadowTokens = new Set<string>();
+    for (const m of cssSrc.matchAll(/--shadow-([a-z0-9-]+)\s*:/g)) shadowTokens.add(m[1]!);
+
+    /** Tailwind 自带色名：项目允许直接使用（如遮罩的 bg-black/30） */
+    const BUILTIN = new Set([
+      'black', 'white', 'transparent', 'current', 'inherit', 'none', 'auto',
+      'slate', 'gray', 'zinc', 'neutral', 'stone', 'red', 'orange', 'amber', 'yellow',
+      'lime', 'green', 'emerald', 'teal', 'cyan', 'sky', 'blue', 'indigo', 'violet',
+      'purple', 'fuchsia', 'pink', 'rose',
+    ]);
+    /** text- 前缀里不是颜色的一批（字号 / 对齐 / 修饰） */
+    const TEXT_NOT_COLOR = new Set([
+      'center', 'left', 'right', 'justify', 'start', 'end', 'nowrap', 'wrap', 'balance',
+      'pretty', 'truncate', 'ellipsis', 'clip', 'uppercase', 'lowercase', 'capitalize',
+      'underline', 'overline', 'through', 'no', 'indent', 'line',
+    ]);
+    /** 非颜色语义：ring 的宽度与 inset、border 的方向、渐变 */
+    const SIZE_LIKE = /^(2xs|xs|sm|base|lg|xl|2xl|3xl|4xl|\[|\d)/;
+    const BORDER_DIR = /^(b|t|l|r|x|y|s|e)$/;
+
+    // 收集 src 下所有 .tsx
+    const files: string[] = [];
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) walk(p);
+        else if (e.name.endsWith('.tsx')) files.push(p);
+      }
+    };
+    walk(resolve(rootDir, 'src'));
+
+    /** 去掉注释后再取字符串字面量：注释里提到 `bg-primary` 不该被当成在用 */
+    const stripComments = (s: string) =>
+      s.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|\s)\/\/[^\n]*/g, ' ');
+    const literals = (s: string) =>
+      [...stripComments(s).matchAll(/'([^'\n]*)'|"([^"\n]*)"|`([^`]*)`/g)]
+        .map((m) => m[1] ?? m[2] ?? m[3] ?? '')
+        .join(' ');
+
+    const broken = new Map<string, string>();
+    for (const file of files) {
+      const blob = literals(readFileSync(file, 'utf8'));
+      for (const part of blob.split(/[\s'"`,(){}[\]]+/)) {
+        const m = /^(bg|border|ring|from|via|to|decoration|divide|outline|caret|fill|stroke|shadow|accent|text)-([a-z0-9-]+?)(\/\d+)?$/.exec(part);
+        if (!m) continue;
+        const [, pre, name] = m;
+        const seg = name!.split('-');
+        if (name === 'gradient' || name!.startsWith('gradient-')) continue; // bg-gradient-to-r
+        // 字号 / 对齐 / 修饰类不是颜色
+        if (pre === 'text' && (SIZE_LIKE.test(name!) || seg.some((s) => TEXT_NOT_COLOR.has(s)))) continue;
+        // border 的方向与宽度（border-b / border-l-0 / border-2）不是颜色
+        if (pre === 'border' && (BORDER_DIR.test(seg[0]!) || seg.some((s) => /^\d+$/.test(s)))) continue;
+        // ring 的宽度与 ring-inset 不是颜色
+        if (pre === 'ring' && (/^\d/.test(name!) || seg.includes('inset'))) continue;
+        if (BUILTIN.has(name!)) continue;
+        if (pre === 'shadow') {
+          if (!shadowTokens.has(name!)) broken.set(part, file);
+          continue;
+        }
+        // 多段名（accent-muted / muted-foreground / accent-foreground）取最长已定义前缀
+        let ok = false;
+        for (let i = seg.length; i > 0; i--) {
+          if (colorTokens.has(seg.slice(0, i).join('-'))) { ok = true; break; }
+        }
+        if (!ok) broken.set(part, file);
+      }
+    }
+
+    ok('UI 用到的颜色 token 必须都在 main.css 里有定义（断裂 token 不生成 CSS）', () => {
+      assert.ok(colorTokens.has('accent'), 'accent token 应当存在（守卫自身的前提）');
+      assert.equal(
+        broken.size,
+        0,
+        `以下类名引用的颜色 token 未定义，Tailwind 不会为它们生成任何 CSS：\n${[...broken]
+          .map(([c, f]) => `  ${c}  ← ${f.replace(rootDir + '/', '')}`)
+          .join('\n')}`,
+      );
+    });
+
+    /* 浅色（@theme）与深色（.dark）必须**各自**定义全套。只在一处定义时，
+       Tailwind 仍会生成这个类（所以上面那条断裂守卫抓不到），但深色模式下会
+       静默沿用浅色值——例如 bg-bubble 若只在 @theme 里，深色下就是近白底 +
+       深色文字。判据：两块的 token 集合必须完全一致。 */
+    const themeBlock = /@theme\s*\{([\s\S]*?)\n\}/.exec(cssSrc)?.[1] ?? '';
+    const darkBlock = /\.dark\s*\{([\s\S]*?)\n\}/.exec(cssSrc)?.[1] ?? '';
+    const blockTokens = (b: string) => new Set([...b.matchAll(/--color-([a-z0-9-]+)\s*:/g)].map((m) => m[1]!));
+    ok('深色主题必须与浅色定义同一套 token（否则深色下静默沿用浅色值）', () => {
+      assert.ok(themeBlock.length > 0, '未找到 @theme 块');
+      assert.ok(darkBlock.length > 0, '未找到 .dark 块');
+      const light = blockTokens(themeBlock);
+      const dark = blockTokens(darkBlock);
+      const onlyLight = [...light].filter((t) => !dark.has(t));
+      const onlyDark = [...dark].filter((t) => !light.has(t));
+      assert.equal(
+        onlyLight.length,
+        0,
+        `这些 token 只在浅色 @theme 里定义，深色模式下会沿用浅色值：${onlyLight.join(', ')}`,
+      );
+      assert.equal(
+        onlyDark.length,
+        0,
+        `这些 token 只在深色 .dark 里定义，浅色模式下会沿用深色值：${onlyDark.join(', ')}`,
+      );
+    });
+
+    // 深色主题曾长期是紫色（#0f0911 / #16111c / #1d1628），与浅色的 Slate「零紫零品红」
+    // 铁律不同源，两套主题放在一起像两个产品。判据：绿色通道不得是三通道里最低的
+    // （紫/品红的共同特征就是 G 最低）。
+    ok('深色主题底色不得偏紫（与浅色 Slate 铁律必须同色系）', () => {
+      assert.ok(darkBlock.length > 0, '未找到 .dark 主题块');
+      const purple: string[] = [];
+      // 注意解构：matchAll 的第 0 项是整串，第 1、2 项才是两个捕获组。
+      // 写成 [key, hex] 会把整串当 key、token 名当 hex，parseInt 得 NaN，判据恒假。
+      for (const m of darkBlock.matchAll(/--color-([a-z0-9-]+):\s*#([0-9a-f]{6})/gi)) {
+        const key = m[1]!;
+        const hex = m[2]!;
+        const r = parseInt(hex.slice(0, 2), 16);
+        const g = parseInt(hex.slice(2, 4), 16);
+        const b = parseInt(hex.slice(4, 6), 16);
+        if (Number.isNaN(r) || Number.isNaN(g) || Number.isNaN(b)) continue;
+        if (g <= r && g <= b && !(g === r && g === b)) purple.push(`${key}=#${hex}`);
+      }
+      assert.equal(purple.length, 0, `以下深色 token 偏紫/品红（G 通道最低）：${purple.join(', ')}`);
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

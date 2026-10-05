@@ -222,9 +222,9 @@ export function BookmarkTree({ className }: { className?: string }) {
 
   return (
     <div className={cn('flex h-full min-h-0 flex-col bg-card', className)}>
-      <div className="flex h-9 shrink-0 items-center gap-1.5 border-b border-border px-2.5">
-        <BookMarked className="h-3.5 w-3.5 text-indigo-500/80" />
-        <span className="text-[11px] font-medium text-muted-foreground">书签</span>
+      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
+        <BookMarked className="h-3.5 w-3.5 text-accent/70" />
+        <span className="text-2xs font-semibold tracking-wide text-muted-foreground">书签</span>
         {/* 过滤模式下展开/折叠无可见反馈，隐藏避免困惑 */}
         {!filter && (
           <>
@@ -250,8 +250,8 @@ export function BookmarkTree({ className }: { className?: string }) {
         )}
       </div>
       {/* 树内过滤输入 */}
-      <div className="relative px-2.5 pb-1.5 pt-1.5">
-        <Search className="absolute top-1/2 left-[19px] h-3 w-3 -translate-y-1/2 text-muted-foreground" />
+      <div className="relative px-3 py-2">
+        <Search className="absolute top-1/2 left-5 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
         <input
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
@@ -263,13 +263,13 @@ export function BookmarkTree({ className }: { className?: string }) {
           }}
           aria-label="过滤书签树"
           placeholder="过滤树…"
-          className="h-7 w-full rounded-sm border border-input bg-card pr-1.5 pl-6 text-xs text-foreground outline-none placeholder:text-muted-foreground/60 focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring"
+          className="h-8 w-full rounded-sm border border-input bg-card pr-2.5 pl-7 text-xs text-foreground outline-none placeholder:text-muted-foreground/60 focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring"
         />
       </div>
       {/* 树内过滤（匹配节点自动展开祖先链） */}
       {filter && (
-        <div className="flex items-center gap-1 px-2 pb-1">
-          <span className="truncate text-[11px] text-accent">
+        <div className="flex items-center gap-1.5 px-3 pb-1">
+          <span className="truncate text-2xs text-accent">
             匹配 {visible.length} 项
           </span>
           <button
@@ -299,7 +299,7 @@ export function BookmarkTree({ className }: { className?: string }) {
         }}
         role="tree"
         aria-label="书签树"
-        className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-2 outline-none"
+        className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 outline-none"
       >
         {visible.map(({ node, depth }) => (
           <TreeRow
@@ -317,24 +317,24 @@ export function BookmarkTree({ className }: { className?: string }) {
         {visible.length === 0 && (
           <div className="px-2 py-3 text-center">
             {loading ? (
-              <p className="flex items-center justify-center gap-1.5 text-[11px] text-muted-foreground">
+              <p className="flex items-center justify-center gap-1.5 text-2xs text-muted-foreground">
                 <Loader2 className="h-3 w-3 animate-spin" />
                 正在加载书签…
               </p>
             ) : loadError ? (
               <>
-                <p className="text-[11px] text-destructive">书签加载失败</p>
-                <p className="mt-0.5 line-clamp-2 text-[11px] text-muted-foreground/70">{loadError}</p>
+                <p className="text-2xs text-destructive">书签加载失败</p>
+                <p className="mt-0.5 line-clamp-2 text-2xs text-muted-foreground/70">{loadError}</p>
                 <button
                   type="button"
                   onClick={() => void useBookmarkStore.getState().loadTree()}
-                  className="mt-1.5 rounded-sm border border-border bg-card px-2 py-1 text-[11px] text-foreground transition-colors hover:bg-muted"
+                  className="mt-1.5 rounded-sm border border-border bg-card px-2 py-1 text-2xs text-foreground transition-colors hover:bg-muted"
                 >
                   重试
                 </button>
               </>
             ) : (
-              <p className="text-[11px] text-muted-foreground">{filter ? '没有匹配的书签' : '书签栏为空'}</p>
+              <p className="text-2xs text-muted-foreground">{filter ? '没有匹配的书签' : '书签栏为空'}</p>
             )}
           </div>
         )}
@@ -573,12 +573,12 @@ const TreeRow = memo(function TreeRow({
         setContextMenu(menu);
       }}
       className={cn(
-        'relative flex h-7 cursor-pointer items-center gap-1.5 rounded-sm pr-2 text-xs transition-colors',
-        selected ? 'bg-accent-muted text-accent' : 'text-foreground hover:bg-muted/60',
+        'relative flex h-8 cursor-pointer items-center gap-2 rounded-sm pr-2.5 text-xs transition-colors',
+        selected ? 'bg-accent-muted font-medium text-accent' : 'text-foreground hover:bg-muted/60',
         active && 'ring-1 ring-inset ring-ring/40',
         dragOver && 'bg-accent-muted/50 ring-1 ring-inset ring-accent/50',
       )}
-      style={{ paddingLeft: depth * 12 + 6 }}
+      style={{ paddingLeft: depth * 12 + 8 }}
     >
       {/* 书签行间拖放定位条（与选中指示条区分：半透明） */}
       {!isFolder && isDropTarget && dropTarget!.position === 'above' && (
@@ -589,13 +589,13 @@ const TreeRow = memo(function TreeRow({
       )}
       {isFolder ? (
         <ChevronRight
-          className={cn('h-3 w-3 shrink-0 text-muted-foreground transition-transform duration-100', expanded && 'rotate-90')}
+          className={cn('h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-150', expanded && 'rotate-90')}
         />
       ) : (
-        <span className="w-3 shrink-0" />
+        <span className="w-3.5 shrink-0" />
       )}
       {isFolder ? (
-        <Folder className="h-3.5 w-3.5 shrink-0 text-indigo-500/80" />
+        <Folder className="h-3.5 w-3.5 shrink-0 text-accent/70" />
       ) : (
         <Favicon url={node.url} size={14} />
       )}
@@ -1090,7 +1090,7 @@ export function ContextMenuOverlay() {
             close();
           }
         }}
-        className="animate-fade-in fixed z-50 max-h-[calc(100vh-16px)] w-48 overflow-y-auto rounded-sm border border-border bg-card py-1 outline-none"
+        className="animate-fade-in fixed z-50 max-h-[calc(100vh-16px)] w-52 overflow-y-auto rounded-md border border-border bg-card py-1.5 shadow-lg outline-none"
         style={{ left, top }}
       >
         {rows.map((row, i) =>
@@ -1114,12 +1114,12 @@ export function ContextMenuOverlay() {
               onClick={row.onClick}
               onMouseEnter={() => setFocusIdx(i)}
               className={cn(
-                'flex w-full items-center gap-1.5 px-2.5 py-1.5 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-40',
-                i === focusIdx ? 'bg-muted/60' : '',
-                row.danger ? 'text-destructive hover:bg-destructive/10' : 'text-foreground hover:bg-muted/60',
+                'flex w-full items-center gap-2.5 px-3 py-2 text-left text-xs transition-colors disabled:pointer-events-none disabled:opacity-40',
+                i === focusIdx ? (row.danger ? 'bg-destructive/10' : 'bg-muted') : '',
+                row.danger ? 'text-destructive' : 'text-foreground',
               )}
             >
-              <row.icon className="h-3.5 w-3.5" />
+              <row.icon className="h-4 w-4" />
               {row.label}
             </button>
           ),

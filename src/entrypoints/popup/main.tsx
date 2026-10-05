@@ -159,30 +159,30 @@ function PopupApp() {
   return (
     <div className="w-[320px]">
       <ThemeProvider />
-      <div className="flex h-10 items-center gap-1.5 border-b border-border bg-card px-3">
+      <div className="flex h-11 items-center gap-2 border-b border-border bg-card px-3">
         <BrandMark />
         <Badge variant="outline" className="ml-auto">
           v{appVersion()}
         </Badge>
       </div>
 
-      <div className="space-y-2 p-3">
+      <div className="space-y-2.5 p-3">
         {/* Agent 处理中提示 */}
         {taskRunning && (
           <div className="flex items-center gap-2 rounded-lg border border-accent/30 bg-accent-muted px-3 py-2">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
-            <span className="text-[11px] font-medium text-accent">Agent 正在处理中…</span>
+            <span className="text-2xs font-medium text-accent">Agent 正在处理中…</span>
           </div>
         )}
 
         {/* 待办卡片 */}
-        <div className="rounded-lg border border-border bg-card p-3 transition-colors hover:border-indigo-500/30">
+        <div className="rounded-lg border border-border bg-card p-3.5 transition-colors hover:border-accent/30">
           <div className="flex items-center gap-2">
             <Trash2 className="h-3.5 w-3.5 text-destructive" />
             <span className="text-xs font-medium text-foreground">待删除清单</span>
             {pendingCount > 0 && <Badge variant="destructive">{pendingCount} 项</Badge>}
           </div>
-          <p className="mt-1.5 text-[11px] leading-4 text-muted-foreground">
+          <p className="mt-2 text-2xs leading-4 text-muted-foreground">
             {pendingCount > 0
               ? autoDeleteMode
                 ? '当前为「无需确认」模式：Agent 的删除建议会自动执行。'
@@ -194,10 +194,10 @@ function PopupApp() {
           {recentPending.length > 0 && (
             <div className="mt-1.5 space-y-0.5">
               {recentPending.map((p) => (
-                <p key={p.id} className="truncate text-[11px] text-muted-foreground/80">• {p.title}</p>
+                <p key={p.id} className="truncate text-2xs text-muted-foreground/80">• {p.title}</p>
               ))}
               {pendingCount > recentPending.length && (
-                <p className="text-[11px] text-muted-foreground/60">…等 {pendingCount} 项</p>
+                <p className="text-2xs text-muted-foreground/60">…等 {pendingCount} 项</p>
               )}
             </div>
           )}
@@ -212,22 +212,22 @@ function PopupApp() {
         <button
           type="button"
           onClick={() => openFullPage()}
-          className="w-full rounded-lg border border-border bg-card p-3 text-left transition-colors hover:bg-muted/50"
+          className="w-full rounded-lg border border-border bg-card p-3.5 text-left transition-colors hover:bg-muted"
           title="打开完整管理页"
         >
           <p className="truncate text-xs font-medium text-foreground">
             {activeTitle ? `最近动态 · ${activeTitle}` : '最近 Agent 动态'}
           </p>
-          <p className="mt-1.5 line-clamp-2 text-[11px] leading-4 break-words text-muted-foreground">
+          <p className="mt-1.5 line-clamp-2 text-2xs leading-4 break-words text-muted-foreground">
             {lastText || '还没有对话记录。打开管理页，开始与 Agent 对话吧。'}
           </p>
         </button>
 
         {/* 未配置提示 */}
         {!aiConfigured && (
-          <div className="rounded-lg border border-accent/30 bg-accent-muted p-3">
+          <div className="rounded-lg border border-accent/30 bg-accent-muted p-3.5">
             <p className="text-xs font-medium text-accent">AI 服务尚未配置</p>
-            <p className="mt-1 text-[11px] leading-4 text-muted-foreground">
+            <p className="mt-1 text-2xs leading-4 text-muted-foreground">
               配置 API Key 与模型后，Agent 才能开始工作。
             </p>
             <Button size="sm" variant="default" className="mt-2 w-full" onClick={openOptions}>
@@ -239,7 +239,7 @@ function PopupApp() {
         <Separator className="my-1" />
 
         {/* 入口按钮 */}
-        <div className="grid grid-cols-1 gap-1.5">
+        <div className="grid grid-cols-1 gap-2">
           <Button variant="default" onClick={() => openFullPage()}>
             打开完整管理页
           </Button>
@@ -249,23 +249,23 @@ function PopupApp() {
             onClick={() => void saveCurrentTab()}
             title={canSave ? '收藏当前标签页到书签栏' : '当前页面无法收藏（仅支持 http/https）'}
           >
-            <BookmarkPlus className="h-3 w-3" />
+            <BookmarkPlus className="h-3.5 w-3.5" />
             收藏当前页面
           </Button>
-          {saveError && <p className="text-center text-[11px] text-destructive">{saveError}</p>}
-          <div className="grid grid-cols-2 gap-1.5">
+          {saveError && <p className="text-center text-2xs text-destructive">{saveError}</p>}
+          <div className="grid grid-cols-2 gap-2">
             <Button variant="outline" onClick={() => void openSidePanel()} title="打开侧边栏（Ctrl+Shift+M）">
-              <LayoutPanelLeft className="h-3 w-3" />
+              <LayoutPanelLeft className="h-3.5 w-3.5" />
               打开侧边栏
             </Button>
             <Button variant="outline" onClick={openOptions}>
-              <Settings className="h-3 w-3" />
+              <Settings className="h-3.5 w-3.5" />
               AI 设置
             </Button>
           </div>
         </div>
       </div>
-      <div className="border-t border-border bg-card px-3 py-1.5 text-center text-[11px] text-muted-foreground/70">
+      <div className="border-t border-border bg-card px-3 py-2 text-center text-2xs text-muted-foreground/70">
         Ctrl+Shift+M 随时打开侧边栏
       </div>
     </div>

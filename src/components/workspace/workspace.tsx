@@ -118,9 +118,9 @@ export function Workspace({ mode, initialDeletionsOpen = false }: { mode: 'compa
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* 顶栏 */}
-      <header className="relative flex h-10 shrink-0 items-center gap-1.5 border-b border-border bg-card px-2">
+      <header className="relative flex h-11 shrink-0 items-center gap-2 border-b border-border bg-card px-3">
         {/* 顶栏底部：品牌色淡出分隔线 */}
-        <span className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-indigo-500/40 via-border to-transparent" />
+        <span className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-accent/40 via-border to-transparent" />
         <BrandMark />
         <Button
           variant="ghost"
@@ -134,20 +134,20 @@ export function Workspace({ mode, initialDeletionsOpen = false }: { mode: 'compa
         <Button
           variant="ghost"
           size="sm"
-          className={cn('ml-1 h-7 gap-1', pendingCount > 0 ? 'text-destructive' : 'text-muted-foreground')}
+          className={cn('h-8 gap-1.5 px-2', pendingCount > 0 ? 'text-destructive' : 'text-muted-foreground')}
           onClick={() => setDeletionsOpen(true)}
           title="待删除清单"
         >
-          <Trash2 className="h-3.5 w-3.5" />
+          <Trash2 className="h-4 w-4" />
           待删
           {pendingCount > 0 && (
-            <span className="flex h-4 min-w-4 items-center justify-center rounded-sm bg-destructive/10 px-1 text-[11px] font-medium text-destructive">
+            <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive/10 px-1.5 text-2xs font-semibold text-destructive">
               {pendingCount}
             </span>
           )}
         </Button>
 
-        <div className="ml-auto flex items-center gap-0.5">
+        <div className="ml-auto flex items-center gap-1">
           {mode === 'compact' && (
             <Button variant="ghost" size="icon" onClick={openFullPage} title="在完整页面打开" aria-label="在完整页面打开">
               <Maximize className="h-3.5 w-3.5" />
@@ -175,7 +175,7 @@ export function Workspace({ mode, initialDeletionsOpen = false }: { mode: 'compa
             <MessageSquare className="h-3.5 w-3.5" />
             {/* 抽屉收起期间的新消息未读数 */}
             {unread > 0 && (
-              <span className="absolute -top-0.5 -right-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-accent px-0.5 text-[9px] font-medium text-white">
+              <span className="absolute -top-0.5 -right-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-accent px-0.5 text-2xs font-medium text-accent-foreground ring-2 ring-card">
                 {unread > 99 ? '99+' : unread}
               </span>
             )}

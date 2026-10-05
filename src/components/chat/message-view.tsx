@@ -100,39 +100,39 @@ const ToolChip = memo(function ToolChip({ record }: { record: ToolCallRecord }) 
   const meta = TOOL_META[record.name];
 
   return (
-    <div className="mt-1 overflow-hidden rounded-sm border border-border bg-card">
+    <div className="mt-1.5 overflow-hidden rounded-sm border border-border bg-card">
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-1.5 px-2 py-1.5 text-left transition-colors hover:bg-muted/50"
+        className="flex w-full items-center gap-2 px-2.5 py-2 text-left transition-colors hover:bg-muted/60"
       >
         {record.status === 'running' ? (
-          <Loader2 className="h-3 w-3 shrink-0 animate-spin text-muted-foreground" />
+          <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
         ) : record.status === 'done' ? (
-          <CheckCircle2 className="h-3 w-3 shrink-0 text-success" />
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-success" />
         ) : (
-          <AlertTriangle className="h-3 w-3 shrink-0 text-destructive" />
+          <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-destructive" />
         )}
-        <Icon className="h-3 w-3 shrink-0 text-muted-foreground" />
-        <span className="shrink-0 text-xs text-foreground">{meta?.label ?? record.name}</span>
+        <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+        <span className="shrink-0 text-xs font-medium text-foreground">{meta?.label ?? record.name}</span>
         {record.status === 'running' && record.result && (
           // 长任务（check_urls_bulk / auto_categorize）实时进度
-          <span className="min-w-0 truncate text-[11px] text-muted-foreground">{record.result}</span>
+          <span className="min-w-0 truncate text-2xs text-muted-foreground">{record.result}</span>
         )}
         {record.status === 'done' && record.result && (
-          <span className="min-w-0 truncate text-[11px] text-muted-foreground">{summarize(record)}</span>
+          <span className="min-w-0 truncate text-2xs text-muted-foreground">{summarize(record)}</span>
         )}
         {record.status === 'error' && (
-          <span className="min-w-0 truncate text-[11px] text-destructive">{record.error}</span>
+          <span className="min-w-0 truncate text-2xs text-destructive">{record.error}</span>
         )}
       </button>
       {expanded && (record.result || record.error) && (
-        <div className="border-t border-border">
-          <div className="flex items-center justify-end px-1.5 pt-1">
+        <div className="border-t border-border bg-muted/30">
+          <div className="flex items-center justify-end px-2 pt-1.5">
             <button
               type="button"
               onClick={() => void copyText(record.result ?? record.error ?? '', '工具结果已复制')}
-              className="flex items-center gap-1 rounded-sm p-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              className="flex items-center gap-1 rounded-sm p-1 text-2xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               title="复制结果"
               aria-label="复制结果"
             >
@@ -140,7 +140,7 @@ const ToolChip = memo(function ToolChip({ record }: { record: ToolCallRecord }) 
               复制
             </button>
           </div>
-          <pre className="max-h-40 overflow-auto px-2 pb-1.5 text-[11px] leading-4 whitespace-pre-wrap text-muted-foreground">
+          <pre className="max-h-40 overflow-auto px-2.5 pt-0.5 pb-2 text-2xs leading-4 whitespace-pre-wrap text-muted-foreground">
             {record.result ?? record.error}
           </pre>
         </div>
@@ -190,21 +190,21 @@ export const MessageView = memo(function MessageView({
             <button
               type="button"
               onClick={() => useBookmarkStore.getState().revealInTree(message.contextFolderId!)}
-              className="mb-1 ml-auto flex max-w-full items-center gap-1 rounded-sm px-1 text-[11px] text-muted-foreground transition-colors hover:bg-muted hover:text-accent"
+              className="mb-1 ml-auto flex max-w-full items-center gap-1 rounded-sm px-1 text-2xs text-muted-foreground transition-colors hover:bg-muted hover:text-accent"
               title={`上下文：${contextPath}（点击在树中定位）`}
             >
               <Folder className="h-3 w-3 shrink-0" />
               <span className="truncate">{contextPath}</span>
             </button>
           )}
-          <div className="select-text rounded-lg rounded-br-sm bg-accent px-3 py-2 text-[13px] leading-5 whitespace-pre-wrap text-white">
+          <div className="select-text rounded-md rounded-br-xs bg-accent px-3 py-2 text-[13px] leading-5 whitespace-pre-wrap text-accent-foreground">
             {showText}
           </div>
           {text.length > LONG_LIMIT && (
             <button
               type="button"
               onClick={() => setLongExpanded((v) => !v)}
-              className="mt-0.5 ml-auto block text-[11px] text-accent transition-colors hover:underline"
+              className="mt-0.5 ml-auto block text-2xs text-accent transition-colors hover:underline"
             >
               {longExpanded ? '收起' : '展开全文'}
             </button>
@@ -237,14 +237,14 @@ export const MessageView = memo(function MessageView({
         {fullText.length > LONG_LIMIT && !longExpanded ? (
           // 超长回复折叠：先显示截断文本，展开后渲染完整富文本；工具块始终可见（删除卡片需可交互）
           <>
-            <div className="select-text text-[13px] leading-5 text-foreground">
+            <div className="select-text rounded-md rounded-tl-xs border border-border bg-bubble px-3 py-2.5 text-[13px] leading-5 text-foreground">
               <MarkdownText text={Array.from(fullText).slice(0, LONG_LIMIT).join('') + '…'} />
               {streaming && <span className="stream-cursor ml-0.5 inline-block h-3.5 w-[2px] translate-y-0.5 bg-accent" />}
             </div>
             <button
               type="button"
               onClick={() => setLongExpanded(true)}
-              className="text-[11px] text-accent transition-colors hover:underline"
+              className="text-2xs text-accent transition-colors hover:underline"
             >
               展开全文
             </button>
@@ -266,7 +266,9 @@ export const MessageView = memo(function MessageView({
                 <div
                   key={i}
                   className={cn(
-                    'select-text rounded-md border border-border/60 bg-card/60 px-2.5 py-2 text-foreground',
+                    // 助手气泡要与面板底色（bg-card）区分开：用 muted 底色而不是 card 半透明，
+                    // 后者在 card 上几乎看不出差别，等于「有背景但没效果」
+                    'select-text rounded-md rounded-tl-xs border border-border bg-bubble px-3 py-2.5 text-foreground',
                     !streaming && 'hover:border-border',
                   )}
                 >
@@ -283,7 +285,7 @@ export const MessageView = memo(function MessageView({
               <button
                 type="button"
                 onClick={() => setLongExpanded(false)}
-                className="text-[11px] text-accent transition-colors hover:underline"
+                className="text-2xs text-accent transition-colors hover:underline"
               >
                 收起
               </button>
@@ -291,7 +293,7 @@ export const MessageView = memo(function MessageView({
           </>
         )}
         {/* 底部操作条（hover 显示）：复制整条回复（纯文本 / Markdown）/ 重试（仅最后一条） */}
-        <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+        <div className="-ml-1 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
           {cleanCopy && (
             <button
               type="button"

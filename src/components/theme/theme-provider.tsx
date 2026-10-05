@@ -49,10 +49,10 @@ export function ThemeToggle() {
 export function BrandMark({ size = 'sm' }: { size?: 'sm' | 'md' }) {
   return (
     <div className="flex items-center gap-1.5">
-      <span className="flex h-6 w-6 items-center justify-center rounded-sm bg-accent text-white">
-        <BookMarked className="h-3.5 w-3.5" strokeWidth={2.2} />
+      <span className="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-accent-foreground">
+        <BookMarked className="h-4 w-4" strokeWidth={2.2} />
       </span>
-      <span className={`font-medium tracking-tight text-foreground ${size === 'sm' ? 'text-sm' : 'text-base'}`}>
+      <span className={`font-semibold tracking-tight text-foreground ${size === 'sm' ? 'text-sm' : 'text-base'}`}>
         Mark<span className="text-accent">AI</span>
       </span>
     </div>

@@ -18,7 +18,7 @@ export function ToastViewport() {
           key={t.id}
           onClick={() => remove(t.id)}
           className={cn(
-            'pointer-events-auto cursor-pointer animate-fade-in rounded-lg border bg-card px-3 py-2',
+            'pointer-events-auto cursor-pointer animate-slide-up rounded-lg border bg-card px-3 py-2.5 shadow-lg',
             t.variant === 'destructive' && 'border-destructive/40',
             t.variant === 'success' && 'border-success/40',
             t.variant === 'default' && 'border-border',
@@ -33,9 +33,9 @@ export function ToastViewport() {
               <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-muted-foreground" />
             )}
             <div className="min-w-0">
-              <p className="text-xs font-medium text-foreground">{t.title}</p>
+              <p className="text-xs font-semibold text-foreground">{t.title}</p>
               {t.description && (
-                <p className="mt-0.5 text-[11px] leading-4 break-words text-muted-foreground">
+                <p className="mt-0.5 text-2xs leading-4 break-words text-muted-foreground">
                   {t.description}
                 </p>
               )}

@@ -74,7 +74,7 @@ export function Dialog({
 
   return createPortal(
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="animate-fade-in absolute inset-0 bg-black/25" onClick={() => onOpenChange(false)} />
+      <div className="animate-fade-in absolute inset-0 bg-black/30" onClick={() => onOpenChange(false)} />
       <div
         ref={panelRef}
         role="dialog"
@@ -82,28 +82,30 @@ export function Dialog({
         aria-label={title}
         tabIndex={-1}
         onKeyDown={onPanelKeyDown}
-        className={cn('animate-scale-in relative max-w-[calc(100vw-32px)] rounded-lg border border-border bg-card p-4 outline-none', width)}
+        className={cn(
+          'animate-scale-in relative max-h-[calc(100vh-32px)] max-w-[calc(100vw-32px)] overflow-y-auto rounded-lg border border-border bg-card p-4 shadow-lg outline-none',
+          width,
+        )}
       >
-        <div className="mb-3 flex items-start justify-between gap-2">
+        <div className="mb-3.5 flex items-start justify-between gap-3">
           <div className="min-w-0">
-            <h2 className="text-sm font-medium text-foreground">{title}</h2>
+            <h2 className="text-sm font-semibold text-foreground">{title}</h2>
             {description && (
-              <p className="mt-0.5 truncate text-xs text-muted-foreground" title={description}>
-                {description}
-              </p>
+              /* 说明文字不截断：截断会把「为什么」藏起来，只能靠 title 悬浮才看得到 */
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p>
             )}
           </div>
           <button
             type="button"
             onClick={() => onOpenChange(false)}
-            className="rounded-sm p-1 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            className="-mt-0.5 -mr-0.5 shrink-0 rounded-sm p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             aria-label="关闭"
           >
             <X className="h-3.5 w-3.5" />
           </button>
         </div>
         {children}
-        {footer && <div className="mt-4 flex items-center justify-end gap-2">{footer}</div>}
+        {footer && <div className="mt-5 flex items-center justify-end gap-2">{footer}</div>}
       </div>
     </div>,
     document.body,

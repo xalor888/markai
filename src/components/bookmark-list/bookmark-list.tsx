@@ -1065,9 +1065,9 @@ const BookmarkRow = memo(function BookmarkRow({
       onMouseEnter={() => onActivate(index)}
       onContextMenu={(e) => onContextMenu(e, node.id)}
       className={cn(
-        'group relative flex h-10 cursor-pointer items-center gap-2 rounded-sm px-2.5 transition-colors hover:bg-muted/60',
+        'group relative flex h-10 cursor-pointer items-center gap-2 rounded-sm px-2.5 transition-colors hover:bg-muted',
         // 选中（多选/当前文件夹）与键盘高亮互斥：选中态用 accent 底，键盘高亮用描边
-        selected ? 'bg-accent-muted/50' : active && 'bg-muted/80',
+        selected ? 'bg-accent-muted' : active && 'bg-muted',
       )}
     >
       {/* 选中左指示条 */}
@@ -1121,7 +1121,7 @@ const BookmarkRow = memo(function BookmarkRow({
       </div>
       {!isFolder && node.url && (
         <span
-          className="shrink-0 rounded-sm p-1 text-muted-foreground opacity-0 transition-all group-hover:opacity-100 group-hover:bg-muted"
+          className="shrink-0 rounded-sm p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
           title="在新标签页打开"
         >
           <ExternalLink className="h-3.5 w-3.5" />

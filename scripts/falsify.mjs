@@ -1268,6 +1268,27 @@ const cases = [
     to: '  --color-background: #0f0911;',
     expectFail: ['深色主题底色不得偏紫'],
   },
+  {
+    // 滑块退回原生外观：webkit 与 moz 两套伪元素在 main.css 里是**交错**排列的
+    // （不能写成连续块，锚点会匹配不到、反证直接 SKIP）。删掉 moz 侧的把手规则，
+    // Firefox 上滑块就退回浏览器默认的方块 + 系统灰轨道。
+    name: '滑块只剩 -webkit 伪元素（Firefox 上退回原生外观）',
+    file: 'src/assets/main.css',
+    from: `.markai-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--color-card);
+  border: 2px solid var(--color-accent);
+  box-shadow: 0 1px 2px rgb(16 24 40 / 0.2);
+  transition:
+    transform 100ms ease,
+    box-shadow 100ms ease;
+}
+`,
+    to: '/* reverted: moz 侧把手规则被删除 */\n',
+    expectFail: ['滑块必须走 Slider 基元 + .markai-slider 样式'],
+  },
 ];
 
 /**

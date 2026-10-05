@@ -1,4 +1,4 @@
-import { CheckCircle2, Database, Eye, EyeOff, Loader2, Monitor, Moon, Palette, Plug, RefreshCw, ShieldCheck, SlidersHorizontal, Sun, Trash2, AlertTriangle } from 'lucide-react';
+import { CheckCircle2, ChevronRight, Database, Eye, EyeOff, Loader2, Monitor, Moon, Palette, Plug, RefreshCw, ShieldCheck, SlidersHorizontal, Sun, Sparkles, Trash2, Zap, AlertTriangle } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useConfigStore } from '@/stores/configStore';
 import { useAIStore, AI_STORAGE_KEY } from '@/stores/aiStore';
@@ -11,10 +11,13 @@ import { openUrl } from '@/lib/open-url';
 import { appVersion } from '@/lib/version';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Select } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
+import { Slider } from '@/components/ui/slider';
 import { cn } from '@/lib/utils';
 
 /** token 数友好显示：400000 → 400K，1047000 → 1.05M */
@@ -22,6 +25,86 @@ function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2).replace(/\.?0+$/, '')}M`;
   if (n >= 1000) return `${Math.round(n / 1000)}K`;
   return String(n);
+}
+
+/** 分区卡片：统一标题样式与内边距（此前每个 section 各写一遍标题 className） */
+function Section({
+  icon: Icon,
+  title,
+  children,
+  className,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  title: string;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <section className={cn('rounded-lg border border-border bg-card p-4', className)}>
+      <h2 className="mb-3.5 flex items-center gap-2 text-sm font-semibold text-foreground">
+        <Icon className="h-4 w-4 shrink-0 text-accent" />
+        {title}
+      </h2>
+      {children}
+    </section>
+  );
+}
+
+/** 字段容器：标签在上、控件在下、说明在最后（统一三段式间距） */
+function Field({
+  label,
+  hint,
+  htmlFor,
+  children,
+  action,
+}: {
+  label: string;
+  hint?: React.ReactNode;
+  htmlFor?: string;
+  children: React.ReactNode;
+  /** 标签行右侧的操作（如「获取模型列表」） */
+  action?: React.ReactNode;
+}) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <Label htmlFor={htmlFor}>{label}</Label>
+        {action}
+      </div>
+      {children}
+      {hint && <p className="text-2xs leading-4 text-muted-foreground">{hint}</p>}
+    </div>
+  );
+}
+
+/** 文字按钮：用于 Label 行右侧的轻量操作 */
+function InlineAction({
+  onClick,
+  disabled,
+  busy,
+  icon: Icon,
+  children,
+  title,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+  busy?: boolean;
+  icon: React.ComponentType<{ className?: string }>;
+  children: React.ReactNode;
+  title?: string;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onClick={onClick}
+      title={title}
+      className="flex shrink-0 items-center gap-1 rounded-xs px-1.5 py-1 text-2xs text-accent transition-colors hover:bg-accent-muted disabled:pointer-events-none disabled:opacity-40"
+    >
+      {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : <Icon className="h-3 w-3" />}
+      {children}
+    </button>
+  );
 }
 
 /** AI 配置表单：Provider 预设 / API Key / Base URL / 模型 + 连接测试 + 外观 + 数据管理 */
@@ -43,7 +126,6 @@ export function ConfigForm() {
   // 设置保存失败必须可见：这条路径存的是 API Key 与删除模式，静默失败会变成假象
   const saveError = useConfigStore((s) => s.saveError);
   // 模型上下文输入：本地字符串 state（受控 value 派生 + onChange 过滤会拦截 64K/100K 等合法输入）
-  // 默认 1024K：绝大多数大模型可直接用，无需手动填写
   const [ctxInput, setCtxInput] = useState(() => String(Math.round((config.contextWindow ?? 1_048_576) / 1000)));
   /** 模型已知窗口的展示值（跟随模型时显示在输入框旁，让用户知道实际用的是多少） */
   const [autoHint, setAutoHint] = useState('');
@@ -101,7 +183,7 @@ export function ConfigForm() {
     setCtxInput(String(Math.round((config.contextWindow ?? auto) / 1000)));
   }, [config.contextWindow, config.model, config.providerId]);
 
-  if (!loaded) return <p className="text-xs text-muted-foreground">加载中…</p>;
+  if (!loaded) return <p className="p-4 text-xs text-muted-foreground">加载中…</p>;
 
   const runTest = async () => {
     if (testing) return; // 防并发
@@ -229,336 +311,284 @@ export function ConfigForm() {
   };
 
   return (
-    <div className="mx-auto w-full max-w-md space-y-5">
+    <div className="space-y-4">
       {/* ── AI 服务 ── */}
-      <section className="space-y-4 rounded-lg border border-border bg-card p-5">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
-          <Plug className="h-3.5 w-3.5 text-accent" />
-          AI 服务
-        </h2>
-
-        <div className="space-y-1.5">
-          <Label htmlFor="provider">服务商</Label>
-          <select
-            id="provider"
-            className="h-8 w-full appearance-none rounded-sm border border-input bg-card px-2 text-xs text-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            value={config.providerId}
-            onChange={(e) => {
-              // 切换即作废全部在途请求（epoch 递增 + 复位按钮状态），
-              // 防止旧服务商的测试结果/模型列表/上下文长度污染新配置
-              testEpoch.current++;
-              modelsEpoch.current++;
-              setTesting(false);
-              setFetchingModels(false);
-              void applyPreset(e.target.value);
-              setTestResult(null); // 切换服务商后清除旧测试结果
-              setRemoteModels([]); // 旧服务商的模型列表不得残留（可能误选不存在的模型）
-            }}
+      <Section icon={Plug} title="AI 服务">
+        <div className="space-y-3.5">
+          <Field
+            label="服务商"
+            htmlFor="provider"
+            hint={preset?.needsKey ? '该服务商需要 API Key。' : '本地服务（如 Ollama）无需 API Key。'}
           >
-            {PROVIDERS.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-          <p className="text-2xs text-muted-foreground">
-            {preset?.needsKey ? '该服务商需要 API Key。' : '本地服务（如 Ollama）无需 API Key。'}
-          </p>
-        </div>
-
-        <div className="space-y-1.5">
-          <Label htmlFor="base-url">Base URL</Label>
-          <Input
-            id="base-url"
-            value={config.baseUrl}
-            onChange={(e) => {
-              void update({ baseUrl: e.target.value });
-              setTestResult(null);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.nativeEvent.isComposing) void runTest();
-            }}
-            placeholder={preset?.baseUrl || 'api.example.com/v1（可省略 https://）'}
-            spellCheck={false}
-          />
-          <p className="text-2xs text-muted-foreground">
-            兼容 OpenAI 协议；本地 Ollama 默认 http://localhost:11434/v1
-          </p>
-        </div>
-
-        {preset?.needsKey && (
-          <div className="space-y-1.5">
-            <Label htmlFor="api-key">API Key</Label>
-            <div className="relative">
-              <Input
-                id="api-key"
-                type={showKey ? 'text' : 'password'}
-                value={config.apiKey}
-                onChange={(e) => {
-                  void update({ apiKey: e.target.value });
-                  setTestResult(null);
-                }}
-                placeholder="sk-…"
-                spellCheck={false}
-                autoComplete="off"
-                className="pr-8"
-              />
-              <button
-                type="button"
-                onClick={() => setShowKey((v) => !v)}
-                className="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
-                aria-label={showKey ? '隐藏 API Key' : '显示 API Key'}
-              >
-                {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-              </button>
-            </div>
-          </div>
-        )}
-
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
-            <Label htmlFor="model">模型</Label>
-            <button
-              type="button"
-              disabled={fetchingModels}
-              onClick={() => void fetchModels()}
-              className="flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-2xs text-accent transition-colors hover:bg-accent-muted disabled:pointer-events-none disabled:opacity-40"
-              title="从服务商拉取最新模型列表（GET /models）"
-            >
-              {fetchingModels ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-              获取模型列表
-            </button>
-          </div>
-          <Input
-            id="model"
-            list="model-suggestions"
-            value={modelInput}
-            onChange={(e) => {
-              setModelInput(e.target.value);
-              void update({ model: e.target.value });
-              setTestResult(null);
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter' && !e.nativeEvent.isComposing) void runTest();
-            }}
-            placeholder={preset?.defaultModel || '输入模型名称'}
-            spellCheck={false}
-          />
-          <datalist id="model-suggestions">
-            {models.map((m) => (
-              <option key={m} value={m} />
-            ))}
-            {remoteModels.map((m) => (
-              <option key={`r-${m}`} value={m} />
-            ))}
-          </datalist>
-          {remoteModels.length > 0 && (
-            <p className="text-2xs text-muted-foreground">
-              已从服务商拉取 {remoteModels.length} 个模型，可在输入框下拉选择。
-            </p>
-          )}
-        </div>
-
-        <div className="flex items-center gap-2 pt-1">
-          <Button size="sm" variant="secondary" disabled={testing} onClick={() => void runTest()}>
-            {testing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plug className="h-3 w-3" />}
-            测试连接
-          </Button>
-          {testResult && (
-            <span
-              role="status"
-              className={
-                testResult.ok
-                  ? 'flex items-center gap-1 text-2xs text-success'
-                  : 'text-2xs text-destructive'
-              }
-            >
-              {testResult.ok && <CheckCircle2 className="h-3 w-3" />}
-              {testResult.message}
-            </span>
-          )}
-        </div>
-      </section>
-
-      {/* ── 删除与上下文 ── */}
-      <section className="space-y-4 rounded-lg border border-border bg-card p-5">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
-          <SlidersHorizontal className="h-3.5 w-3.5 text-accent" />
-          删除与上下文
-        </h2>
-
-        {/* 删除确认模式 */}
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
-            <Label htmlFor="delete-mode">删除确认</Label>
-            <span className="text-2xs text-muted-foreground">
-              {config.deleteMode === 'auto' ? '无需确认（自动执行）' : '始终需确认（推荐）'}
-            </span>
-          </div>
-          <select
-            id="delete-mode"
-            className="h-8 w-full appearance-none rounded-sm border border-input bg-card px-2 text-xs text-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            value={config.deleteMode ?? 'confirm'}
-            onChange={(e) => void update({ deleteMode: e.target.value as 'confirm' | 'auto' })}
-          >
-            <option value="confirm">始终需确认（推荐）</option>
-            <option value="auto">无需确认（AI 提议自动执行）</option>
-          </select>
-          <p className="text-2xs leading-4 text-muted-foreground">
-            {config.deleteMode === 'auto'
-              ? '⚠ Agent 的删除提议与「删除全部」将立即执行，不再经过界面确认。'
-              : 'Agent 只能提交删除提议，你在聊天卡片或待删清单确认后才真正删除。'}
-          </p>
-        </div>
-
-        {/* 轮次级计划模式：写操作先出计划、确认后才执行（默认关闭） */}
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
-            <Label htmlFor="plan-mode">执行前先看计划</Label>
-            <span className="text-2xs text-muted-foreground">
-              {config.planMode ? '每个写操作回次先确认' : '关闭（直接执行）'}
-            </span>
-          </div>
-          <select
-            id="plan-mode"
-            className="h-8 w-full appearance-none rounded-sm border border-input bg-card px-2 text-xs text-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            value={config.planMode ? 'on' : 'off'}
-            onChange={(e) => void update({ planMode: e.target.value === 'on' })}
-          >
-            <option value="off">关闭（Agent 直接执行写操作）</option>
-            <option value="on">开启（先展示计划，确认后才改动书签）</option>
-          </select>
-          <p className="text-2xs leading-4 text-muted-foreground">
-            {config.planMode
-              ? 'Agent 每次要改动书签前，会先把计划列在聊天里等你确认；取消则这一步不会执行。删除提议仍按其自己的确认设置处理。'
-              : 'Agent 会直接执行移动/新建/重命名等写操作（仍可用「撤销本次操作」回退）。'}
-          </p>
-        </div>
-
-        {/* 上下文：模型上下文长度（默认 1024K）+ 压缩阈值 */}
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
-            <Label htmlFor="context-window">模型上下文长度</Label>
-            <button
-              type="button"
-              onClick={() => void fetchModels()}
-              disabled={fetchingModels}
-              className="flex items-center gap-1 rounded-sm px-1.5 py-0.5 text-2xs text-accent transition-colors hover:bg-accent-muted disabled:pointer-events-none disabled:opacity-40"
-              title="从服务商拉取模型信息（若返回 context_window 会自动填入）"
-            >
-              {fetchingModels ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-              从服务商获取
-            </button>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <Input
-              id="context-window"
-              type="number"
-              min={8}
-              max={2000}
-              step={8}
-              value={ctxInput}
-              onChange={(e) => setCtxInput(e.target.value)}
-              onBlur={commitCtx}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
-                  e.preventDefault();
-                  commitCtx();
-                }
+            <Select
+              id="provider"
+              value={config.providerId}
+              onChange={(e) => {
+                // 切换即作废全部在途请求（epoch 递增 + 复位按钮状态），
+                // 防止旧服务商的测试结果/模型列表/上下文长度污染新配置
+                testEpoch.current++;
+                modelsEpoch.current++;
+                setTesting(false);
+                setFetchingModels(false);
+                void applyPreset(e.target.value);
+                setTestResult(null); // 切换服务商后清除旧测试结果
+                setRemoteModels([]); // 旧服务商的模型列表不得残留（可能误选不存在的模型）
               }}
-              className="h-8 w-24 text-xs"
-              aria-label="模型上下文长度（千 token）"
+            >
+              {PROVIDERS.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+
+          <Field label="Base URL" htmlFor="base-url" hint="兼容 OpenAI 协议；本地 Ollama 默认 http://localhost:11434/v1">
+            <Input
+              id="base-url"
+              value={config.baseUrl}
+              onChange={(e) => {
+                void update({ baseUrl: e.target.value });
+                setTestResult(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.nativeEvent.isComposing) void runTest();
+              }}
+              placeholder={preset?.baseUrl || 'api.example.com/v1（可省略 https://）'}
+              spellCheck={false}
             />
-            <span className="text-2xs text-muted-foreground">K tokens（千 token）</span>
-            {!isAuto && (
-              <button
-                type="button"
-                onClick={resetCtxToModel}
-                className="ml-auto rounded-sm px-1.5 py-0.5 text-2xs text-accent transition-colors hover:bg-accent-muted"
-                title={`清除手动值，改回跟随模型（${autoHint}）`}
+          </Field>
+
+          {preset?.needsKey && (
+            <Field label="API Key" htmlFor="api-key">
+              <div className="relative">
+                <Input
+                  id="api-key"
+                  type={showKey ? 'text' : 'password'}
+                  value={config.apiKey}
+                  onChange={(e) => {
+                    void update({ apiKey: e.target.value });
+                    setTestResult(null);
+                  }}
+                  placeholder="sk-…"
+                  spellCheck={false}
+                  autoComplete="off"
+                  className="pr-8"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowKey((v) => !v)}
+                  className="absolute top-1/2 right-2 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
+                  aria-label={showKey ? '隐藏 API Key' : '显示 API Key'}
+                >
+                  {showKey ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                </button>
+              </div>
+            </Field>
+          )}
+
+          <Field
+            label="模型"
+            htmlFor="model"
+            hint={
+              remoteModels.length > 0
+                ? `已拉取 ${remoteModels.length} 个模型，可在输入框下拉选择。`
+                : undefined
+            }
+            action={
+              <InlineAction
+                onClick={() => void fetchModels()}
+                disabled={fetchingModels}
+                busy={fetchingModels}
+                icon={RefreshCw}
+                title="从服务商拉取最新模型列表（GET /models）"
               >
-                跟随模型
-              </button>
+                获取列表
+              </InlineAction>
+            }
+          >
+            <Input
+              id="model"
+              list="model-suggestions"
+              value={modelInput}
+              onChange={(e) => {
+                setModelInput(e.target.value);
+                void update({ model: e.target.value });
+                setTestResult(null);
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.nativeEvent.isComposing) void runTest();
+              }}
+              placeholder={preset?.defaultModel || '输入模型名称'}
+              spellCheck={false}
+            />
+            <datalist id="model-suggestions">
+              {models.map((m) => (
+                <option key={m} value={m} />
+              ))}
+              {remoteModels.map((m) => (
+                <option key={`r-${m}`} value={m} />
+              ))}
+            </datalist>
+          </Field>
+
+          {/* 测试连接：结果独占一行，失败时不会把按钮挤走 */}
+          <div className="space-y-2 border-t border-border pt-3.5">
+            <Button size="sm" variant="secondary" disabled={testing} onClick={() => void runTest()}>
+              {testing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plug className="h-3 w-3" />}
+              测试连接
+            </Button>
+            {testResult && (
+              <p
+                role="status"
+                className={cn(
+                  'flex items-start gap-1.5 text-2xs leading-4',
+                  testResult.ok ? 'text-success' : 'text-destructive',
+                )}
+              >
+                {testResult.ok && <CheckCircle2 className="mt-px h-3 w-3 shrink-0" />}
+                <span className="min-w-0">{testResult.message}</span>
+              </p>
             )}
           </div>
-          <p className="text-2xs leading-4 text-muted-foreground">
-            {isAuto ? (
-              <>
-                当前<strong className="text-foreground">跟随模型</strong>：{config.model || preset?.defaultModel || '未选模型'} → {autoHint}。
-              </>
-            ) : (
-              <>已手动设置为 {Math.round((config.contextWindow ?? 0) / 1000)}K（该模型已知 {autoHint}）。</>
-            )}
-            {' '}填错方向会让请求超出模型真实窗口（报错或被截断）——不确定就点「跟随模型」。
-            拉取模型列表时若服务商返回 context_window 会自动填入。
-          </p>
         </div>
+      </Section>
 
-        {/* 压缩阈值 */}
-        <div className="space-y-1.5">
-          <div className="flex items-center justify-between">
-            <Label htmlFor="compress-threshold">自动压缩阈值</Label>
-            <span className="text-2xs text-muted-foreground">
-              {Math.round((config.compressThreshold ?? 0.8) * 100)}%
-              · 预算 {formatTokens(Math.round(effectiveWindow * (config.compressThreshold ?? 0.8)))}
+      {/* ── 上下文与预算 ── */}
+      <Section icon={SlidersHorizontal} title="上下文与预算">
+        <div className="space-y-3.5">
+          <Field
+            label="模型上下文长度"
+            htmlFor="context-window"
+            action={
+              !isAuto && (
+                <InlineAction onClick={resetCtxToModel} icon={Sparkles} title={`清除手动值，改回跟随模型（${autoHint}）`}>
+                  跟随模型
+                </InlineAction>
+              )
+            }
+            hint={
+              isAuto ? (
+                <>
+                  当前<strong className="text-foreground">跟随模型</strong>：
+                  {config.model || preset?.defaultModel || '未选模型'} → {autoHint}。不确定就别手动填。
+                </>
+              ) : (
+                <>
+                  已手动设为 {Math.round((config.contextWindow ?? 0) / 1000)}K，该模型已知 {autoHint}。填错会让请求超出真实窗口。
+                </>
+              )
+            }
+          >
+            <div className="flex items-center gap-2">
+              <Input
+                id="context-window"
+                type="number"
+                min={8}
+                max={2000}
+                step={8}
+                value={ctxInput}
+                onChange={(e) => setCtxInput(e.target.value)}
+                onBlur={commitCtx}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
+                    e.preventDefault();
+                    commitCtx();
+                  }
+                }}
+                className="h-8 w-24 text-xs"
+                aria-label="模型上下文长度（千 token）"
+              />
+              <span className="text-2xs text-muted-foreground">K tokens</span>
+            </div>
+          </Field>
+
+          <Field
+            label="自动压缩阈值"
+            htmlFor="compress-threshold"
+            hint="用量达到「上下文长度 × 阈值」时，把早期消息压缩为摘要（需开启下方自动压缩）。"
+          >
+            <div className="flex items-center gap-3">
+              <Slider
+                id="compress-threshold"
+                min={50}
+                max={95}
+                step={5}
+                value={Math.round((config.compressThreshold ?? 0.8) * 100)}
+                onChange={(v) => void update({ compressThreshold: v / 100 })}
+                aria-label="自动压缩阈值"
+                className="flex-1"
+              />
+              <span className="w-24 shrink-0 text-right text-2xs text-muted-foreground">
+                {Math.round((config.compressThreshold ?? 0.8) * 100)}% · 预算{' '}
+                {formatTokens(Math.round(effectiveWindow * (config.compressThreshold ?? 0.8)))}
+              </span>
+            </div>
+          </Field>
+
+          {/* 自动压缩：与上面那条阈值是配套的开关，紧贴在一起 */}
+          <label className="flex cursor-pointer items-center gap-2.5 rounded-sm border border-border bg-muted/40 px-3 py-2.5 transition-colors hover:border-border hover:bg-muted">
+            <Checkbox
+              checked={config.autoCompress ?? false}
+              onCheckedChange={(v) => void update({ autoCompress: v })}
+              aria-label="自动压缩上下文"
+            />
+            <span className="min-w-0 flex-1">
+              <span className="block text-xs font-medium text-foreground">自动压缩上下文</span>
+              <span className="mt-0.5 block text-2xs leading-4 text-muted-foreground">
+                {config.autoCompress ? '长对话会自动摘要早期消息' : '关闭（长会话可能超出模型窗口）'}
+              </span>
             </span>
-          </div>
-          <input
-            id="compress-threshold"
-            type="range"
-            min={50}
-            max={95}
-            step={5}
-            value={Math.round((config.compressThreshold ?? 0.8) * 100)}
-            onChange={(e) => void update({ compressThreshold: Number(e.target.value) / 100 })}
-            className="w-full accent-[--color-accent]"
-          />
-          <p className="text-2xs leading-4 text-muted-foreground">
-            对话历史用量达到「上下文长度 × 阈值」时，自动把早期消息压缩为摘要（需开启下面的自动压缩），保证不超出模型上下文。
-          </p>
+          </label>
         </div>
+      </Section>
 
-        {/* 上下文自动压缩 */}
-        <label className="flex cursor-pointer items-center gap-2">
-          <input
-            type="checkbox"
-            checked={config.autoCompress ?? false}
-            onChange={(e) => void update({ autoCompress: e.target.checked })}
-            className="h-3.5 w-3.5 accent-[--color-accent]"
-          />
-          <span className="text-xs text-foreground">自动压缩上下文</span>
-          <span className="ml-auto text-2xs text-muted-foreground">
-            {config.autoCompress ? '长对话自动摘要早期消息' : '关闭'}
-          </span>
-        </label>
-        <p className="text-2xs leading-4 text-muted-foreground">
-          开启后，历史消息超过上限时会先把早期消息压缩为摘要，再继续对话（避免长会话丢失记忆）。
-        </p>
-      </section>
+      {/* ── Agent 行为 ── */}
+      <Section icon={Zap} title="Agent 行为">
+        <div className="space-y-3.5">
+          <Field
+            label="删除确认"
+            htmlFor="delete-mode"
+            hint={
+              config.deleteMode === 'auto'
+                ? '⚠ 删除提议与「删除全部」将立即执行，不再经过界面确认。'
+                : 'Agent 只提交删除提议，你确认后才真正删除。'
+            }
+          >
+            <Select
+              id="delete-mode"
+              value={config.deleteMode ?? 'confirm'}
+              onChange={(e) => void update({ deleteMode: e.target.value as 'confirm' | 'auto' })}
+            >
+              <option value="confirm">始终需确认（推荐）</option>
+              <option value="auto">无需确认（自动执行）</option>
+            </Select>
+          </Field>
 
-      {/* ── 安全说明 ── */}
-      <section className="rounded-lg border border-border bg-card p-5">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
-          <ShieldCheck className="h-3.5 w-3.5 text-accent" />
-          安全机制
-        </h2>
-        <ul className="mt-2 space-y-1.5 text-2xs leading-4 text-muted-foreground">
-          <li>· API Key 仅存储在浏览器本地（chrome.storage.local），不会同步到云端。</li>
-          <li>· AI 请求由浏览器后台直接发给所选服务商，扩展不经过任何中间服务器。</li>
-          <li>· Agent 可以执行移动/新建/重命名；删除默认需你确认，可切换为「无需确认」模式。</li>
-          <li>· 浏览器根文件夹（书签栏等）永远不可删除。</li>
-        </ul>
-      </section>
-
-      <Separator />
+          <Field
+            label="执行前先看计划"
+            htmlFor="plan-mode"
+            hint={
+              config.planMode
+                ? 'Agent 改动书签前会先列计划等你确认；删除提议仍按上面的确认设置处理。'
+                : 'Agent 直接执行移动/新建/重命名（可用「撤销本次操作」回退）。'
+            }
+          >
+            <Select
+              id="plan-mode"
+              value={config.planMode ? 'on' : 'off'}
+              onChange={(e) => void update({ planMode: e.target.value === 'on' })}
+            >
+              <option value="off">关闭（直接执行）</option>
+              <option value="on">开启（先展示计划）</option>
+            </Select>
+          </Field>
+        </div>
+      </Section>
 
       {/* ── 外观 ── */}
-      <section className="rounded-lg border border-border bg-card p-5">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
-          <Palette className="h-3.5 w-3.5 text-accent" />
-          外观
-        </h2>
-        <div className="mt-2.5 grid grid-cols-3 gap-1.5">
+      <Section icon={Palette} title="外观">
+        <div className="grid grid-cols-3 gap-1.5">
           {(
             [
               { value: 'light', label: '浅色', icon: Sun },
@@ -573,8 +603,8 @@ export function ConfigForm() {
               className={cn(
                 'flex h-9 items-center justify-center gap-1.5 rounded-sm border text-xs transition-colors',
                 theme === opt.value
-                  ? 'border-accent/40 bg-accent-muted text-accent'
-                  : 'border-border text-muted-foreground hover:bg-muted/60 hover:text-foreground',
+                  ? 'border-accent/40 bg-accent-muted font-medium text-accent'
+                  : 'border-border text-muted-foreground hover:bg-muted hover:text-foreground',
               )}
             >
               <opt.icon className="h-3.5 w-3.5" />
@@ -582,12 +612,44 @@ export function ConfigForm() {
             </button>
           ))}
         </div>
-      </section>
+      </Section>
 
-      <Separator />
+      {/* ── 数据管理 ── */}
+      <Section icon={Database} title="数据管理">
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs text-foreground">对话记录与待删除清单</p>
+            <p className="mt-0.5 text-2xs text-muted-foreground">
+              {dataCounts.messages} 条消息 · {dataCounts.pending} 项待删 · 清空后不可恢复
+            </p>
+          </div>
+          <Button size="sm" variant="destructive" onClick={() => setConfirmClear(true)}>
+            <Trash2 className="h-3 w-3" />
+            清空
+          </Button>
+        </div>
+      </Section>
+
+      {/* ── 安全说明：次要信息，不占一张卡片 ── */}
+      <div className="rounded-lg border border-border/60 bg-muted/30 px-4 py-3.5">
+        <h2 className="flex items-center gap-2 text-xs font-semibold text-foreground">
+          <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+          安全机制
+        </h2>
+        <ul className="mt-2 space-y-1.5 text-2xs leading-4 text-muted-foreground">
+          <li className="flex gap-2">
+            <ChevronRight className="mt-1 h-2.5 w-2.5 shrink-0" />
+            API Key 仅存于浏览器本地，不同步到云端；请求由后台直发所选服务商，无中间服务器。
+          </li>
+          <li className="flex gap-2">
+            <ChevronRight className="mt-1 h-2.5 w-2.5 shrink-0" />
+            删除默认需你确认；浏览器根文件夹（书签栏等）永远不可删除。
+          </li>
+        </ul>
+      </div>
 
       {saveError && (
-        <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+        <div className="flex items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2.5 text-xs text-destructive">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span className="min-w-0 flex-1">{saveError.message}</span>
           <button
@@ -609,29 +671,6 @@ export function ConfigForm() {
           </button>
         </div>
       )}
-
-      {/* ── 数据管理 ── */}
-      <section className="space-y-3 rounded-lg border border-border bg-card p-5">
-        <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
-          <Database className="h-3.5 w-3.5 text-accent" />
-          数据管理
-        </h2>
-        <div className="flex items-center justify-between gap-2">
-          <div className="min-w-0">
-            <p className="text-xs text-foreground">
-              对话记录与待删除清单
-              <span className="ml-1.5 text-2xs text-muted-foreground">
-                {dataCounts.messages} 条消息 · {dataCounts.pending} 项待删
-              </span>
-            </p>
-            <p className="text-2xs text-muted-foreground">清空后不可恢复</p>
-          </div>
-          <Button size="sm" variant="destructive" onClick={() => setConfirmClear(true)}>
-            <Trash2 className="h-3 w-3" />
-            清空
-          </Button>
-        </div>
-      </section>
 
       {/* 清空确认 */}
       <Dialog
@@ -658,9 +697,11 @@ export function ConfigForm() {
         }
       />
 
-      <p className="pb-4 text-center text-2xs text-muted-foreground">
-        MarkAI v{appVersion()} · 支持 OpenAI / DeepSeek / Moonshot / Ollama 及任意 OpenAI 兼容服务
-        {' · '}
+      <footer className="flex flex-col items-center gap-1.5 pb-4 text-center text-2xs text-muted-foreground">
+        <p>MarkAI v{appVersion()}</p>
+        <p className="text-muted-foreground/70">
+          支持 OpenAI / DeepSeek / Moonshot / Ollama 及任意 OpenAI 兼容服务
+        </p>
         <button
           type="button"
           onClick={() => void openUrl('chrome://extensions/shortcuts')}
@@ -668,7 +709,7 @@ export function ConfigForm() {
         >
           自定义快捷键
         </button>
-      </p>
+      </footer>
     </div>
   );
 }
@@ -676,17 +717,17 @@ export function ConfigForm() {
 /** 页面顶部品牌条 */
 export function OptionsHeader() {
   return (
-    <header className="sticky top-0 z-10 border-b border-border bg-background/95 px-4 py-3">
-      <div className="mx-auto flex max-w-md items-center justify-between">
-        <div className="flex items-center gap-1.5">
-          <span className="flex h-6 w-6 items-center justify-center rounded-sm border border-accent/30 bg-accent-muted text-accent text-xs font-medium">
+    <header className="sticky top-0 z-10 border-b border-border bg-background/95 px-4 py-2.5 backdrop-blur-sm">
+      <div className="mx-auto flex max-w-lg items-center justify-between">
+        <div className="flex items-center gap-2">
+          <span className="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-sm font-semibold text-accent-foreground">
             M
           </span>
-          <span className="text-sm font-medium text-foreground">
+          <span className="text-sm font-semibold tracking-tight text-foreground">
             Mark<span className="text-accent">AI</span> 设置
           </span>
         </div>
-        <Badge variant="outline">浏览器书签管家 Agent</Badge>
+        <Badge variant="outline">书签管家 Agent</Badge>
       </div>
     </header>
   );

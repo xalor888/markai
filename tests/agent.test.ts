@@ -7611,6 +7611,46 @@ function ok(name: string, fn: () => void) {
       }
       assert.equal(purple.length, 0, `以下深色 token 偏紫/品红（G 通道最低）：${purple.join(', ')}`);
     });
+
+    /* 滑块：原生 `input[type=range]` 是浏览器默认外观（灰蓝轨道 + 方形把手），
+       深色模式下轨道仍是系统灰、不受 token 接管。所以项目用 Slider 基元保留原生的
+       语义与键盘可达性（←/→/Home/End），外观由 main.css 的 .markai-slider 重画。
+       这条守卫钉住三件事：样式必须在、必须用 token（而非硬编码色）、
+       且两套伪元素（webkit / moz）都得覆盖——只写一套等于另一种浏览器上是原生外观。 */
+    const sliderSrc = readFileSync(resolve(rootDir, 'src/components/ui/slider.tsx'), 'utf8');
+    ok('滑块必须走 Slider 基元 + .markai-slider 样式（原生 range 是系统外观）', () => {
+      assert.ok(
+        /className=\{?\s*\[?'markai-slider'/.test(sliderSrc),
+        'Slider 基元必须挂 markai-slider 类（否则 main.css 的重画样式不生效）',
+      );
+      // 填充比例驱动：缺了它轨道会整条是灰的，看不出当前值
+      assert.ok(
+        /--markai-slider-pct/.test(sliderSrc),
+        'Slider 必须写入 --markai-slider-pct，否则轨道填充比例恒为 0',
+      );
+      for (const [prop, selector] of [
+        ['轨道（webkit）', '.markai-slider::-webkit-slider-runnable-track'],
+        ['把手（webkit）', '.markai-slider::-webkit-slider-thumb'],
+        ['轨道（moz）', '.markai-slider::-moz-range-track'],
+        ['把手（moz）', '.markai-slider::-moz-range-thumb'],
+      ] as const) {
+        // 必须按**完整规则块**匹配，不能只查选择器子串：
+        // `::-moz-range-thumb` 是 `hover::-moz-range-thumb` / `focus-visible::-moz-range-thumb`
+        // 的子串，所以主规则被删光之后子串依然存在 —— 查子串会永远为真。
+        const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        assert.ok(
+          new RegExp(`${escaped}\\s*\\{[^}]*\\}`).test(cssSrc),
+          `main.css 缺少 ${prop} 的规则块（${selector}），该浏览器上会退回原生外观`,
+        );
+      }
+      // 外观必须由 token 驱动，不能写死颜色
+      const trackRule = /\.markai-slider::[a-z-]+-slider-(?:runnable-track|thumb)\s*\{[^}]*\}/.exec(cssSrc)?.[0] ?? '';
+      assert.ok(trackRule.length > 0, '未找到滑块轨道/把手规则');
+      assert.ok(
+        /var\(--color-/.test(trackRule),
+        `滑块样式必须用 var(--color-*) 取色，不能写死：${trackRule.slice(0, 80)}`,
+      );
+    });
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

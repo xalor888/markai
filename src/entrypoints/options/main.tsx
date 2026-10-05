@@ -21,7 +21,9 @@ function OptionsApp() {
     <div className="min-h-full">
       <ThemeProvider />
       <OptionsHeader />
-      <main className="mx-auto w-full max-w-md px-4 py-5">
+      {/* max-w-lg 而非 md：md(448px) 下说明文字每行只放得下三十来个字，
+          长句会折成三行，整页显得又窄又密 */}
+      <main className="mx-auto w-full max-w-lg px-4 py-5">
         <ConfigForm />
       </main>
       <ToastViewport />

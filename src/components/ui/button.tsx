@@ -7,7 +7,7 @@ type Size = 'sm' | 'default' | 'lg' | 'icon' | 'icon-sm';
 const variantClasses: Record<Variant, string> = {
   // 主按钮：Indigo 实色（无渐变，克制不花哨），hover 加深
   default: 'bg-accent text-accent-foreground hover:bg-accent/90',
-  secondary: 'bg-muted text-foreground hover:bg-muted/70',
+  secondary: 'bg-muted text-foreground hover:bg-muted',
   outline: 'border border-border bg-card text-foreground hover:bg-muted',
   // 幽灵按钮用于工具栏：默认压到次要色，hover 才提到主色，让一排图标按钮不抢内容
   ghost: 'text-muted-foreground hover:bg-muted hover:text-foreground',

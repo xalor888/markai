@@ -428,7 +428,7 @@ export function ChatPanel({
                     }}
                     className={cn(
                       'flex w-full items-center gap-2 rounded-sm px-2.5 py-2 text-left transition-colors',
-                      row.undoable && !streaming ? 'hover:bg-muted/60' : 'cursor-not-allowed opacity-55',
+                      row.undoable && !streaming ? 'hover:bg-muted' : 'cursor-not-allowed opacity-55',
                     )}
                   >
                     <span className="w-6 shrink-0 text-2xs text-muted-foreground/70">
@@ -484,7 +484,7 @@ export function ChatPanel({
                   key={c.id}
                   className={cn(
                     'group relative flex items-center gap-2 rounded-sm px-2.5 py-2',
-                    c.id === activeId ? 'bg-accent-muted' : 'hover:bg-muted/60',
+                    c.id === activeId ? 'bg-accent-muted' : 'hover:bg-muted',
                   )}
                 >
                   {/* 当前会话指示条 */}

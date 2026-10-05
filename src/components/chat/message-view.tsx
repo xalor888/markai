@@ -104,7 +104,7 @@ const ToolChip = memo(function ToolChip({ record }: { record: ToolCallRecord }) 
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 px-2.5 py-2 text-left transition-colors hover:bg-muted/60"
+        className="flex w-full items-center gap-2 px-2.5 py-2 text-left transition-colors hover:bg-muted"
       >
         {record.status === 'running' ? (
           <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />

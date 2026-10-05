@@ -574,7 +574,7 @@ const TreeRow = memo(function TreeRow({
       }}
       className={cn(
         'relative flex h-8 cursor-pointer items-center gap-2 rounded-sm pr-2.5 text-xs transition-colors',
-        selected ? 'bg-accent-muted font-medium text-accent' : 'text-foreground hover:bg-muted/60',
+        selected ? 'bg-accent-muted font-medium text-accent' : 'text-foreground hover:bg-muted',
         active && 'ring-1 ring-inset ring-ring/40',
         dragOver && 'bg-accent-muted/50 ring-1 ring-inset ring-accent/50',
       )}

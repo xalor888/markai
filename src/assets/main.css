@@ -191,6 +191,81 @@
   animation: markai-slide-up 180ms ease-out;
 }
 
+/* ── 滑块（markai-slider）──
+   原生 range 的默认外观（灰蓝轨道 + 方形把手）不跟设计走，且深色模式下轨道
+   仍是系统灰、不受 token 接管。所以只保留原生的语义与键盘可达性（←/→/Home/End），
+   外观全部重画：轨道左侧用强调色填充，填充比例由 Slider 组件写入的 --markai-slider-pct 驱动。 */
+.markai-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 16px;
+  background: transparent;
+  cursor: pointer;
+}
+.markai-slider:focus-visible {
+  outline: none;
+}
+.markai-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--color-accent) 0 var(--markai-slider-pct, 0%),
+    var(--color-muted) var(--markai-slider-pct, 0%) 100%
+  );
+}
+.markai-slider::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: linear-gradient(
+    to right,
+    var(--color-accent) 0 var(--markai-slider-pct, 0%),
+    var(--color-muted) var(--markai-slider-pct, 0%) 100%
+  );
+}
+.markai-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  margin-top: -5px;
+  border-radius: 999px;
+  background: var(--color-card);
+  border: 2px solid var(--color-accent);
+  box-shadow: 0 1px 2px rgb(16 24 40 / 0.2);
+  transition:
+    transform 100ms ease,
+    box-shadow 100ms ease;
+}
+.markai-slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: var(--color-card);
+  border: 2px solid var(--color-accent);
+  box-shadow: 0 1px 2px rgb(16 24 40 / 0.2);
+  transition:
+    transform 100ms ease,
+    box-shadow 100ms ease;
+}
+.markai-slider:hover::-webkit-slider-thumb {
+  transform: scale(1.1);
+}
+.markai-slider:hover::-moz-range-thumb {
+  transform: scale(1.1);
+}
+.markai-slider:focus-visible::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-ring) 30%, transparent);
+}
+.markai-slider:focus-visible::-moz-range-thumb {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--color-ring) 30%, transparent);
+}
+.markai-slider:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 /* 流式输出光标（克制闪烁） */
 @keyframes markai-blink {
   0%,

@@ -64,6 +64,38 @@ $VENV /Users/xalor/.workbuddy/skills/onetake/scripts/verify_promo.py markai-prom
 
 浏览器里调试：`file://.../comp.html?play` 实时循环、`?t=7.5&hud` 钉住一帧并显示时间码。
 
+## 为什么 README 里是动图，不是视频播放器
+
+mp4 进了仓库，但 **GitHub README 里放不了可播放的视频** —— 三条路都实测过：
+
+| 链接形态 | 实测响应 | 结果 |
+| --- | --- | --- |
+| `[![thumb](poster.png)](promo-line/xxx.mp4)` → blob 页 | `Content-Type: text/html` | 是下载页，不是播放器 |
+| `.../raw/main/promo-line/xxx.mp4` | `Content-Type: application/octet-stream` | 浏览器**下载**而非播放 |
+| `<video src="仓库内路径">` | 被 README 的 HTML 白名单**剥离** | 渲染为空 |
+
+GitHub 只对**它自己的附件 CDN**（`user-attachments.githubusercontent.com`，需在网页编辑器里拖拽上传）
+放行 `<video>`；仓库里的文件路径一律不行。所以：
+
+- **README 内联 = 动图 GIF**（GitHub 唯一会自动播放的格式）：
+  `markai-promo-15s-preview.gif`（720×405 · 20fps · 128 色 · 2.9 MB · 无声）。生成命令：
+
+  ```bash
+  ffmpeg -y -i markai-promo-15s.mp4 \
+    -filter_complex "fps=20,scale=720:-1:flags=lanczos,split[a][b];\
+    [a]palettegen=max_colors=128[p];[b][p]paletteuse=dither=sierra2_4a" \
+    -loop 0 markai-promo-15s-preview.gif
+  ```
+
+  各档实测体积：640px/15fps/96 色 1.84 MB · 640px/20fps/128 色 2.43 MB ·
+  **720px/20fps/128 色 2.94 MB（采用）** · 720px/24fps/96 色 3.22 MB。
+  `cwebp` 与本机 ffmpeg 都没编译动图编码器，所以只能出 GIF。
+
+- **带声音的高质量版走 `promo-line/preview.html`** —— 一个零依赖的本地播放页（原生 `<video controls>`、
+  封面帧、三个快捷跳转、`#t=8.4` 片段定位、下载按钮）。双击即可播放。
+  已实测：`readyState=4`、时长 `15.000`、分辨率 `1920×1080`、片段 seek 精确命中、按钮 seek 生效、
+  `currentTime` 持续推进。
+
 ## 验收结果（`verify_promo.py`）
 
 | 腿 | 结果 |

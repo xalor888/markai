@@ -8,9 +8,14 @@
 
 ## 🎬 宣传片（15 秒）
 
-[![MarkAI 宣传片](promo-line/poster.png)](promo-line/markai-promo-15s.mp4)
+<p align="center">
+  <img src="promo-line/markai-promo-15s-preview.gif" alt="MarkAI 宣传片：一条线穿过输入、扫描、删除确认与品牌落版" width="720">
+</p>
 
-**▶ [点击播放 markai-promo-15s.mp4](promo-line/markai-promo-15s.mp4)**（1920×1080 · 30fps · H.264 + AAC，无声/有声皆可）
+**▶ 在浏览器里带声音观看**：[`promo-line/preview.html`](promo-line/preview.html) —— 打开即播（本地文件，双击即可）
+&nbsp;|&nbsp;**⬇ 直取 mp4**：[markai-promo-15s.mp4](promo-line/markai-promo-15s.mp4)（1920×1080 · 30fps · H.264 + AAC · 3.0 MB）
+
+上面这段是**动图**（无声）—— GitHub 会剥离指向仓库文件的 `<video>` 标签，而 mp4 经 blob 链接返回的是下载页、经 raw 链接返回 `application/octet-stream`（浏览器只下载不播），所以内联只能靠 GIF。高质量带声音版请用上面的播放页或下载。
 
 一条线讲完一件事：**「帮我清理失效书签」** —— 从打字到扫描、标红、确认、删除、书签归位，全程是同一条线在动。
 

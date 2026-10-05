@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>MarkAI 宣传片 · 15 秒「一条线」</title>
+<style>
+  :root{
+    --bg:#0e1116; --card:#151a21; --line:#232b36; --ink:#e8ecf2; --dim:#8b97a8; --accent:#6366f1;
+  }
+  @media (prefers-color-scheme: light){
+    :root{ --bg:#f7f8fa; --card:#fff; --line:#e3e7ec; --ink:#0f1720; --dim:#5b6675; --accent:#4f46e5; }
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{
+    background:var(--bg); color:var(--ink); min-height:100vh;
+    font:15px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB",sans-serif;
+    display:flex; flex-direction:column; align-items:center; padding:40px 20px 64px;
+  }
+  h1{font-size:22px; font-weight:650; letter-spacing:.2px; margin:0 0 4px; text-align:center}
+  .sub{color:var(--dim); font-size:13px; margin:0 0 26px; text-align:center}
+  .player{
+    width:min(1000px,100%); background:var(--card); border:1px solid var(--line);
+    border-radius:14px; overflow:hidden;
+    box-shadow:0 30px 70px -34px rgba(0,0,0,.55);
+  }
+  video{display:block; width:100%; height:auto; background:#000}
+  .bar{display:flex; flex-wrap:wrap; gap:8px; align-items:center; padding:14px 16px; border-top:1px solid var(--line)}
+  button{
+    font:inherit; font-size:13px; color:var(--ink); background:transparent;
+    border:1px solid var(--line); border-radius:8px; padding:6px 12px; cursor:pointer;
+  }
+  button:hover{border-color:var(--accent)}
+  a{color:var(--accent); font-size:13px}
+  .hint{width:min(1000px,100%); margin-top:22px; color:var(--dim); font-size:13px}
+  table{width:100%; border-collapse:collapse; margin-top:8px}
+  th,td{text-align:left; padding:6px 10px; border-bottom:1px solid var(--line); font-size:13px; vertical-align:top}
+  th{color:var(--dim); font-weight:500}
+  code{background:var(--card); border:1px solid var(--line); border-radius:5px; padding:1px 6px; font-size:12px}
+</style>
+</head>
+<body>
+  <h1>MarkAI — 一条线</h1>
+  <p class="sub">15 秒 · 1920×1080 · 30fps · H.264 + AAC</p>
+
+  <div class="player">
+    <video id="v" src="markai-promo-15s.mp4" controls preload="metadata" playsinline poster="poster.png"></video>
+    <div class="bar">
+      <button onclick="var v=document.getElementById('v'); v.currentTime=0; v.play()">从头播放</button>
+      <button onclick="var v=document.getElementById('v'); v.currentTime=8.4; v.play()">跳到删除确认</button>
+      <button onclick="var v=document.getElementById('v'); v.currentTime=11.8; v.play()">跳到收尾</button>
+      <span style="flex:1"></span>
+      <a href="markai-promo-15s.mp4" download>下载 mp4（3.0 MB）</a>
+    </div>
+  </div>
+
+  <div class="hint">
+    <p>GitHub 的 README 会剥离指向仓库文件的 <code>&lt;video&gt;</code> 标签，而仓库里的 mp4 经 blob 链接返回的是下载页、经 raw 链接返回 <code>application/octet-stream</code>（浏览器只下载不播）。所以 README 里放的是 <strong>GIF 动图</strong>（GitHub 唯一会自动播放的格式），<strong>mp4 只能在本页或下载后观看</strong>。</p>
+    <table>
+      <tr><th>文件</th><th>用途</th></tr>
+      <tr><td><code>markai-promo-15s-preview.gif</code></td><td>720×405 · 2.9 MB · 无声 —— README 内联自动播放</td></tr>
+      <tr><td><code>markai-promo-15s.mp4</code></td><td>1920×1080 · 3.0 MB · 带声音 —— 本页播放 / 下载</td></tr>
+      <tr><td><code>poster.png</code></td><td>封面帧（end card）</td></tr>
+      <tr><td><code>comp.html</code></td><td>可复现源：全部动画是 <code>f(t)</code> 纯函数，<code>?t=7.5</code> 钉帧、<code>?play</code> 实时循环</td></tr>
+    </table>
+    <p style="margin-top:18px">⚠️ <code>comp.html</code> 依赖 <code>motion.js</code>（onetake 的 PolyForm Noncommercial 库，<strong>不随本仓库分发</strong>，许可与 MIT 不兼容）。要本地预览请从 onetake skill 的 <code>lib/</code> 复制一份到此目录。</p>
+  </div>
+
+<script>
+  var v = document.getElementById('v');
+  // 从 URL 片段取时间点：preview.html#t=8.4
+  var m = /[#&]t=([\d.]+)/.exec(location.hash);
+  if (m) { v.addEventListener('loadedmetadata', function(){ v.currentTime = parseFloat(m[1]); }, { once:true }); }
+</script>
+</body>
+</html>

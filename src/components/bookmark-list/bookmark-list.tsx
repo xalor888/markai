@@ -1,7 +1,7 @@
 import { ArrowDownUp, BookmarkPlus, Copy, ExternalLink, Folder, FolderInput, FolderOpen, FolderPlus, Link2, Search, Sparkles, Trash2, X } from 'lucide-react';
 import { memo, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
 import { useAIStore } from '@/stores/aiStore';
-import { useBookmarkStore, copyNodeDeep, findNode, resolveTitlePath, type TreeContextMenu } from '@/stores/bookmarkStore';
+import { useBookmarkStore, copyNodeDeep, findNode, buildFolderChildCounts, resolveTitlePath, type TreeContextMenu } from '@/stores/bookmarkStore';
 import { useUIStore } from '@/stores/uiStore';
 import { copyText } from '@/lib/clipboard';
 import { formatRelativeTime, getHost } from '@/lib/format';
@@ -146,6 +146,11 @@ export function BookmarkList({ className, compact = false }: { className?: strin
 
   // 未选中文件夹时不显示加载态（展示引导文案），避免无限「加载中…」
   const loading = browsing ? children === null && !!selectedFolderId : searchResults === null;
+
+  // 文件夹子项数：中栏的行来自 getChildren()（浏览）或 search()（搜索），这两种返回的节点
+  // **都不带 children**——只有 getTree()/getSubTree() 会填充（详见 buildFolderChildCounts）。
+  // 直接读 node.children 会让每个文件夹恒显示「0 项」，所以子项数一律由整棵树推导。
+  const folderCounts = useMemo(() => buildFolderChildCounts(roots), [roots]);
 
   const selectedNodes = useMemo(
     () => selectedIds.map((id) => findNode(roots, id)).filter((n): n is BNode => !!n),
@@ -841,6 +846,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
               dropTarget={dropTarget}
               query={query}
               searching={!browsing}
+              folderCount={folderCounts[node.id]}
               onRename={handleRenameRow}
               onToggle={handleToggleRow}
               onToggleClick={handleToggleClickRow}
@@ -970,6 +976,7 @@ const BookmarkRow = memo(function BookmarkRow({
   dropTarget,
   query,
   searching,
+  folderCount,
   onToggle,
   onToggleClick,
   onActivate,
@@ -988,6 +995,8 @@ const BookmarkRow = memo(function BookmarkRow({
   query: string;
   /** 搜索模式（副文本显示来源文件夹路径） */
   searching: boolean;
+  /** 该文件夹的真实子项数（由树 store 推导；未取到时不显示，绝不显示假的 0） */
+  folderCount?: number;
   /** 双击标题快速重命名 */
   onRename: (id: string) => void;
   /** 行间拖放指示（本行上方/下方显示定位条） */
@@ -1082,7 +1091,7 @@ const BookmarkRow = memo(function BookmarkRow({
         </p>
         {isFolder ? (
           <p className="text-[11px] text-muted-foreground">
-            文件夹 · {node.children?.length ?? 0} 项
+            {folderCount === undefined ? '文件夹' : `文件夹 · ${folderCount} 项`}
           </p>
         ) : (
           <p className="truncate text-[11px] text-muted-foreground">

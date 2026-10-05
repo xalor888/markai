@@ -363,6 +363,28 @@ export function findNode(nodes: BNode[], id: string): BNode | null {
   return null;
 }
 
+/**
+ * 建立「文件夹 id → 直接子项数」索引。入参必须是 getTree()/getSubTree() 的结果。
+ *
+ * 为什么需要：中栏的行来自 `chrome.bookmarks.getChildren()`（浏览）或 `search()`（搜索），
+ * 这两种返回的节点**都不填充 `children`**——只有 getTree/getSubTree 才填充（MDN 对
+ * getChildren 的说明原文即"不包括子文件夹中包含的任何子节点"）。所以直接读
+ * `node.children?.length` 会让每个文件夹恒显示「0 项」，与真实内容不符。
+ * 真实子项数只能由整棵树推导；整树走一次建索引，避免每行再各自做一次 O(树) 查找。
+ */
+export function buildFolderChildCounts(nodes: BNode[]): Record<string, number> {
+  const counts: Record<string, number> = {};
+  const walk = (ns: BNode[]) => {
+    for (const n of ns) {
+      if (n.url) continue; // 书签没有子项
+      counts[n.id] = n.children?.length ?? 0;
+      if (n.children) walk(n.children);
+    }
+  };
+  walk(nodes);
+  return counts;
+}
+
 /** 解析节点完整标题路径（用于面包屑） */
 export function resolveTitlePath(nodes: BNode[], id: string): string {
   const parts: string[] = [];

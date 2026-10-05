@@ -7211,6 +7211,73 @@ function ok(name: string, fn: () => void) {
     });
   }
 
+  /* ── T70: 中栏文件夹子项数（getChildren/search 不填充 children） ── */
+  console.log('\n[T70] 中栏文件夹子项数：不得读 node.children');
+  {
+    const { buildFolderChildCounts } = await import('../src/stores/bookmarkStore');
+    const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+    const tree = [
+      {
+        id: 'root',
+        title: '',
+        parentId: '0',
+        children: [
+          {
+            id: 'f1',
+            title: '有内容',
+            parentId: 'root',
+            children: [
+              { id: 'b1', title: 'b1', parentId: 'f1', url: 'https://a' },
+              { id: 'b2', title: 'b2', parentId: 'f1', url: 'https://b' },
+              {
+                id: 'f2',
+                title: '子文件夹',
+                parentId: 'f1',
+                children: [{ id: 'b3', title: 'b3', parentId: 'f2', url: 'https://c' }],
+              },
+            ],
+          },
+          { id: 'f3', title: '空文件夹', parentId: 'root', children: [] },
+        ],
+      },
+    ] as unknown as chrome.bookmarks.BookmarkTreeNode[];
+
+    const counts = buildFolderChildCounts(tree);
+
+    ok('子项数按整棵树推导：父 3 项 / 子 1 项 / 空文件夹 0 项 / 书签不入索引', () => {
+      assert.equal(counts['f1'], 3, 'f1 有 2 个书签 + 1 个子文件夹');
+      assert.equal(counts['f2'], 1);
+      assert.equal(counts['f3'], 0, '真正为空的文件夹要显示 0 项，不是「取不到」');
+      assert.equal(counts['b1'], undefined, '书签不该出现在索引里');
+    });
+
+    // 真实 API 下 getChildren()/search() 返回的文件夹节点**不带 children**（只有
+    // getTree/getSubTree 才填充）。替身比真实 API 宽容（toApi 会递归补 children），
+    // 所以这里显式构造一个无 children 的行节点，证明子项数与它无关、只来自整棵树。
+    const rowNode = { id: 'f1', title: '有内容', parentId: 'root' } as unknown as chrome.bookmarks.BookmarkTreeNode;
+    ok('子项数与该行节点是否自带 children 无关（真实 getChildren 不带）', () => {
+      assert.equal(rowNode.children, undefined, '本用例构造的就是「无 children」的行节点');
+      assert.equal(counts[rowNode.id], 3, '子项数来自整棵树，不能是 0');
+    });
+
+    const src = readFileSync(resolve(rootDir, 'src/components/bookmark-list/bookmark-list.tsx'), 'utf8');
+    ok('中栏文件夹子项数不得取自 getChildren/search 返回的 node.children', () => {
+      assert.ok(
+        !/node\.children\?\.length/.test(src),
+        'bookmark-list.tsx 仍在读 node.children：getChildren()/search() 不填充 children，会恒显示 0 项',
+      );
+      assert.ok(
+        /buildFolderChildCounts\(roots\)/.test(src),
+        'bookmark-list.tsx 应改用 buildFolderChildCounts(roots) 从整棵树取子项数',
+      );
+      assert.ok(
+        /folderCount === undefined \? '文件夹'/.test(src),
+        '取不到真实子项数时应只显示「文件夹」，不得显示假的「0 项」',
+      );
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

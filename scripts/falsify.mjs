@@ -1216,6 +1216,13 @@ const cases = [
     to: '  // reverted',
     expectFail: ['扩展图标右键没有 bookmarkId'],
   },
+  {
+    name: '中栏文件夹子项数回退到 node.children（getChildren/search 不填充 → 恒为 0 项）',
+    file: 'src/components/bookmark-list/bookmark-list.tsx',
+    from: "            {folderCount === undefined ? '文件夹' : `文件夹 · ${folderCount} 项`}",
+    to: '            文件夹 · {node.children?.length ?? 0} 项',
+    expectFail: ['中栏文件夹子项数不得取自 getChildren/search 返回的 node.children'],
+  },
 ];
 
 /**

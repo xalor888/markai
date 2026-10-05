@@ -4,7 +4,7 @@ import { useConfigStore } from '@/stores/configStore';
 import { useAIStore, AI_STORAGE_KEY } from '@/stores/aiStore';
 import { clearUndoPoints } from '@/lib/undo/recorder';
 import { useThemeStore, type Theme } from '@/stores/themeStore';
-import { PROVIDERS, getPreset } from '@/lib/providers';
+import { PROVIDERS, getPreset, getModelContextWindow } from '@/lib/providers';
 import type { OneShotOutbound } from '@/lib/ai/types';
 import { pushToast } from '@/lib/toast';
 import { openUrl } from '@/lib/open-url';
@@ -45,12 +45,21 @@ export function ConfigForm() {
   // 模型上下文输入：本地字符串 state（受控 value 派生 + onChange 过滤会拦截 64K/100K 等合法输入）
   // 默认 1024K：绝大多数大模型可直接用，无需手动填写
   const [ctxInput, setCtxInput] = useState(() => String(Math.round((config.contextWindow ?? 1_048_576) / 1000)));
+  /** 模型已知窗口的展示值（跟随模型时显示在输入框旁，让用户知道实际用的是多少） */
+  const [autoHint, setAutoHint] = useState('');
   // 请求竞态纪元（测试连接 / 模型列表各自独立，避免并发时互相卡死对方状态）
   const testEpoch = useRef(0);
   const modelsEpoch = useRef(0);
 
   const preset = getPreset(config.providerId);
   const models = preset?.models ?? [];
+  /**
+   * 生效的上下文窗口：没手动填 → 跟随所选模型。
+   * （此前恒为 1M、与模型无关，128K 的模型也拿 1M，护栏因此永不触发。）
+   */
+  const autoWindow = getModelContextWindow(config.model || preset?.defaultModel || '');
+  const effectiveWindow = config.contextWindow ?? autoWindow;
+  const isAuto = typeof config.contextWindow !== 'number';
 
   // 读取本地数据量（消息数 + 待删数；v2 多会话结构：汇总全部会话）
   useEffect(() => {
@@ -85,9 +94,12 @@ export function ConfigForm() {
   }, []);
 
   // 模型上下文输入与外部变化同步（必须与上方 hooks 连续声明，不能放在条件 return 之后）
+  // 依赖里带上 config.model：换模型后"跟随模型"的值变了，输入框必须跟着变
   useEffect(() => {
-    setCtxInput(String(Math.round((config.contextWindow ?? 1_048_576) / 1000)));
-  }, [config.contextWindow]);
+    const auto = getModelContextWindow(config.model || getPreset(config.providerId)?.defaultModel || '');
+    setAutoHint(`${Math.round(auto / 1000)}K`);
+    setCtxInput(String(Math.round((config.contextWindow ?? auto) / 1000)));
+  }, [config.contextWindow, config.model, config.providerId]);
 
   if (!loaded) return <p className="text-xs text-muted-foreground">加载中…</p>;
 
@@ -165,8 +177,16 @@ export function ConfigForm() {
       void update({ contextWindow: clamped * 1000 });
       setCtxInput(String(clamped));
     } else {
-      setCtxInput(String(Math.round((config.contextWindow ?? 1_048_576) / 1000)));
+      // 非法输入：回落到"跟随模型"（而不是回落到某个写死的默认值）
+      void update({ contextWindow: undefined });
+      setCtxInput(String(Math.round(effectiveWindow / 1000)));
     }
+  };
+
+  /** 恢复为"跟随所选模型"（清除手动填写值） */
+  const resetCtxToModel = () => {
+    void update({ contextWindow: undefined });
+    setCtxInput(String(Math.round(autoWindow / 1000)));
   };
 
   /** 清空本地对话与待删数据（v2 多会话：连会话列表一起清；先写墓碑防其他窗口复活） */
@@ -450,9 +470,27 @@ export function ConfigForm() {
               aria-label="模型上下文长度（千 token）"
             />
             <span className="text-[11px] text-muted-foreground">K tokens（千 token）</span>
+            {!isAuto && (
+              <button
+                type="button"
+                onClick={resetCtxToModel}
+                className="ml-auto rounded-sm px-1.5 py-0.5 text-[11px] text-accent transition-colors hover:bg-accent-muted"
+                title={`清除手动值，改回跟随模型（${autoHint}）`}
+              >
+                跟随模型
+              </button>
+            )}
           </div>
           <p className="text-[11px] leading-4 text-muted-foreground">
-            填写你所用模型的实际上下文长度（例如 128K、256K、1M）。拉取模型列表时若服务商返回 context_window 会自动填入。
+            {isAuto ? (
+              <>
+                当前<strong className="text-foreground">跟随模型</strong>：{config.model || preset?.defaultModel || '未选模型'} → {autoHint}。
+              </>
+            ) : (
+              <>已手动设置为 {Math.round((config.contextWindow ?? 0) / 1000)}K（该模型已知 {autoHint}）。</>
+            )}
+            {' '}填错方向会让请求超出模型真实窗口（报错或被截断）——不确定就点「跟随模型」。
+            拉取模型列表时若服务商返回 context_window 会自动填入。
           </p>
         </div>
 
@@ -462,7 +500,7 @@ export function ConfigForm() {
             <Label htmlFor="compress-threshold">自动压缩阈值</Label>
             <span className="text-[11px] text-muted-foreground">
               {Math.round((config.compressThreshold ?? 0.8) * 100)}%
-              · 预算 {formatTokens(Math.round((config.contextWindow ?? 1_048_576) * (config.compressThreshold ?? 0.8)))}
+              · 预算 {formatTokens(Math.round(effectiveWindow * (config.compressThreshold ?? 0.8)))}
             </span>
           </div>
           <input

@@ -535,6 +535,23 @@ export const useAIStore = create<AIState>((set, get) => ({
         }
         break;
 
+      case 'chat:restart': {
+        // 后台要重发这一轮：上一次尝试已经吐出的文本作废。
+        // 不清理的话，重试成功的回复会接在残文后面——用户看到的是两段拼起来的怪回复，
+        // 而这正是"断流"最容易被误读成"模型发疯"的地方。
+        if (evt.messageId !== get().streamingMessageId) break;
+        // 丢弃还在 16ms 批次里没落盘的那截
+        if (flushTimer) {
+          clearTimeout(flushTimer);
+          flushTimer = null;
+        }
+        pendingText = null;
+        set((s) => ({
+          messages: s.messages.map((m) => (m.id === evt.messageId ? { ...m, blocks: [] } : m)),
+        }));
+        break;
+      }
+
       case 'chat:plan': {
         // 计划模式：一轮的写操作清单到了，等用户点确认；期间后台在 await 这个决定
         set({

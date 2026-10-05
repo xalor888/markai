@@ -1,6 +1,7 @@
 /** ── OpenAI 兼容 Chat Completions 客户端（流式 + 工具调用） ── */
 
 import { normalizeBaseUrl } from '../providers';
+import { createSseAccumulator, finalizeToolCalls, type StreamToolCall } from './stream';
 import type { AIConfig } from './types';
 
 /** AI 请求错误（携带用户可读的中文信息） */
@@ -41,10 +42,17 @@ export interface StreamHandlers {
   onToolCall: (toolCall: ApiToolCall) => void;
   /** 请求失败自动重试提示（attempt 从 1 开始） */
   onRetry?: (attempt: number) => void;
+  /**
+   * 重试会重发整轮、且上一轮已经吐出过内容时调用：
+   * UI 必须把那段半截文本作废，否则两段回复会首尾相接（重复/看不懂的拼接）。
+   */
+  onRestart?: () => void;
 }
 
-/** 请求超时（毫秒） */
-const REQUEST_TIMEOUT = 120_000;
+/** 首字节超时：从发出请求到收到**第一个字节**（含推理模型的长思考） */
+const FIRST_CHUNK_TIMEOUT = 120_000;
+/** 空闲超时：两次数据之间的最大间隔（网关挂起、连接被掐断都落在这里） */
+const IDLE_TIMEOUT = 60_000;
 /** 失败自动重试次数（不含首次请求） */
 const MAX_RETRIES = 5;
 /** 指数退避基数：1s → 2s → 4s → 8s → 16s */
@@ -54,7 +62,7 @@ const RETRY_BASE_MS = 1000;
 export function isRetriableError(e: unknown): boolean {
   if (!(e instanceof ChatError)) return false;
   const status = e.status;
-  if (status === undefined) return true; // 网络层错误 / 超时
+  if (status === undefined) return true; // 网络层错误 / 超时 / 传输中断
   if (status === 429) return true; // 限流：退避后重试
   return status >= 500;
 }
@@ -80,8 +88,60 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 }
 
 /**
+ * 活动式看门狗。
+ *
+ * 为什么不用「一个总超时盖全程」：那会把"生成得慢但一直在出字"和"连接已经死了"
+ * 当成同一件事——长回复（大库整理、推理模型）会被硬生生掐断，而真正挂死的连接
+ * 又要等满总时长才被发现。这里改成按活动计时：收到数据就重置，首字节与后续间隔分开配。
+ */
+class ActivityWatchdog {
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  /** 是否由本看门狗触发的中断（区别于用户取消） */
+  timedOut = false;
+  /** 是否已收到过任何数据（用于区分"首字节超时"与"中途空闲超时"） */
+  private received = false;
+
+  constructor(
+    private readonly ctrl: AbortController,
+    private readonly firstMs: number,
+    private readonly idleMs: number,
+  ) {}
+
+  private reset(ms: number): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = setTimeout(() => {
+      this.timedOut = true;
+      this.ctrl.abort();
+    }, ms);
+  }
+
+  /** 开始计时（首字节窗口） */
+  arm(): void {
+    this.reset(this.firstMs);
+  }
+
+  /** 收到数据：切到空闲窗口重新计时 */
+  kick(): void {
+    this.received = true;
+    this.reset(this.idleMs);
+  }
+
+  stop(): void {
+    if (this.timer) clearTimeout(this.timer);
+    this.timer = null;
+  }
+
+  /** 超时文案：区分"一直没响应"与"回复中途断了" */
+  timeoutMessage(): string {
+    return this.received
+      ? `AI 回复在传输过程中中断（超过 ${Math.round(this.idleMs / 1000)} 秒没有新数据）。`
+      : `AI 服务在 ${Math.round(this.firstMs / 1000)} 秒内没有任何响应，请稍后重试。`;
+  }
+}
+
+/**
  * 发送一轮 chat completion（优先流式，失败自动降级非流式重试一次；
- * 可恢复错误（网络/5xx/429/超时）自动重连最多 MAX_RETRIES 次，指数退避）。
+ * 可恢复错误（网络/5xx/429/超时/传输中断）自动重连最多 MAX_RETRIES 次，指数退避）。
  * 所有网络请求都经由 background Service Worker 发出，无 CORS 限制。
  */
 export async function chatCompletion(
@@ -99,7 +159,7 @@ export async function chatCompletion(
   const headers: Record<string, string> = { 'Content-Type': 'application/json' };
   if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
 
-  // 追踪是否已产生任何输出：若失败前已有内容，禁止重试，避免 UI 文本重复
+  // 追踪"已投递给 UI 的内容"：重试前必须让 UI 作废它，否则两段回复会拼在一起
   let hasOutput = false;
   const wrappedHandlers: StreamHandlers = {
     onText: (t) => {
@@ -134,8 +194,14 @@ export async function chatCompletion(
         }
       }
       // 可恢复错误自动重连（用户取消的 499 不在重试范围）
-      if (hasOutput || retried >= MAX_RETRIES || !isRetriableError(e)) throw e;
+      if (retried >= MAX_RETRIES || !isRetriableError(e)) throw e;
       retried++;
+      // 已经吐出过半截内容：先让 UI 作废它，再重发整轮。
+      // 不做这件事正是"回复中途断流后既没重试、又留着一段残文"的由来。
+      if (hasOutput) {
+        handlers.onRestart?.();
+        hasOutput = false; // UI 已清空，后续可重新投递
+      }
       handlers.onRetry?.(retried);
       await sleep(Math.min(RETRY_BASE_MS * 2 ** (retried - 1), 16_000), signal);
     }
@@ -158,12 +224,10 @@ async function requestStream(
   const ctrl = new AbortController();
   const onAbort = () => ctrl.abort();
   signal.addEventListener('abort', onAbort);
-  // 超时覆盖「请求 + 流式读取」全程，防止服务端挂起导致永久等待
-  const timeout = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
+  const watchdog = new ActivityWatchdog(ctrl, FIRST_CHUNK_TIMEOUT, IDLE_TIMEOUT);
+  watchdog.arm();
 
-  const toolAcc = new Map<number, { id: string; name: string; args: string }>();
-  let content = '';
-  let buffer = '';
+  let accumulator: ReturnType<typeof createSseAccumulator> | null = null;
 
   try {
     let response: Response;
@@ -181,104 +245,64 @@ async function requestStream(
         signal: ctrl.signal,
       });
     } catch (e) {
+      if (watchdog.timedOut) throw new ChatError(watchdog.timeoutMessage());
       throw toNetworkError(e);
     }
+    if (watchdog.timedOut) throw new ChatError(watchdog.timeoutMessage());
     if (!response.ok) throw await toHttpError(response);
 
     const reader = response.body?.getReader();
     if (!reader) throw new ChatError('AI 服务返回了空响应。');
-    const decoder = new TextDecoder();
-    let strippedBom = false;
 
-    /** 解析单行 SSE 数据（BOM 剥离 + JSON 解析 + delta 累积） */
-    let pendingData: string | null = null; // 上一行未解析成功的 data（尝试与下一行拼接）
-    const processLine = (raw: string) => {
-      // 首个数据行可能带 UTF-8 BOM，剥离后判断
-      if (!strippedBom) {
-        strippedBom = true;
-        raw = raw.replace(/^\ufeff/, '');
-      }
-      if (!raw.startsWith('data:')) return;
-      const data = raw.slice(5).trim();
-      if (!data || data === '[DONE]') return;
-      // 非标准实现会把单个 JSON 拆到多个 data 行：先尝试与上一行拼接再解析
-      let json: unknown;
-      const candidate = pendingData ? `${pendingData}${data}` : data;
-      try {
-        json = JSON.parse(candidate);
-        pendingData = null;
-      } catch {
-        if (pendingData) {
-          // 拼接仍失败：确认是脏数据，丢弃并告警（不再静默）
-          console.warn('[MarkAI] SSE 数据行无法解析，已跳过:', data);
-          pendingData = null;
-        } else {
-          pendingData = data;
-        }
-        return;
-      }
-      const parsed = json as {
-        choices?: { delta?: { content?: string | null; tool_calls?: ToolCallDelta[] } }[];
-      };
-      const delta = parsed.choices?.[0]?.delta;
-      if (!delta) return;
-      if (typeof delta.content === 'string' && delta.content) {
-        content += delta.content;
-        handlers.onText(delta.content);
-      }
-      if (Array.isArray(delta.tool_calls)) {
-        for (const tc of delta.tool_calls) {
-          const i = tc.index ?? 0;
-          const cur = toolAcc.get(i) ?? { id: '', name: '', args: '' };
-          if (tc.id) cur.id = tc.id;
-          if (tc.function?.name) {
-            // 标准实现按字符分片累加；个别网关重复发送完整 name，避免粘连
-            if (!cur.name) cur.name = tc.function.name;
-            else if (!(tc.function.name.length > 3 && cur.name.endsWith(tc.function.name))) {
-              cur.name += tc.function.name;
-            }
-          }
-          if (tc.function?.arguments) cur.args += tc.function.arguments;
-          toolAcc.set(i, cur);
-        }
-      }
-    };
+    accumulator = createSseAccumulator({ onText: handlers.onText });
 
     for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      let idx: number;
-      while ((idx = buffer.indexOf('\n')) >= 0) {
-        const line = buffer.slice(0, idx).trim();
-        buffer = buffer.slice(idx + 1);
-        processLine(line);
+      let done: boolean;
+      let value: Uint8Array | undefined;
+      try {
+        ({ done, value } = await reader.read());
+      } catch (e) {
+        if (watchdog.timedOut) throw new ChatError(watchdog.timeoutMessage());
+        throw e;
       }
+      if (done) break;
+      watchdog.kick(); // 收到数据 → 切到空闲窗口重新计时
+      if (value) accumulator.push(value);
     }
-    // 兜底：流结束未以换行结尾的残留数据
-    const tail = buffer.trim();
-    if (tail) processLine(tail);
   } catch (e) {
     if (signal.aborted) throw new ChatError('请求已取消', 499);
     if (e instanceof ChatError) throw e;
+    if (watchdog.timedOut) throw new ChatError(watchdog.timeoutMessage());
     throw toNetworkError(e);
   } finally {
-    clearTimeout(timeout);
+    watchdog.stop();
     signal.removeEventListener('abort', onAbort);
   }
 
-  const toolCalls: ApiToolCall[] = [...toolAcc.entries()]
-    .sort((a, b) => a[0] - b[0])
-    .map(([, v]) => ({
-      id: v.id || crypto.randomUUID(),
-      type: 'function' as const,
-      function: { name: v.name, arguments: v.args || '{}' },
-    }));
-  // 不再静默剔除无 name 的调用：交由执行器返回「未知工具」错误，模型收到后可重试
+  const result = accumulator!.end();
 
+  /**
+   * 流被中途掐断的判据：**没收到 [DONE]/finish_reason** 且 **工具调用参数是半截 JSON**。
+   *
+   * 两个条件缺一不可：
+   * - 只按"没收到 [DONE]"判——不少兼容端点不发 [DONE] 也不带 finish_reason，会把正常回复误杀；
+   * - 只按"参数不是合法 JSON"判——那是模型自己的输出问题，照常交给执行器报错即可，
+   *   重试 5 次只会白烧请求。
+   * 两者同时成立才是"传输断了"，且此时必须当**失败**处理：半截参数发出去会变成
+   * 一个假的"未知工具/执行失败"，用户看到的就是agent莫名报错。
+   */
+  if (!result.completed && (!result.argsComplete || result.pendingTail)) {
+    throw new ChatError('AI 回复在传输中被截断，工具调用参数不完整。');
+  }
+  // finish_reason=length：输出被 max_tokens 截断。不抛错（内容本身有效），但如实告警，
+  // 免得把一段没说完的话当成完整回答。
+  if (result.finishReason === 'length') {
+    console.warn('[MarkAI] 模型输出被长度限制截断（finish_reason=length），回复可能不完整。');
+  }
+
+  const toolCalls = finalizeToolCalls(result.toolCalls as StreamToolCall[]);
   toolCalls.forEach((tc) => handlers.onToolCall(tc));
-  return { content, toolCalls };
+  return { content: result.content, toolCalls };
 }
 
 /** 非流式请求（降级路径） */
@@ -297,8 +321,8 @@ async function requestNonStream(
   const ctrl = new AbortController();
   const onAbort = () => ctrl.abort();
   signal.addEventListener('abort', onAbort);
-  // 超时覆盖请求与解析全程
-  const timeout = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
+  // 非流式没有"流"可言，一个请求超时足够
+  const timeout = setTimeout(() => ctrl.abort(), FIRST_CHUNK_TIMEOUT);
 
   try {
     let response: Response;
@@ -399,11 +423,4 @@ async function toHttpError(response: Response): Promise<ChatError> {
   };
   const base = map[response.status] ?? `AI 服务返回错误（HTTP ${response.status}）。`;
   return new ChatError(detail ? `${base} ${detail}` : base, response.status);
-}
-
-/** SSE chunk 中的工具调用增量 */
-interface ToolCallDelta {
-  index?: number;
-  id?: string;
-  function?: { name?: string; arguments?: string };
 }

@@ -3,7 +3,7 @@
 import { create } from 'zustand';
 import type { AIConfig } from '@/lib/ai/types';
 import { pushToast } from '@/lib/toast';
-import { getPreset, resolveConfig } from '@/lib/providers';
+import { CONFIG_VERSION, getPreset, resolveConfig } from '@/lib/providers';
 
 /** storage key（background 通过该 key 直接读取配置，请勿改动） */
 export const CONFIG_STORAGE_KEY = 'markai.config';
@@ -17,10 +17,12 @@ export const DEFAULT_CONFIG: AIConfig = {
   deleteMode: 'confirm',
   // 轮次级计划默认关闭：先保持既有操作节奏，开启与否是产品决策
   planMode: false,
-  // 模型上下文长度（默认 1024K）+ 压缩阈值 80%
-  contextWindow: 1_048_576,
+  // 模型上下文长度：**不填 = 跟随所选模型**（填了就以填写值为准）+ 压缩阈值 80%
+  // 曾恒为 1M，与模型无关——128K 的模型也拿 1M，护栏永不触发、请求直接被撑爆。见 providers.ts。
+  contextWindow: undefined,
   compressThreshold: 0.8,
   autoCompress: false,
+  configVersion: CONFIG_VERSION,
 };
 
 interface ConfigState {
@@ -58,7 +60,9 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   saveError: null,
 
   async update(patch) {
-    const next = { ...get().config, ...patch };
+    // 每次保存都盖上当前结构版本：contextWindow 的语义是"跟随模型"，
+    // 旧版本存下来的那条（恒为 1M）在 resolveConfig 里会被当作非用户意图丢弃。
+    const next = { ...get().config, ...patch, configVersion: CONFIG_VERSION };
     // 先同步更新内存（UI 即时响应），再异步持久化：
     // 两个快速连续 update 都基于最新内存构造，互不覆盖（原实现后写覆盖先写的其他字段）
     set({ config: next });
@@ -99,11 +103,13 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   async applyPreset(providerId) {
     const preset = getPreset(providerId);
     if (!preset) {
-      await get().update({ providerId, baseUrl: '', model: '' });
+      await get().update({ providerId, baseUrl: '', model: '', contextWindow: undefined });
       return;
     }
-    // 用户已手动改过 Base URL 时保留，仅切换 providerId 与模型
-    await get().update({ providerId, model: preset.defaultModel });
+    // 用户已手动改过 Base URL 时保留，仅切换 providerId 与模型。
+    // contextWindow 一并清空：换了服务商/模型，旧的显式窗口不该继续生效
+    // （从 1M 的模型切到 128K 的模型却沿用旧值，正是"请求被撑爆"的成因）。
+    await get().update({ providerId, model: preset.defaultModel, contextWindow: undefined });
   },
 
   effectiveConfig() {

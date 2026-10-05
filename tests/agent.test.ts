@@ -1284,11 +1284,34 @@ function ok(name: string, fn: () => void) {
       assert.equal(clamped.providerId, 'deepseek', '非法 providerId 回退默认');
       assert.equal((clamped as unknown as Record<string, unknown>).toolLimit, undefined, 'toolLimit 配置已移除');
     });
-    ok('resolveConfig 未填回落到预设', () => {
+    ok('resolveConfig 未填回落到预设（上下文窗口跟随模型）', () => {
       const cfg = resolveConfig({ providerId: 'deepseek' });
       assert.ok(cfg.baseUrl.includes('api.deepseek.com'), 'Base URL 回落预设');
       assert.ok(cfg.model, '模型回落预设默认');
-      assert.equal(cfg.contextWindow, 1_048_576, '上下文长度默认 1024K（无需手动填写）');
+      // 跟随模型，而不是一律 1M：deepseek 默认模型是 128K，给 1M 会让护栏永不触发
+      assert.equal(cfg.contextWindow, getModelContextWindow(cfg.model), '上下文窗口跟随所选模型');
+      assert.equal(cfg.contextWindow, 128_000, 'deepseek-v4-flash 的真实窗口是 128K');
+    });
+
+    const { effectiveContextWindow, CONFIG_VERSION, LEGACY_CONTEXT_WINDOW } = (await import(
+      '../src/lib/providers'
+    )) as unknown as {
+      effectiveContextWindow: (m: string, s?: Record<string, unknown> | null) => number;
+      CONFIG_VERSION: number;
+      LEGACY_CONTEXT_WINDOW: number;
+    };
+    ok('上下文窗口：显式值优先，旧配置（无 configVersion）按模型迁移', () => {
+      // 显式填写（且配置已是当前版本）→ 以填写值为准
+      assert.equal(effectiveContextWindow('deepseek-v4-flash', { configVersion: CONFIG_VERSION, contextWindow: 64_000 }), 64_000);
+      // 无 configVersion = v0.2.26 及更早存下来的：其中的 contextWindow 一律视为非用户意图
+      assert.equal(
+        effectiveContextWindow('deepseek-v4-flash', { contextWindow: LEGACY_CONTEXT_WINDOW }),
+        128_000,
+        '旧配置里恒为 1M 的值必须被迁移掉，否则 128K 模型仍会拿到 8 倍预算',
+      );
+      // 未填 → 跟随模型
+      assert.equal(effectiveContextWindow('kimi-k3', { configVersion: CONFIG_VERSION }), 256_000);
+      assert.equal(effectiveContextWindow('qwen3:8b', { configVersion: CONFIG_VERSION }), 128_000);
     });
 
     const { DEFAULT_CONFIG } = await import('../src/stores/configStore');
@@ -7274,6 +7297,180 @@ function ok(name: string, fn: () => void) {
       assert.ok(
         /folderCount === undefined \? '文件夹'/.test(src),
         '取不到真实子项数时应只显示「文件夹」，不得显示假的「0 项」',
+      );
+    });
+  }
+
+  /* ── T71: SSE 解析与传输中断（重构后的 stream.ts / client.ts） ── */
+  console.log('\n[T71] SSE 解析：截断判定、脏数据、重发作废');
+  {
+    const { createSseAccumulator, isCompleteJsonObject } = await import('../src/lib/ai/stream');
+
+    ok('isCompleteJsonObject：完整 / 空 / 半截的判定', () => {
+      assert.equal(isCompleteJsonObject('{"a":1}'), true);
+      assert.equal(isCompleteJsonObject(''), true, '空参数视为完整（执行器按 {} 处理）');
+      assert.equal(isCompleteJsonObject('{"a":'), false);
+      assert.equal(isCompleteJsonObject('{"query":"gi'), false);
+      assert.equal(isCompleteJsonObject('null'), false, 'null 不是对象');
+    });
+
+    ok('分片喂入：跨 chunk 的 JSON 与文本都能拼回来', () => {
+      const acc = createSseAccumulator();
+      acc.push('data: {"choices":[{"delta":{"content":"让我"}}]}\n\n');
+      acc.push('data: {"choices":[{"delta":{"content":"看看"}}]}\n\n');
+      // 一个 SSE 事件被拆在两个 chunk 里（真实网络很常见）
+      acc.push('data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"search_');
+      acc.push('bookmarks","arguments":"{\\"q\\":1}"}}]}}]}\n\n');
+      const r = acc.end();
+      assert.equal(r.content, '让我看看');
+      assert.equal(r.toolCalls.length, 1);
+      assert.equal(r.toolCalls[0]!.name, 'search_bookmarks');
+      assert.equal(r.argsComplete, true);
+    });
+
+    ok('[DONE] 与 finish_reason 都记为正常结束', () => {
+      const a = createSseAccumulator();
+      a.push('data: [DONE]\n\n');
+      assert.equal(a.end().completed, true, '[DONE] 是结束信号');
+
+      const b = createSseAccumulator();
+      b.push('data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n');
+      const rb = b.end();
+      assert.equal(rb.completed, true, 'finish_reason 也是结束信号');
+      assert.equal(rb.finishReason, 'stop');
+    });
+
+    ok('不发 [DONE] 也不发 finish_reason：completed=false，但内容照常返回', () => {
+      // 不少兼容端点就是这么干的——不能因为缺结束信号就把有效回复丢掉
+      const a = createSseAccumulator();
+      a.push('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n');
+      const r = a.end();
+      assert.equal(r.completed, false);
+      assert.equal(r.content, 'hi', '内容本身有效，必须照常返回');
+      assert.equal(r.argsComplete, true);
+    });
+
+    ok('流被掐断（事件之间是完整行，但 arguments 是半截）→ argsComplete=false', () => {
+      // 真实形态：服务端按片段发 arguments，每个片段是一个完整 SSE 行，
+      // 连到一半断了 → 最后一个调用的参数停在半截 JSON 上
+      const a = createSseAccumulator();
+      a.push('data: {"choices":[{"delta":{"content":"我先看看"}}]}\n\n');
+      a.push(
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"move_bookmark","arguments":"{\\"id\\":\\"1"}}]}}]}\n\n',
+      );
+      const r = a.end();
+      assert.equal(r.completed, false, '没有收到结束信号');
+      assert.equal(r.argsComplete, false, '参数停在半截 JSON 上');
+      assert.equal(r.content, '我先看看');
+    });
+
+    ok('最后一个 SSE 行被拦腰截断 → pendingTail=true', () => {
+      const a = createSseAccumulator();
+      a.push('data: {"choices":[{"delta":{"content":"ab"}}]}\n\n');
+      // 最后一个事件连一行都没发完就断了（JSON 本身也是半截）
+      a.push('data: {"choices":[{"delta":{"content":"cd"');
+      const r = a.end();
+      assert.equal(r.pendingTail, true, '末尾残留了一个解析不出来的 data 行');
+    });
+
+    ok('脏数据行不得吃掉紧随其后的有效行', () => {
+      // 曾经的写法是"直接把上一行残留 + 当前行拼起来解析"，于是前一个坏行
+      // 会让后一个合法行也解析失败（一次丢两行）。现在先试单行、失败才拼接。
+      const a = createSseAccumulator();
+      a.push('data: {not json}\n\n');
+      a.push('data: {"choices":[{"delta":{"content":"ok"}}]}\n\n');
+      const r = a.end();
+      assert.equal(r.content, 'ok', '有效行必须照常生效，不能因为前一行是脏数据就被丢掉');
+      assert.ok(r.skippedLines >= 1, '脏数据要如实计数（不静默）');
+    });
+
+    ok('被拆到多行的 JSON 仍能拼回来（兼容非标准实现）', () => {
+      const a = createSseAccumulator();
+      a.push('data: {"choices":[{"delta":{"con\n');
+      a.push('data: tent":"拼回来的"}}]}\n\n');
+      const r = a.end();
+      assert.equal(r.content, '拼回来的', '半个 JSON 跨行时要能拼回');
+    });
+  }
+
+  {
+    /* 客户端层：截断 → 当失败并自动重发；重发前必须让 UI 作废已吐出的半截文本 */
+    const { chatCompletion } = await import('../src/lib/ai/client');
+    fetchCalls.length = 0;
+    sseQueue = [
+      // 第一次：先吐了文本，然后工具调用参数停在半截 —— 模拟"回复中途断流"
+      sseResponse([
+        sseEvent(JSON.stringify({ choices: [{ delta: { content: '我先看看' } }] })),
+        sseEvent(
+          JSON.stringify({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    { index: 0, id: 'c1', function: { name: 'move_bookmark', arguments: '{"id":"1' } },
+                  ],
+                },
+              },
+            ],
+          }),
+        ),
+      ]),
+      // 第二次：完整成功
+      sseResponse([
+        sseEvent(JSON.stringify({ choices: [{ delta: { content: '已经整理好了' } }] })),
+        'data: [DONE]\n\n',
+      ]),
+    ];
+
+    const texts: string[] = [];
+    let restarts = 0;
+    const turn = await chatCompletion(
+      TEST_CONFIG,
+      [{ role: 'user', content: 'hi' }],
+      [],
+      new AbortController().signal,
+      {
+        onText: (t) => texts.push(t),
+        onToolCall: () => {},
+        onRestart: () => {
+          restarts++;
+        },
+      },
+    );
+
+    ok('回复中途被截断：整轮重发，而不是把半截工具调用发出去', () => {
+      assert.equal(fetchCalls.length, 2, '截断后自动重发了一次');
+      assert.equal(turn.content, '已经整理好了', '最终内容是重发后的完整回复');
+      assert.equal(turn.toolCalls.length, 0, '半截参数不得变成一次真实工具调用');
+    });
+
+    ok('重发前必须回调 onRestart 让 UI 作废上一轮的半截文本', () => {
+      assert.equal(restarts, 1, '已吐出过内容却没通知 UI 清空 → 两段回复会首尾相接');
+      assert.ok(texts.join('').includes('我先看看'), '第一次的内容确实投递过（所以需要作废）');
+    });
+
+    const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const clientSrc = readFileSync(resolve(rootDir, 'src/lib/ai/client.ts'), 'utf8');
+    ok('超时模型：首字节与空闲分开，不再用一个总超时盖住整个流', () => {
+      assert.ok(/FIRST_CHUNK_TIMEOUT/.test(clientSrc), '需要首字节超时');
+      assert.ok(/IDLE_TIMEOUT/.test(clientSrc), '需要空闲超时');
+      assert.ok(!/const REQUEST_TIMEOUT/.test(clientSrc), '不得再有覆盖整个流式读取的总超时');
+      assert.ok(/watchdog\.kick\(\)/.test(clientSrc), '每收到数据都要重置空闲计时');
+    });
+
+    const aiStoreSrc = readFileSync(resolve(rootDir, 'src/stores/aiStore.ts'), 'utf8');
+    ok('UI 必须真的处理 chat:restart（否则重发后的回复会接在残文后面）', () => {
+      assert.ok(
+        /case 'chat:restart'/.test(aiStoreSrc),
+        'aiStore 没有处理 chat:restart：后台通知作废上一轮内容，UI 却照旧追加',
+      );
+      assert.ok(
+        /blocks: \[\]/.test(aiStoreSrc),
+        'chat:restart 需要清空该消息的 blocks，否则两段回复首尾相接',
+      );
+      assert.ok(
+        /pendingText = null/.test(aiStoreSrc),
+        '16ms 批次里还没落盘的残文也要一起丢弃',
       );
     });
   }

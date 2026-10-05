@@ -1223,6 +1223,35 @@ const cases = [
     to: '            文件夹 · {node.children?.length ?? 0} 项',
     expectFail: ['中栏文件夹子项数不得取自 getChildren/search 返回的 node.children'],
   },
+  {
+    name: '流被截断却当成正常结果（半截工具参数被当成真实调用发出去）',
+    file: 'src/lib/ai/client.ts',
+    from: "  if (!result.completed && (!result.argsComplete || result.pendingTail)) {\n    throw new ChatError('AI 回复在传输中被截断，工具调用参数不完整。');\n  }",
+    to: '  // reverted: 截断不再被视为失败',
+    expectFail: ['回复中途被截断：整轮重发'],
+  },
+  {
+    name: '重发前不通知 UI 作废旧文本（两段回复首尾相接）',
+    file: 'src/lib/ai/client.ts',
+    from: '        handlers.onRestart?.();',
+    to: '        // reverted: 不再通知 UI',
+    expectFail: ['重发前必须回调 onRestart'],
+  },
+  {
+    name: '上下文窗口回到"一律 1M"（128K 模型拿到 8 倍预算，护栏永不触发）',
+    file: 'src/lib/providers.ts',
+    from: '  return clamp(explicit ?? known, 2000, 2_000_000, known);',
+    to: '  return clamp(explicit ?? 1_048_576, 2000, 2_000_000, 1_048_576);',
+    // 实际首败是 T15 这条（它先于"显式值优先"那条执行）——按实测首败写，别写想当然的名字
+    expectFail: ['resolveConfig 未填回落到预设（上下文窗口跟随模型）'],
+  },
+  {
+    name: 'SSE 末尾残留的半截行不再被记为 pendingTail',
+    file: 'src/lib/ai/stream.ts',
+    from: '      const pendingTail = pendingData !== null;',
+    to: '      const pendingTail = false;',
+    expectFail: ['最后一个 SSE 行被拦腰截断'],
+  },
 ];
 
 /**

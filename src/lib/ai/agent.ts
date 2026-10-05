@@ -306,6 +306,8 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
             messageId,
             record: { id: tc.id, name: tc.function.name, args: tc.function.arguments, status: 'running' },
           }),
+        // 重发前先让 UI 作废上一轮的半截文本：否则重试成功后的回复会接在残文后面
+        onRestart: () => safePost(onEvent, { type: 'chat:restart', messageId }),
         // 自动重连进度：在回复中追加提示（重试成功后会继续输出，用户可感知恢复过程）
         onRetry: (attempt) =>
           safePost(onEvent, { type: 'chat:delta', messageId, text: `\n（请求失败，正在自动重试 ${attempt}/5…）` }),
@@ -550,11 +552,16 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
 
     // 上下文护栏：本轮回填后超预算 → 压缩早期消息（压缩到完整轮次边界）
     if (guardContext()) {
-      // 压缩后仍超预算（极小上下文窗口）：继续压缩只会让模型失去有效上下文，提前结束
+      // 压缩后仍超预算：继续压缩只会让模型失去有效上下文，提前结束。
+      // 提示必须给对方向——旧文案让用户"调大上下文长度"，而窗口本来就是按模型真实能力
+      // 取的（128K 的模型拿到过 1M 预算正是这个护栏失效的成因），再调大只会更糟。
+      const hint = config.autoCompress
+        ? '；可在设置页把「自动压缩阈值」调低一些'
+        : '；可在设置页开启「自动压缩上下文」';
       safePost(onEvent, {
         type: 'chat:delta',
         messageId,
-        text: '\n（上下文空间不足，已停止工具调用；可在设置页调大模型上下文长度后重试）',
+        text: `\n（上下文空间不足，已停止工具调用：当前窗口约 ${Math.round(window / 1000)}K tokens${hint}；或改用上下文更大的模型后重试）`,
       });
       safePost(onEvent, { type: 'chat:done', messageId });
       return;

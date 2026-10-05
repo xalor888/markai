@@ -60,8 +60,15 @@ export interface AIConfig {
    * 默认关闭（保持既有行为）——默认开启会改变所有现有用户的操作节奏，属产品决策。
    */
   planMode?: boolean;
-  /** 模型上下文长度（token）：默认 1024K（1M），用户在设置页可手动调整，服务商返回 context_window 时可自动带入 */
+  /**
+   * 模型上下文长度（token）。
+   * **不填 = 跟随所选模型的已知窗口**（见 `getModelContextWindow`）；手动填写则以其为准。
+   * 历史上这里恒为 1M、与模型无关，导致 128K 的模型拿到 8 倍于真实窗口的预算——
+   * 那次事故之后改为"跟随模型"，并靠 `configVersion` 把旧配置里的 1M 迁移掉。
+   */
   contextWindow?: number;
+  /** 配置结构版本：缺省视为 v0（0.2.26 及更早），其 contextWindow 不再作为显式值 */
+  configVersion?: number;
   /** 自动压缩阈值（0.5~0.95）：历史用量达到 窗口×阈值 时触发压缩，默认 0.8 */
   compressThreshold?: number;
   /** 上下文自动压缩：达到阈值时压缩早期消息再继续 */
@@ -90,6 +97,11 @@ export type ChatInbound =
 export type ChatOutbound =
   | { type: 'chat:start'; messageId: string }
   | { type: 'chat:delta'; messageId: string; text: string }
+  /**
+   * 本轮重发：上一次尝试已吐出的内容作废（UI 清空该消息后再接收新回复）。
+   * 没有它，"回复中途断流 → 自动重试"就会把两段文本首尾相接，用户看到重复拼接的怪回复。
+   */
+  | { type: 'chat:restart'; messageId: string }
   | { type: 'chat:tool_start'; messageId: string; record: ToolCallRecord }
   /** 计划模式：本回次待执行的写操作清单，等 UI 确认后才会执行 */
   | { type: 'chat:plan'; messageId: string; steps: { name: string; label: string; count: number; countDeclared: boolean; summary: string; preview: boolean }[] }

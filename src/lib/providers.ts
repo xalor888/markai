@@ -119,7 +119,12 @@ const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'deepseek-r1:8b': 64_000,
 };
 
-/** 获取模型上下文窗口（token）；未知模型回退默认 128K */
+/**
+ * 获取模型上下文窗口（token）；未知模型回退默认 128K。
+ *
+ * 这是**唯一**的模型窗口来源：不再有"统一 1M"的兜底。未知模型给 128K 是保守方向——
+ * 给小了最多是提前压缩/停止，给大了会直接把请求撑爆（HTTP 400 或被截断）。
+ */
 export function getModelContextWindow(model: string): number {
   if (!model) return 128_000;
   // 精确匹配优先；再尝试段级前缀匹配（qwen3 → qwen3:32b，避免短名命中无关条目如 llama3 → llama3.3:70b）
@@ -146,10 +151,31 @@ function clamp(n: number | undefined, min: number, max: number, fallback: number
   return typeof n === 'number' && Number.isFinite(n) ? Math.min(Math.max(n, min), max) : fallback;
 }
 
-/** 模型上下文长度默认值（用户未填写时使用）：1024K（1M tokens），覆盖绝大多数大模型 */
-export const DEFAULT_CONTEXT_WINDOW = 1_048_576;
+/**
+ * 历史遗留的"统一上下文窗口"：1M。
+ * v0.2.26 及更早把它当成默认值发给**所有**模型（128K 的模型也拿 1M，8 倍超配），
+ * 现在只用来识别"这条配置是旧版本存下来的、其中的 1M 不是用户意图"，便于迁移。
+ * 新代码请勿再用它当兜底——兜底一律走 `getModelContextWindow(model)`。
+ */
+export const LEGACY_CONTEXT_WINDOW = 1_048_576;
+/** 当前配置结构版本（`configVersion`）：写入即代表"contextWindow 语义已是跟随模型" */
+export const CONFIG_VERSION = 1;
 /** 工具默认返回条数：固定 2000+（列表类工具未显式传 limit 时） */
 export const DEFAULT_TOOL_LIMIT = 2000;
+
+/**
+ * 求生效的上下文窗口：显式配置优先，否则跟随模型。
+ *
+ * 迁移规则：没有 `configVersion` 的配置是 v0.2.26 及更早存下来的，其 `contextWindow`
+ * **一律视为非用户意图**（那时根本没别的值可写，恒为 1M），直接丢弃改用模型窗口。
+ * 不用"是否等于 1M"来判断——那会误伤真的手动填了大窗口的用户。
+ */
+export function effectiveContextWindow(model: string, saved?: Partial<AIConfig> | null): number {
+  const known = getModelContextWindow(model);
+  const legacy = saved?.configVersion === undefined;
+  const explicit = !legacy && typeof saved?.contextWindow === 'number' ? saved.contextWindow : undefined;
+  return clamp(explicit ?? known, 2000, 2_000_000, known);
+}
 
 /**
  * 合并已保存配置与 Provider 预设，得到实际请求配置。
@@ -160,8 +186,9 @@ export function resolveConfig(saved?: Partial<AIConfig> | null): AIConfig {
   const providerId = saved?.providerId && getPreset(saved.providerId) ? saved.providerId : 'deepseek';
   const preset = getPreset(providerId);
   const model = saved?.model || preset?.defaultModel || '';
-  // 模型上下文长度：优先用户显式填写，否则默认 1024K（不依赖模型名猜测，用户无需手动配置）
-  const contextWindow = clamp(saved?.contextWindow ?? DEFAULT_CONTEXT_WINDOW, 2000, 2_000_000, DEFAULT_CONTEXT_WINDOW);
+  // 模型上下文长度：优先用户显式填写，否则**跟随模型**（此前恒为 1M，128K 的模型会拿到
+  // 8 倍于真实窗口的预算，护栏因此永不触发、请求直接被撑爆）
+  const contextWindow = effectiveContextWindow(model, saved);
   const compressThreshold = clamp(saved?.compressThreshold, 0.5, 0.95, 0.8);
   return {
     providerId,
@@ -173,5 +200,6 @@ export function resolveConfig(saved?: Partial<AIConfig> | null): AIConfig {
     contextWindow,
     compressThreshold,
     autoCompress: saved?.autoCompress ?? false,
+    configVersion: CONFIG_VERSION,
   };
 }

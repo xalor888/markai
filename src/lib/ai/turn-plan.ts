@@ -37,6 +37,7 @@ const READ_TOOLS = new Set([
   'stats',
   'find_duplicates',
   'open_bookmark',
+  'recall_memories',
 ]);
 
 /**
@@ -46,11 +47,12 @@ const READ_TOOLS = new Set([
 const GATE_TOOLS = new Set(['propose_deletions', 'delete_all_bookmarks']);
 
 /**
- * 声明类工具：**只记录意图、不产生任何副作用**。
- * `submit_plan` 让模型把整轮打算做的写操作一次说清，从而把"每回次确认"升级为"整轮一次确认"。
+ * 声明类工具：**只记录意图或设置、不产生书签库副作用**。
+ * `submit_plan` 让模型把整轮打算做的写操作一次说清，从而把"每回次确认"升级为"整轮一次确认"；
+ * `remember` 与 `forget_memory` 是对长期记忆的管理，直接生效而不产生书签库改动。
  * 注意：它不是安全边界——真正的闸门仍是逐回次的（未声明的写操作照样要确认）。
  */
-const DECLARE_TOOLS = new Set(['submit_plan']);
+const DECLARE_TOOLS = new Set(['submit_plan', 'remember', 'forget_memory']);
 
 export function classifyTool(name: string): ToolClass {
   if (READ_TOOLS.has(name)) return 'read';

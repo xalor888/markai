@@ -1,7 +1,9 @@
-import { CheckCircle2, ChevronRight, Database, Eye, EyeOff, Loader2, Monitor, Moon, Palette, Plug, RefreshCw, ShieldCheck, SlidersHorizontal, Sun, Sparkles, Trash2, Zap, AlertTriangle } from 'lucide-react';
+import { AlertTriangle, Brain, CheckCircle2, ChevronRight, Database, Eye, EyeOff, Loader2, Monitor, Moon, Palette, Plug, Plus, RefreshCw, ShieldCheck, SlidersHorizontal, Sun, Sparkles, Trash2, Zap } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useConfigStore } from '@/stores/configStore';
 import { useAIStore, AI_STORAGE_KEY } from '@/stores/aiStore';
+import { useMemoryStore, initMemorySync } from '@/stores/memoryStore';
+import { CATEGORY_LABELS, type MemoryCategory } from '@/lib/ai/memory';
 import { clearUndoPoints } from '@/lib/undo/recorder';
 import { useThemeStore, type Theme } from '@/stores/themeStore';
 import { PROVIDERS, getPreset, getModelContextWindow } from '@/lib/providers';
@@ -11,6 +13,7 @@ import { openUrl } from '@/lib/open-url';
 import { appVersion } from '@/lib/version';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { BrandMark } from '@/components/theme/theme-provider';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
@@ -31,20 +34,25 @@ function formatTokens(n: number): string {
 function Section({
   icon: Icon,
   title,
+  badge,
   children,
   className,
 }: {
   icon: React.ComponentType<{ className?: string }>;
   title: string;
+  badge?: React.ReactNode;
   children: React.ReactNode;
   className?: string;
 }) {
   return (
     <section className={cn('rounded-lg border border-border bg-card p-4', className)}>
-      <h2 className="mb-3.5 flex items-center gap-2 text-sm font-semibold text-foreground">
-        <Icon className="h-4 w-4 shrink-0 text-accent" />
-        {title}
-      </h2>
+      <div className="mb-3.5 flex items-center justify-between">
+        <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+          <Icon className="h-4 w-4 shrink-0 text-accent" />
+          {title}
+        </h2>
+        {badge}
+      </div>
       {children}
     </section>
   );
@@ -122,7 +130,19 @@ export function ConfigForm() {
   const [remoteModels, setRemoteModels] = useState<string[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [confirmClearMemories, setConfirmClearMemories] = useState(false);
   const [dataCounts, setDataCounts] = useState<{ messages: number; pending: number }>({ messages: 0, pending: 0 });
+
+  // 长期记忆管理
+  const memories = useMemoryStore((s) => s.memories);
+  const loadMemories = useMemoryStore((s) => s.load);
+  const addMemory = useMemoryStore((s) => s.add);
+  const removeMemory = useMemoryStore((s) => s.remove);
+  const toggleMemory = useMemoryStore((s) => s.toggle);
+  const clearMemories = useMemoryStore((s) => s.clear);
+  const [newMemContent, setNewMemContent] = useState('');
+  const [newMemCat, setNewMemCat] = useState<MemoryCategory>('preference');
+
   // 设置保存失败必须可见：这条路径存的是 API Key 与删除模式，静默失败会变成假象
   const saveError = useConfigStore((s) => s.saveError);
   // 模型上下文输入：本地字符串 state（受控 value 派生 + onChange 过滤会拦截 64K/100K 等合法输入）
@@ -142,6 +162,13 @@ export function ConfigForm() {
   const autoWindow = getModelContextWindow(config.model || preset?.defaultModel || '');
   const effectiveWindow = config.contextWindow ?? autoWindow;
   const isAuto = typeof config.contextWindow !== 'number';
+
+  // 载入长期记忆与跨窗口同步监听
+  useEffect(() => {
+    void loadMemories();
+    const stopSync = initMemorySync();
+    return () => stopSync();
+  }, [loadMemories]);
 
   // 读取本地数据量（消息数 + 待删数；v2 多会话结构：汇总全部会话）
   useEffect(() => {
@@ -182,6 +209,18 @@ export function ConfigForm() {
     setAutoHint(`${Math.round(auto / 1000)}K`);
     setCtxInput(String(Math.round((config.contextWindow ?? auto) / 1000)));
   }, [config.contextWindow, config.model, config.providerId]);
+
+  const handleAddMemory = async () => {
+    const text = newMemContent.trim();
+    if (!text) return;
+    try {
+      await addMemory(text, newMemCat);
+      setNewMemContent('');
+      pushToast('已保存到长期记忆', { variant: 'default' });
+    } catch (e) {
+      pushToast('保存记忆失败', { variant: 'destructive', description: String(e) });
+    }
+  };
 
   if (!loaded) return <p className="p-4 text-xs text-muted-foreground">加载中…</p>;
 
@@ -586,6 +625,101 @@ export function ConfigForm() {
         </div>
       </Section>
 
+      {/* ── 长期记忆 ── */}
+      <Section
+        icon={Brain}
+        title="长期记忆"
+        badge={<Badge variant="outline">{memories.filter((m) => m.enabled).length} 条生效</Badge>}
+      >
+        <p className="mb-3 text-2xs leading-4 text-muted-foreground">
+          记录你的整理偏好与规则（如「技术类按语言分类」「不要动工作文件夹」）。Agent 整理书签时会自动遵守，跨会话持续生效；对话中说「记住…」也会写入这里。
+        </p>
+
+        {/* 新增记忆 */}
+        <div className="flex gap-1.5">
+          <Input
+            value={newMemContent}
+            onChange={(e) => setNewMemContent(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.nativeEvent.isComposing) void handleAddMemory();
+            }}
+            placeholder="例如：清理时保留最近 3 个月的链接"
+            className="h-8 flex-1 text-xs"
+            aria-label="新记忆内容"
+          />
+          <div className="w-20 shrink-0">
+            <Select
+              value={newMemCat}
+              onChange={(e) => setNewMemCat(e.target.value as MemoryCategory)}
+              className="h-8 text-xs"
+              aria-label="记忆类型"
+            >
+              {(Object.keys(CATEGORY_LABELS) as MemoryCategory[]).map((c) => (
+                <option key={c} value={c}>
+                  {CATEGORY_LABELS[c]}
+                </option>
+              ))}
+            </Select>
+          </div>
+          <Button size="sm" className="h-8 shrink-0" disabled={!newMemContent.trim()} onClick={() => void handleAddMemory()}>
+            <Plus className="h-3.5 w-3.5" />
+            添加
+          </Button>
+        </div>
+
+        {/* 记忆列表 */}
+        {memories.length === 0 ? (
+          <p className="mt-3 rounded-sm border border-dashed border-border px-3 py-3 text-center text-2xs text-muted-foreground">
+            还没有长期记忆。在对话里说「记住…」，或直接在上面添加。
+          </p>
+        ) : (
+          <ul className="mt-3 max-h-56 space-y-1.5 overflow-y-auto pr-0.5">
+            {memories.map((m) => (
+              <li
+                key={m.id}
+                className={cn(
+                  'group flex items-start gap-2 rounded-sm border border-border px-2.5 py-2 transition-colors',
+                  m.enabled ? 'bg-card' : 'bg-muted/40 opacity-70',
+                )}
+              >
+                <Checkbox
+                  checked={m.enabled}
+                  aria-label={m.enabled ? '停用这条记忆' : '启用这条记忆'}
+                  onCheckedChange={() => void toggleMemory(m.id)}
+                  className="mt-0.5"
+                />
+                <div className="min-w-0 flex-1">
+                  <p className={cn('text-xs leading-4 break-words', m.enabled ? 'text-foreground' : 'text-muted-foreground line-through')}>
+                    {m.content}
+                  </p>
+                  <p className="mt-0.5 text-2xs text-muted-foreground/70">
+                    {CATEGORY_LABELS[m.category]} · 来源：Agent / 手动
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  aria-label="删除这条记忆"
+                  title="删除这条记忆"
+                  onClick={() => void removeMemory(m.id)}
+                  className="shrink-0 rounded-xs p-1 text-muted-foreground/50 opacity-0 transition-all group-hover:opacity-100 hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        {memories.length > 0 && (
+          <div className="mt-3 flex justify-end">
+            <Button size="sm" variant="ghost" className="h-7 text-2xs text-muted-foreground hover:text-destructive" onClick={() => setConfirmClearMemories(true)}>
+              <Trash2 className="h-3 w-3" />
+              清空全部记忆
+            </Button>
+          </div>
+        )}
+      </Section>
+
       {/* ── 外观 ── */}
       <Section icon={Palette} title="外观">
         <div className="grid grid-cols-3 gap-1.5">
@@ -697,6 +831,32 @@ export function ConfigForm() {
         }
       />
 
+      {/* 清空记忆确认 */}
+      <Dialog
+        open={confirmClearMemories}
+        onOpenChange={setConfirmClearMemories}
+        title="清空全部长期记忆"
+        description={`将删除全部 ${memories.length} 条长期记忆（偏好、规则与习惯）。Agent 此后将不再遵守这些约定，此操作不可撤销。`}
+        footer={
+          <>
+            <Button variant="ghost" size="sm" onClick={() => setConfirmClearMemories(false)} autoFocus>
+              取消
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              onClick={() => {
+                setConfirmClearMemories(false);
+                void clearMemories();
+                pushToast('长期记忆已清空', { variant: 'default' });
+              }}
+            >
+              清空
+            </Button>
+          </>
+        }
+      />
+
       <footer className="flex flex-col items-center gap-1.5 pb-4 text-center text-2xs text-muted-foreground">
         <p>MarkAI v{appVersion()}</p>
         <p className="text-muted-foreground/70">
@@ -719,14 +879,7 @@ export function OptionsHeader() {
   return (
     <header className="sticky top-0 z-10 border-b border-border bg-background/95 px-4 py-2.5 backdrop-blur-sm">
       <div className="mx-auto flex max-w-lg items-center justify-between">
-        <div className="flex items-center gap-2">
-          <span className="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-sm font-semibold text-accent-foreground">
-            M
-          </span>
-          <span className="text-sm font-semibold tracking-tight text-foreground">
-            Mark<span className="text-accent">AI</span> 设置
-          </span>
-        </div>
+        <BrandMark subtitle="设置" />
         <Badge variant="outline">书签管家 Agent</Badge>
       </div>
     </header>

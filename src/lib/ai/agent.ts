@@ -1,6 +1,7 @@
 /** ── Agent 主循环：流式对话 + 工具调用循环 ── */
 
 import { chatCompletion, ChatError, type ApiMessage, type ApiToolCall } from './client';
+import { formatMemoriesForPrompt, getMemories, type MemoryItem } from './memory';
 import { PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT, TOOL_DEFINITIONS } from './prompts';
 import { executeTool, type ToolOutput } from './tools';
 import { applyPlan, buildPlan, classifyTool, stepCountOf, type PlannedStep } from './turn-plan';
@@ -35,6 +36,7 @@ const READ_TOOLS = new Set([
   'stats',
   'find_duplicates',
   'open_bookmark',
+  'recall_memories',
 ]);
 
 export interface AgentTurnParams {
@@ -50,6 +52,8 @@ export interface AgentTurnParams {
    * 生产实现由 background 注入（UI 侧是第三片）。
    */
   requestPlanApproval?: (plan: PlannedStep[], messageId: string) => Promise<boolean>;
+  /** 长期记忆项（可选，未传时自动从存储中读取） */
+  memories?: MemoryItem[];
 }
 
 /**
@@ -110,9 +114,16 @@ export function estimateTokens(text?: string): number {
   return Math.ceil(cjk * 0.75 + cjkExt + other / 4);
 }
 
-/** 固定开销估算：系统提示词 + 工具定义 schema（不在历史预算内，需从窗口预算中扣除） */
-export function fixedOverheadTokens(): number {
-  return estimateTokens(SYSTEM_PROMPT) + estimateTokens(PLAN_MODE_INSTRUCTION) + estimateTokens(JSON.stringify(TOOL_DEFINITIONS)) + 100;
+/** 固定开销估算：系统提示词 + 工具定义 schema + 长期记忆（不在历史预算内，需从窗口预算中扣除） */
+export function fixedOverheadTokens(memories?: MemoryItem[]): number {
+  const memStr = memories ? formatMemoriesForPrompt(memories) : '';
+  return (
+    estimateTokens(SYSTEM_PROMPT) +
+    estimateTokens(PLAN_MODE_INSTRUCTION) +
+    estimateTokens(memStr) +
+    estimateTokens(JSON.stringify(TOOL_DEFINITIONS)) +
+    100
+  );
 }
 
 /**
@@ -213,18 +224,28 @@ export async function runAgentTurn(params: AgentTurnParams): Promise<void> {
 async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
   const { config, messageId, history, text, signal, onEvent } = params;
 
+  // 读取长期记忆并注入系统提示词（跨会话持久规则与偏好）
+  let activeMemories: MemoryItem[] = [];
+  try {
+    activeMemories = params.memories ?? (await getMemories());
+  } catch {
+    activeMemories = [];
+  }
+  const memoryPrompt = formatMemoriesForPrompt(activeMemories);
+
   // 上下文预算 = 用户填写的模型上下文长度 × 压缩阈值，再扣除系统提示与工具定义的固定开销
   // （否则固定约 3k+ token 会把小窗口模型直接撑爆，且工具循环回填会持续膨胀）
   const window = Math.min(Math.max(config.contextWindow ?? 128000, 2000), 2_000_000);
   const threshold = Math.min(Math.max(config.compressThreshold ?? 0.8, 0.5), 0.95);
-  const budget = Math.max(Math.round(window * threshold) - fixedOverheadTokens(), 300);
+  const budget = Math.max(Math.round(window * threshold) - fixedOverheadTokens(activeMemories), 300);
   const apiHistory = selectHistory(history, budget, config.autoCompress ?? false);
 
-  // 组装 API 消息：系统提示词 + 历史（预算内）+ 本次用户输入
+  // 组装 API 消息：系统提示词 + 长期记忆 + 历史（预算内）+ 本次用户输入
   // 计划模式：把"先声明整轮计划"的流程要求写进系统提示（工具说明只讲工具是什么，
   // 流程要求必须在系统提示里说；声明没做也不影响安全，只是确认次数会变多）
-  const systemContent =
+  const baseSystem =
     config.planMode === true ? SYSTEM_PROMPT + PLAN_MODE_INSTRUCTION : SYSTEM_PROMPT;
+  const systemContent = baseSystem + memoryPrompt;
   const apiMessages: ApiMessage[] = [{ role: 'system', content: systemContent }];
   for (const m of apiHistory) {
     const content = extractText(m).slice(0, MAX_MESSAGE_CHARS);

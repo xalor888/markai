@@ -17,6 +17,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runAgentTurn } from '../src/lib/ai/agent';
 import { ChatError } from '../src/lib/ai/client';
+import type { MemoryItem } from '../src/lib/ai/memory';
 import { TOOL_DEFINITIONS } from '../src/lib/ai/prompts';
 import { executeTool, TOOL_META } from '../src/lib/ai/tools';
 import type { AIConfig, ChatInbound, ChatMessage, ChatOutbound, DeletionProposal } from '../src/lib/ai/types';
@@ -7506,6 +7507,8 @@ function ok(name: string, fn: () => void) {
     /** 非颜色语义：ring 的宽度与 inset、border 的方向、渐变 */
     const SIZE_LIKE = /^(2xs|xs|sm|base|lg|xl|2xl|3xl|4xl|\[|\d)/;
     const BORDER_DIR = /^(b|t|l|r|x|y|s|e)$/;
+    /** border 的线型关键字（border-dashed / border-solid 等）是边框样式，不是颜色 */
+    const BORDER_STYLE = new Set(['solid', 'dashed', 'dotted', 'double', 'hidden', 'none']);
 
     // 收集 src 下所有 .tsx
     const files: string[] = [];
@@ -7539,6 +7542,8 @@ function ok(name: string, fn: () => void) {
         if (pre === 'text' && (SIZE_LIKE.test(name!) || seg.some((s) => TEXT_NOT_COLOR.has(s)))) continue;
         // border 的方向与宽度（border-b / border-l-0 / border-2）不是颜色
         if (pre === 'border' && (BORDER_DIR.test(seg[0]!) || seg.some((s) => /^\d+$/.test(s)))) continue;
+        // border 的线型（border-dashed / border-solid）不是颜色
+        if (pre === 'border' && seg.some((s) => BORDER_STYLE.has(s))) continue;
         // ring 的宽度与 ring-inset 不是颜色
         if (pre === 'ring' && (/^\d/.test(name!) || seg.includes('inset'))) continue;
         if (BUILTIN.has(name!)) continue;
@@ -7684,6 +7689,232 @@ function ok(name: string, fn: () => void) {
         '.gitignore 必须整行排除 .keys/（扩展私钥所在目录）',
       );
     });
+  }
+
+  /* ── T74: 长期记忆（核心模块 + Agent 工具 + 系统提示注入）──
+     覆盖：记忆 CRUD、查重合并、开关过滤、关键词搜索、
+     remember / recall_memories / forget_memory 三个工具的执行与校验、
+     系统提示的动态记忆注入、参数容错规范化。 */
+  console.log('\n[T74] 长期记忆');
+  {
+    const memMod = await import('../src/lib/ai/memory');
+    const { formatMemoriesForPrompt } = memMod;
+    const MEMORY_KEY = memMod.MEMORY_STORAGE_KEY;
+
+    // 用例开始前清空记忆存储
+    storageMap.delete(MEMORY_KEY);
+
+    // 注意：所有含 await 的操作都在块级顶层顺序执行，ok() 只做同步断言——
+    // 把 async 函数直接塞给 ok() 会变成"脱缰的 Promise"，与后续语句并发跑，
+    // 写存储的用例会在 storageMap.delete 之后把旧数据写回来（真实踩过的坑）。
+    await assert.rejects(() => memMod.addMemoryItem('   '), /不能为空/);
+    ok('addMemoryItem：空内容拒绝', () => {});
+
+    let added: MemoryItem | undefined;
+    await memMod.addMemoryItem('技术类书签按语言分类').then((r) => (added = r));
+    ok('addMemoryItem：写入存储并返回完整条目', () => {
+      assert.ok(added);
+      assert.equal(added!.content, '技术类书签按语言分类');
+      assert.equal(added!.category, 'preference');
+      assert.equal(added!.enabled, true);
+      assert.match(added!.id, /^mem_/);
+      const stored = storageMap.get(MEMORY_KEY) as MemoryItem[];
+      assert.equal(stored.length, 1);
+      assert.equal(stored[0]!.content, '技术类书签按语言分类');
+    });
+
+    {
+      const before = (storageMap.get(MEMORY_KEY) as MemoryItem[]).length;
+      const again = await memMod.addMemoryItem('技术类书签按语言分类', 'rule');
+      const after = (storageMap.get(MEMORY_KEY) as MemoryItem[]).length;
+      ok('addMemoryItem：完全相同的内容去重（激活 + 更新，不新增）', () => {
+        assert.equal(after, before, '重复内容不得新增条目');
+        assert.equal(again.id, added!.id, '去重应命中同一条');
+        assert.equal(again.category, 'rule', '重复添加时以最新类型为准');
+      });
+    }
+
+    {
+      const before = Date.now() - 10;
+      const upd = await memMod.updateMemoryItem(added!.id, { content: '技术类按语言分类，工作类不动', category: 'rule' });
+      ok('updateMemoryItem：更新内容与类型，updatedAt 刷新', () => {
+        assert.ok(upd);
+        assert.equal(upd!.content, '技术类按语言分类，工作类不动');
+        assert.equal(upd!.category, 'rule');
+        assert.ok(upd!.updatedAt >= before);
+      });
+    }
+
+    {
+      const off = await memMod.toggleMemoryItem(added!.id);
+      const on = await memMod.toggleMemoryItem(added!.id);
+      const missing = await memMod.toggleMemoryItem('mem_not_exist');
+      ok('toggleMemoryItem：启用状态可来回切换', () => {
+        assert.equal(off!.enabled, false);
+        assert.equal(on!.enabled, true);
+        assert.equal(missing, null, '不存在的 id 返回 null');
+      });
+    }
+
+    ok('searchMemories：内容与分类名都参与匹配', () => {
+      const list: MemoryItem[] = [
+        { id: 'a', content: '清理时保留最近三个月', category: 'preference', enabled: true, createdAt: 1, updatedAt: 1 },
+        { id: 'b', content: '不要动工作文件夹', category: 'rule', enabled: true, createdAt: 2, updatedAt: 2 },
+      ];
+      assert.equal(memMod.searchMemories('保留', list).map((m) => m.id).join(','), 'a');
+      assert.equal(memMod.searchMemories('规则', list).map((m) => m.id).join(','), 'b', '分类中文名可被搜索');
+      assert.equal(memMod.searchMemories('', list).length, 2, '空 query 返回全部');
+      assert.equal(memMod.searchMemories('不存在', list).length, 0);
+    });
+
+    ok('formatMemoriesForPrompt：空列表返回空串，启用条目带分类标签', () => {
+      assert.equal(formatMemoriesForPrompt([]), '');
+      const list: MemoryItem[] = [
+        { id: 'a', content: '保留最近三个月', category: 'preference', enabled: true, createdAt: 1, updatedAt: 1 },
+        { id: 'b', content: '已停用的规则', category: 'rule', enabled: false, createdAt: 2, updatedAt: 2 },
+      ];
+      const prompt = formatMemoriesForPrompt(list);
+      assert.ok(prompt.includes('[偏好] 保留最近三个月'));
+      assert.ok(!prompt.includes('已停用的规则'), '停用的记忆不得注入提示词');
+      assert.ok(prompt.includes('长期记忆'));
+    });
+
+    ok('formatMemoriesForPrompt：maxItems 限制注入条数（按入参顺序取前 N）', () => {
+      // 与生产一致：getMemories() 按 updatedAt 降序返回，格式化器按入参顺序取前 maxItems
+      const list: MemoryItem[] = Array.from({ length: 5 }, (_, i) => ({
+        id: `m${i}`, content: `记忆${i}`, category: 'custom' as const, enabled: true, createdAt: i, updatedAt: i,
+      })).reverse();
+      const prompt = formatMemoriesForPrompt(list, 2);
+      assert.ok(prompt.includes('记忆4'), '最新一条注入');
+      assert.ok(prompt.includes('记忆3'), '次新一条注入');
+      assert.ok(!prompt.includes('记忆0'), '超出上限的条目不注入');
+    });
+
+    // ── 工具执行 ──
+    storageMap.delete(MEMORY_KEY);
+
+    const rem = await executeTool('remember', JSON.stringify({ content: '清理时不要删 GitHub 链接', category: 'rule' }));
+    ok('remember：写入成功并回执条目', () => {
+      const out = JSON.parse(rem.result) as { success: boolean; item: { content: string; category: string } };
+      assert.equal(out.success, true);
+      assert.equal(out.item.content, '清理时不要删 GitHub 链接');
+      assert.equal(out.item.category, 'rule');
+    });
+
+    await assert.rejects(() => executeTool('remember', JSON.stringify({ content: '' })), /参数不合法/);
+    ok('remember：内容为空被 zod 拒绝（参数不合法）', () => {});
+
+    const rec = await executeTool('recall_memories', JSON.stringify({ query: 'GitHub' }));
+    ok('recall_memories：按关键词命中', () => {
+      const out = JSON.parse(rec.result) as { total: number; memories: { content: string }[] };
+      assert.equal(out.total, 1);
+      assert.equal(out.memories[0]!.content, '清理时不要删 GitHub 链接');
+    });
+
+    const recAll = await executeTool('recall_memories', '{}');
+    ok('recall_memories：无 query 返回全部', () => {
+      const out = JSON.parse(recAll.result) as { total: number };
+      assert.equal(out.total, 1);
+    });
+
+    const fg = await executeTool('forget_memory', JSON.stringify({ query: 'GitHub' }));
+    ok('forget_memory：按 query 匹配删除', () => {
+      const out = JSON.parse(fg.result) as { success: boolean };
+      assert.equal(out.success, true);
+      const stored = (storageMap.get(MEMORY_KEY) as MemoryItem[]) ?? [];
+      assert.equal(stored.length, 0);
+    });
+
+    const fgMiss = await executeTool('forget_memory', JSON.stringify({ query: '不存在的记忆' }));
+    ok('forget_memory：无匹配时如实回执（不假装删除）', () => {
+      const out = JSON.parse(fgMiss.result) as { success: boolean };
+      assert.equal(out.success, false);
+    });
+
+    // ── 参数容错：normalizeToolArgs ──
+    const dupes = await executeTool('find_duplicates', JSON.stringify({ limit: '10' }));
+    ok('参数容错：数字字符串 "10" 自动矫正为数字', () => {
+      const out = JSON.parse(dupes.result) as { groups?: unknown[] };
+      assert.ok(out && typeof out === 'object', '字符串数字被矫正后工具正常执行');
+    });
+
+    {
+      const { classifyTool } = await import('../src/lib/ai/turn-plan');
+      const defNames = new Set(TOOL_DEFINITIONS.map((d) => d.function.name));
+      ok('工具定义 ↔ 元信息 ↔ 分类：记忆工具三表一致', () => {
+        for (const n of ['remember', 'recall_memories', 'forget_memory']) {
+          assert.ok(defNames.has(n), `${n} 必须有工具定义`);
+          assert.ok(TOOL_META[n], `${n} 必须有中文元信息`);
+        }
+        // recall_memories 是读类（可并行）；remember/forget_memory 是声明类（不进写计划）
+        assert.equal(classifyTool('recall_memories'), 'read');
+        assert.equal(classifyTool('remember'), 'declare');
+        assert.equal(classifyTool('forget_memory'), 'declare');
+      });
+    }
+
+    // ── 系统提示注入（agent 集成）──
+    storageMap.delete(MEMORY_KEY);
+    await memMod.addMemoryItem('优先保留主页面，子页面可清理', 'rule');
+
+    let capturedSystem = '';
+    fetchCalls.length = 0;
+    sseQueue = [
+      sseResponse([
+        sseEvent(JSON.stringify({ choices: [{ delta: { content: '好的，已记住' } }] })),
+        sseEvent('[DONE]'),
+      ]),
+    ];
+    await runAgentTurn({
+      config: TEST_CONFIG,
+      messageId: 'mem-msg-1',
+      history: [],
+      text: '记住：优先保留主页面',
+      signal: new AbortController().signal,
+      onEvent: () => {},
+    });
+    ok('Agent 把启用的长期记忆注入系统提示', () => {
+      assert.ok(fetchCalls.length >= 1, '至少发出一次模型请求');
+      const body = JSON.parse(String(fetchCalls[0]!.init.body)) as { messages: { role: string; content: string }[] };
+      const sys = body.messages.find((m) => m.role === 'system');
+      assert.ok(sys, '存在 system 消息');
+      capturedSystem = sys!.content ?? '';
+      assert.ok(capturedSystem.includes('[规则] 优先保留主页面，子页面可清理'), '系统提示包含启用中的记忆');
+    });
+    ok('注入的记忆位于【长期记忆】小节，且带遵守要求', () => {
+      assert.ok(capturedSystem.includes('【长期记忆'), '有长期记忆小节标题');
+      assert.ok(capturedSystem.includes('长期偏好与规则'), '带遵守语义说明');
+    });
+
+    // 显式传入 memories 时不读存储：允许调用方注入快照
+    storageMap.delete(MEMORY_KEY);
+    fetchCalls.length = 0;
+    sseQueue = [
+      sseResponse([
+        sseEvent(JSON.stringify({ choices: [{ delta: { content: 'ok' } }] })),
+        sseEvent('[DONE]'),
+      ]),
+    ];
+    await runAgentTurn({
+      config: TEST_CONFIG,
+      messageId: 'mem-msg-2',
+      history: [],
+      text: 'hi',
+      signal: new AbortController().signal,
+      onEvent: () => {},
+      memories: [
+        { id: 'x', content: '显式注入的记忆', category: 'habit', enabled: true, createdAt: 1, updatedAt: 1 },
+      ],
+    });
+    ok('AgentTurnParams.memories：显式快照优先于存储', () => {
+      const body = JSON.parse(String(fetchCalls[0]!.init.body)) as { messages: { role: string; content: string }[] };
+      const sys = body.messages.find((m) => m.role === 'system');
+      assert.ok(sys!.content!.includes('显式注入的记忆'));
+      assert.ok(!sys!.content!.includes('优先保留主页面'), '存储里的旧记忆不被误注入');
+    });
+
+    // 清理现场，避免影响后续用例
+    storageMap.delete(MEMORY_KEY);
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

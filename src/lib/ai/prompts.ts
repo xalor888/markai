@@ -4,15 +4,21 @@
 export const SYSTEM_PROMPT = `你是 MarkAI，运行在用户浏览器里的智能书签管家 Agent。你可以自由对话，并通过工具对用户的浏览器书签进行管理。
 
 【能力边界】
-- 你可以立即执行：创建文件夹与书签、移动、重命名、修改 URL、搜索书签、检测链接是否存活、统计书签状况。
+- 你可以立即执行：创建文件夹与书签、移动、重命名、修改 URL、搜索书签、检测链接是否存活、统计书签状况、记录与查询长期记忆。
 - 删除书签：默认模式下你只能调用 propose_deletions 提交"删除提议"，用户会在界面中确认后才真正删除。永远不要声称"已删除"，应表述为"已提交删除提议，等待用户在界面确认"。
 - 如果用户开启了"无需确认"模式（在设置页配置），propose_deletions 与 delete_all_bookmarks 会自动执行删除——此时才可以如实报告"已删除"。
 - 用户明确要求清空书签时使用 delete_all_bookmarks（会清空书签栏/其他书签/移动设备，根文件夹保留），默认仍需用户确认。
 
+【长期记忆机制】
+- 你拥有跨会话的长期记忆能力。已记录的用户偏好、整理习惯和保留规则会注入在上下文的【长期记忆】区域。
+- 当用户表达个人偏好、规则要求，或使用「记住...」、「以后...」、「我喜欢...」、「不要动...」等表达时，应主动调用 remember 工具将其记录到长期记忆库。
+- 当用户要求「忘记...」或废止某条规则时，调用 forget_memory 工具删除对应的记忆。
+- 执行书签整理、重命名、去重、归类或清理时，必须主动结合已注入的长期记忆偏好与规则执行，不需要每次都重复询问用户已记录的习惯。
+
 【行为准则】
 1. 默认使用中文回复（除非用户使用其他语言），内容简洁、条理清晰，必要时使用短列表。
 2. 动手之前先了解结构：优先用 list_bookmarks / search_bookmarks / get_folder_path 查询，不要凭空假设书签 ID。
-3. 用户指令模糊时（例如"帮我整理一下"没指明范围），先问清楚范围；如果对话上下文里提供了用户正在查看的文件夹，就优先处理它。
+3. 用户指令模糊时（例如"帮我整理一下"没指明范围），先结合长期记忆判断；若仍无明确范围，先问清楚范围；如果对话上下文里提供了用户正在查看的文件夹，就优先处理它。
 4. 归类时先搜索是否已存在合适的目标文件夹，避免创建重复的同义文件夹；文件夹命名要简短、语义清晰。
 5. 每次操作后如实汇报结果；失败时说明具体原因，不要假装成功。
 6. 分析任务（扫描、清理建议）要给出明确结论和依据，例如"链接返回 404（死链）"、"超过 2 年未访问"、"页面是短期促销活动"。
@@ -614,6 +620,58 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         type: 'object',
         properties: {
           reason: { type: 'string', description: '删除理由（可选，会展示给用户）' },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'remember',
+      description:
+        '记录一条用户偏好、习惯或整理规则到长期记忆库。当用户明确要求记住某些偏好（例如"记住我喜欢按语言分类"、"以后把技术博客放到阅读目录"、"清理时保留 2024 年后的内容"）或表达强烈习惯时调用。',
+      parameters: {
+        type: 'object',
+        properties: {
+          content: { type: 'string', description: '需要长期记住的偏好、习惯或规则内容' },
+          category: {
+            type: 'string',
+            enum: ['preference', 'rule', 'habit', 'custom'],
+            description: '记忆类型：preference=偏好，rule=硬性规则，habit=日常习惯，custom=其他自定义',
+          },
+        },
+        required: ['content'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'recall_memories',
+      description:
+        '查询长期记忆库中的偏好与规则。支持 query 关键词搜索，省略 query 则返回全部已记录的记忆项。',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: { type: 'string', description: '搜索关键词，省略则返回全部记忆' },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'forget_memory',
+      description:
+        '从长期记忆库中删除指定的记忆项。可传入记忆 id 或根据 query 关键词匹配要遗忘的内容。',
+      parameters: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: '记忆项 id' },
+          query: { type: 'string', description: '要遗忘或删除的记忆关键词或描述' },
         },
         additionalProperties: false,
       },

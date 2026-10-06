@@ -1,6 +1,7 @@
 import {
   ArrowDown,
   Bot,
+  Brain,
   Download,
   FolderTree,
   AlertTriangle,
@@ -18,10 +19,12 @@ import {
   Undo2,
   X,
 } from 'lucide-react';
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from 'react';
 import { useAIStore } from '@/stores/aiStore';
 import { useBookmarkStore, findNode, resolveTitlePath } from '@/stores/bookmarkStore';
 import { useConfigStore } from '@/stores/configStore';
+import { useMemoryStore, initMemorySync } from '@/stores/memoryStore';
+import { CATEGORY_LABELS } from '@/lib/ai/memory';
 import { formatRelativeTime, formatIsoDate } from '@/lib/format';
 import { describeUndoHistory, summarizeOps, undoReadiness } from '@/lib/undo/journal';
 import { resolveConfig, PROVIDERS } from '@/lib/providers';
@@ -120,6 +123,7 @@ export function ChatPanel({
   const [confirmDeleteSession, setConfirmDeleteSession] = useState<string | null>(null);
   const [sessionsOpen, setSessionsOpen] = useState(false);
   const [undoHistoryOpen, setUndoHistoryOpen] = useState(false);
+  const [memoriesOpen, setMemoriesOpen] = useState(false);
   const [editingSession, setEditingSession] = useState<string | null>(null);
   const [editTitle, setEditTitle] = useState('');
   const [sessionQuery, setSessionQuery] = useState('');
@@ -127,6 +131,19 @@ export function ChatPanel({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // 稳定引用：MessageView 已 memo，重试回调需保持引用不变
   const handleRetry = useCallback(() => retryLast(), [retryLast]);
+
+  // 长期记忆（只读查看 + 快捷启停/删除；编辑入口在设置页）
+  const memories = useMemoryStore((s) => s.memories);
+  const loadMemories = useMemoryStore((s) => s.load);
+  const toggleMemory = useMemoryStore((s) => s.toggle);
+  const removeMemory = useMemoryStore((s) => s.remove);
+  const activeMemCount = useMemo(() => memories.filter((m) => m.enabled).length, [memories]);
+
+  useEffect(() => {
+    void loadMemories();
+    const stopSync = initMemorySync();
+    return () => stopSync();
+  }, [loadMemories]);
 
   // 新消息 / 流式增量时自动滚到底部（用户上翻后暂停跟随）
   useEffect(() => {
@@ -337,6 +354,21 @@ export function ChatPanel({
           <Button
             variant="ghost"
             size="icon"
+            className="relative"
+            title={`长期记忆（${activeMemCount} 条生效）`}
+            aria-label="长期记忆"
+            onClick={() => setMemoriesOpen((v) => !v)}
+          >
+            <Brain className="h-3.5 w-3.5" />
+            {activeMemCount > 0 && (
+              <span className="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-accent px-1 text-2xs leading-none font-medium text-accent-foreground ring-2 ring-card">
+                {activeMemCount}
+              </span>
+            )}
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
             title={streaming ? 'Agent 回复中，暂不可切换会话' : '会话管理'}
             aria-label="会话管理"
             disabled={streaming}
@@ -452,6 +484,86 @@ export function ChatPanel({
                 {undoNotice}
               </p>
             )}
+          </div>
+        )}
+
+        {memoriesOpen && (
+          <div className="absolute inset-0 z-20 flex flex-col bg-card">
+            <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={() => setMemoriesOpen(false)}
+                title="返回聊天"
+                aria-label="返回聊天"
+              >
+                <ArrowDown className="h-3.5 w-3.5 rotate-180" />
+              </Button>
+              <span className="text-xs font-medium text-foreground">长期记忆</span>
+              <span className="text-2xs text-muted-foreground">{activeMemCount} 条生效</span>
+              <button
+                type="button"
+                onClick={() => void chrome.runtime.openOptionsPage()}
+                className="ml-auto text-2xs text-accent transition-colors hover:underline"
+              >
+                管理全部 →
+              </button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-y-auto p-2">
+              {memories.length === 0 ? (
+                <div className="px-2 py-3 text-center">
+                  <p className="text-2xs leading-4 text-muted-foreground">
+                    还没有长期记忆。直接对我说「记住：技术类书签按语言分类」，我就会把它记下来——以后每次整理都自动遵守。
+                  </p>
+                </div>
+              ) : (
+                <ul className="space-y-1.5">
+                  {memories.map((m) => (
+                    <li
+                      key={m.id}
+                      className={cn(
+                        'group flex items-start gap-2 rounded-sm border border-border px-2.5 py-2',
+                        m.enabled ? 'bg-card' : 'bg-muted/40 opacity-70',
+                      )}
+                    >
+                      <span
+                        className={cn(
+                          'mt-1 h-1.5 w-1.5 shrink-0 rounded-full',
+                          m.enabled ? 'bg-accent' : 'bg-muted-foreground/40',
+                        )}
+                        aria-hidden="true"
+                      />
+                      <div className="min-w-0 flex-1">
+                        <p className={cn('text-xs leading-4 break-words', m.enabled ? 'text-foreground' : 'text-muted-foreground line-through')}>
+                          {m.content}
+                        </p>
+                        <p className="mt-0.5 text-2xs text-muted-foreground/70">
+                          {CATEGORY_LABELS[m.category]} · {formatRelativeTime(m.updatedAt)}
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        title={m.enabled ? '停用' : '启用'}
+                        aria-label={m.enabled ? '停用这条记忆' : '启用这条记忆'}
+                        onClick={() => void toggleMemory(m.id)}
+                        className="shrink-0 rounded-xs p-1 text-2xs text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground"
+                      >
+                        {m.enabled ? '停用' : '启用'}
+                      </button>
+                      <button
+                        type="button"
+                        title="删除"
+                        aria-label="删除这条记忆"
+                        onClick={() => void removeMemory(m.id)}
+                        className="shrink-0 rounded-xs p-1 text-muted-foreground/50 transition-colors hover:bg-destructive/10 hover:text-destructive"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
           </div>
         )}
 

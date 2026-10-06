@@ -1,7 +1,8 @@
-import { BookMarked, Moon, Sun } from 'lucide-react';
+import { Moon, Sun } from 'lucide-react';
 import { useEffect } from 'react';
 import { applyTheme, initThemeSync, useThemeStore, watchSystemTheme } from '@/stores/themeStore';
 import { Button } from '@/components/ui/button';
+import { cn } from '@/lib/utils';
 
 /** 页面挂载时应用主题（每个入口调用一次） */
 export function ThemeProvider() {
@@ -45,16 +46,57 @@ export function ThemeToggle() {
   );
 }
 
-/** MarkAI 品牌标识（实色图标 + 品牌字，无渐变） */
-export function BrandMark({ size = 'sm' }: { size?: 'sm' | 'md' }) {
+/**
+ * MarkAI 官方品牌矢量图标（与插件图标 100% 一致）：
+ * 品牌 Indigo 圆角卡片外框 + 白色下垂书签（带底部 V 缺口）
+ */
+export function BrandIcon({
+  size = 24,
+  className = '',
+}: {
+  size?: number;
+  className?: string;
+}) {
   return (
-    <div className="flex items-center gap-1.5">
-      <span className="flex h-7 w-7 items-center justify-center rounded-md bg-accent text-accent-foreground">
-        <BookMarked className="h-4 w-4" strokeWidth={2.2} />
-      </span>
-      <span className={`font-semibold tracking-tight text-foreground ${size === 'sm' ? 'text-sm' : 'text-base'}`}>
-        Mark<span className="text-accent">AI</span>
-      </span>
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 512 512"
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+      className={className}
+      aria-hidden="true"
+    >
+      <rect x="85" y="43" width="342" height="426" rx="52" className="fill-accent" />
+      <path d="M224 139H352V235L288 168L224 235Z" fill="white" />
+    </svg>
+  );
+}
+
+/** MarkAI 统一品牌标识（官方图标 + 品牌字） */
+export function BrandMark({
+  size = 'sm',
+  subtitle,
+  className = '',
+}: {
+  size?: 'sm' | 'md' | 'lg';
+  subtitle?: string;
+  className?: string;
+}) {
+  const iconSize = size === 'lg' ? 30 : size === 'md' ? 24 : 20;
+  const textSize = size === 'lg' ? 'text-lg' : size === 'md' ? 'text-base' : 'text-sm';
+
+  return (
+    <div className={cn('flex items-center gap-2 select-none', className)}>
+      <BrandIcon size={iconSize} className="shrink-0 drop-shadow-xs" />
+      <div className="flex items-baseline gap-1.5">
+        <span className={cn('font-semibold tracking-tight text-foreground', textSize)}>
+          Mark<span className="text-accent">AI</span>
+        </span>
+        {subtitle && (
+          <span className="text-xs text-muted-foreground font-normal">{subtitle}</span>
+        )}
+      </div>
     </div>
   );
 }

@@ -7,6 +7,7 @@ import { CONFIG_STORAGE_KEY } from '@/stores/configStore';
 import { jCreate, jMove, jRemove, jUpdate, recordMoveBatch } from '@/lib/undo/mutations';
 import { buildDuplicateGroups, normalizeUrl, pickDuplicateKeeper, type DupeNode } from './dedupe';
 import { ensureOrderCheckpoint } from '@/lib/undo/recorder';
+import { addMemoryItem, deleteMemoryItem, getMemories, searchMemories } from './memory';
 
 /** 工具执行结果 */
 export interface ToolOutput {
@@ -1890,6 +1891,83 @@ async function deleteAllBookmarks(args: unknown): Promise<ToolOutput> {
   };
 }
 
+const rememberSchema = z.object({
+  content: z.string().min(1, '记忆内容不能为空'),
+  category: z.enum(['preference', 'rule', 'habit', 'custom']).optional(),
+});
+
+async function rememberTool(args: unknown): Promise<ToolOutput> {
+  const { content, category } = rememberSchema.parse(args);
+  const item = await addMemoryItem(content, category ?? 'preference');
+  return {
+    result: JSON.stringify({
+      success: true,
+      message: `已成功记录到长期记忆库`,
+      item: {
+        id: item.id,
+        content: item.content,
+        category: item.category,
+      },
+    }),
+  };
+}
+
+const recallMemoriesSchema = z.object({
+  query: z.string().optional(),
+});
+
+async function recallMemoriesTool(args: unknown): Promise<ToolOutput> {
+  const { query } = recallMemoriesSchema.parse(args);
+  const all = await getMemories();
+  const matched = query ? searchMemories(query, all) : all;
+  return {
+    result: JSON.stringify({
+      total: matched.length,
+      memories: matched.map((m) => ({
+        id: m.id,
+        category: m.category,
+        content: m.content,
+        enabled: m.enabled,
+      })),
+    }),
+  };
+}
+
+const forgetMemorySchema = z.object({
+  id: z.string().optional(),
+  query: z.string().optional(),
+});
+
+async function forgetMemoryTool(args: unknown): Promise<ToolOutput> {
+  const { id, query } = forgetMemorySchema.parse(args);
+  const all = await getMemories();
+  let targetId: string | undefined = id;
+  if (!targetId && query) {
+    const matched = searchMemories(query, all);
+    targetId = matched[0]?.id;
+  }
+
+  if (!targetId) {
+    return {
+      result: JSON.stringify({
+        success: false,
+        message: '未找到匹配的记忆项（请提供具体 id 或更准确的 query）',
+      }),
+    };
+  }
+
+  const target = all.find((m) => m.id === targetId);
+  const ok = await deleteMemoryItem(targetId);
+  return {
+    result: JSON.stringify({
+      success: ok,
+      message: ok
+        ? `已从长期记忆库删除：「${target?.content ?? targetId}」`
+        : `删除失败，记忆项不存在`,
+    }),
+  };
+}
+
 /** ── 工具注册表与调度 ── */
 
 interface ToolEntry {
@@ -1929,7 +2007,50 @@ const TOOL_MAP: Record<string, ToolEntry> = {
   sort_folder: { name: 'sort_folder', handler: sortFolder },
   propose_deletions: { name: 'propose_deletions', handler: proposeDeletions },
   delete_all_bookmarks: { name: 'delete_all_bookmarks', handler: deleteAllBookmarks },
+  remember: { name: 'remember', handler: rememberTool },
+  recall_memories: { name: 'recall_memories', handler: recallMemoriesTool },
+  forget_memory: { name: 'forget_memory', handler: forgetMemoryTool },
 };
+
+/** 智能参数规范化：容忍模型传参时常见的类型微差（字符串布尔、字符串数字、单字符串转数组等） */
+function normalizeToolArgs(args: unknown): unknown {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return args;
+  const obj = { ...(args as Record<string, unknown>) };
+
+  // 1. 布尔字段自动矫正字符串 "true"/"false"
+  const boolKeys = ['dryRun', 'background', 'recursive', 'checkReachable', 'foldOverflow', 'includeId'];
+  for (const k of boolKeys) {
+    if (k in obj && typeof obj[k] === 'string') {
+      const v = (obj[k] as string).trim().toLowerCase();
+      if (v === 'true') obj[k] = true;
+      else if (v === 'false') obj[k] = false;
+    }
+  }
+
+  // 2. 整数字段自动矫正数字字符串 "10" -> 10
+  const numKeys = ['limit', 'count', 'offset', 'maxItems', 'depth', 'beforeYear', 'minGroupSize', 'maxGroups', 'days', 'index'];
+  for (const k of numKeys) {
+    if (k in obj && typeof obj[k] === 'string') {
+      const v = Number((obj[k] as string).trim());
+      if (!Number.isNaN(v)) obj[k] = Math.round(v);
+    }
+  }
+
+  // 3. 数组字段自动矫正单字符串包裹
+  const arrKeys = ['ids', 'urls', 'folderIds'];
+  for (const k of arrKeys) {
+    if (k in obj && typeof obj[k] === 'string') {
+      const str = (obj[k] as string).trim();
+      if (str.includes(',')) {
+        obj[k] = str.split(',').map((s) => s.trim()).filter(Boolean);
+      } else if (str) {
+        obj[k] = [str];
+      }
+    }
+  }
+
+  return obj;
+}
 
 /** 执行工具调用（args 为 JSON 字符串；onProgress 供长任务上报进度） */
 export async function executeTool(
@@ -1939,12 +2060,13 @@ export async function executeTool(
 ): Promise<ToolOutput> {
   const entry = TOOL_MAP[name];
   if (!entry) throw new Error(`未知工具：${name}`);
-  let args: unknown;
+  let rawArgs: unknown;
   try {
-    args = argsJson ? JSON.parse(argsJson) : {};
+    rawArgs = argsJson ? JSON.parse(argsJson) : {};
   } catch {
     throw new Error('工具参数不是合法 JSON');
   }
+  const args = normalizeToolArgs(rawArgs);
   try {
     return await entry.handler(args, onProgress);
   } catch (e) {
@@ -2005,4 +2127,7 @@ export const TOOL_META: Record<string, { label: string }> = {
   propose_deletions: { label: '删除提议' },
   delete_all_bookmarks: { label: '删除全部' },
   cleanup_sweep: { label: '一键清理' },
+  remember: { label: '记录记忆' },
+  recall_memories: { label: '查询记忆' },
+  forget_memory: { label: '遗忘记忆' },
 };

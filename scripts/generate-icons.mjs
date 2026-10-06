@@ -1,9 +1,12 @@
 /**
  * MarkAI 插件图标生成器（纯 Node，无第三方依赖）
  *
- * 设计 v8：忠实用户认可的 SVG 构图 —— 圆角外框卡片 + 内部书签（顶部平直、底部 V 缺口）
- * 品牌色化：Indigo 圆角卡片（#4f46e5）+ 白色书签（对比度保证深/浅工具栏均可见）
- * 绘制：SDF（有符号距离场）+ 超采样抗锯齿，小尺寸下依然清晰
+ * 设计 v9：与 UI 品牌标（BrandMark）同一设计 —— Indigo 圆角方块 + 白色
+ * lucide `BookMarked` 书签字形（书本轮廓 + 内嵌书签带燕尾缺口）。
+ * 此前 v8 的「卡片 + V 缺口缎带」几何在 16px 下读不出语义，已废弃；
+ * 品牌标以 UI 里用户认可的那一版为准（见 theme-provider.tsx 的 BrandMark 注释）。
+ * 绘制：圆角方块走 SDF；字形按 lucide 原始路径（24 viewBox）拉直 + 胶囊描边
+ * （stroke-width 2 等比放大），超采样抗锯齿。
  * 运行：node scripts/generate-icons.mjs
  */
 import { deflateSync } from 'node:zlib';
@@ -57,7 +60,7 @@ function encodePNG(width, height, rgba) {
   return Buffer.concat([sig, chunk('IHDR', ihdr), chunk('IDAT', idat), chunk('IEND', Buffer.alloc(0))]);
 }
 
-/* ── SDF 几何（512 基准画布，中心 256,256；比例忠实参考 SVG viewBox 48） ── */
+/* ── SDF 基元（512 基准画布） ── */
 
 /** 圆角矩形 SDF（<0 在内部） */
 function sdRoundRect(px, py, cx, cy, hw, hh, r) {
@@ -68,41 +71,94 @@ function sdRoundRect(px, py, cx, cy, hw, hh, r) {
   return Math.hypot(ax, ay) + Math.min(Math.max(qx, qy), 0) - r;
 }
 
-/** 点是否在三角形内（同侧测试） */
-function sign(p, a, b) {
-  return (p[0] - b[0]) * (a[1] - b[1]) - (a[0] - b[0]) * (p[1] - b[1]);
-}
-function inTriangle(p, a, b, c) {
-  const d1 = sign(p, a, b);
-  const d2 = sign(p, b, c);
-  const d3 = sign(p, c, a);
-  const hasNeg = d1 < 0 || d2 < 0 || d3 < 0;
-  const hasPos = d1 > 0 || d2 > 0 || d3 > 0;
-  return !(hasNeg && hasPos);
+/** 点到线段距离（胶囊描边用） */
+function distToSeg(px, py, a, b) {
+  const abx = b[0] - a[0];
+  const aby = b[1] - a[1];
+  const apx = px - a[0];
+  const apy = py - a[1];
+  const len2 = abx * abx + aby * aby;
+  const t = len2 > 0 ? Math.max(0, Math.min(1, (apx * abx + apy * aby) / len2)) : 0;
+  return Math.hypot(px - (a[0] + t * abx), py - (a[1] + t * aby));
 }
 
-/* ── 几何常量（512 画布；SVG 坐标 ×10.67） ── */
-// 外框卡片：SVG (8,4)-(40,44)，圆角 4
-const CARD = { cx: 256, cy: 256, hw: 170.7, hh: 213.3, r: 42.7 };
-// 书签（SVG）：左 (21,22) 上 (21,4)-(33,4) 右 (33,22)，V 谷 (27,15.73)
-const BOOK = { x1: 224, y1: 139, x2: 352, y2: 234.7 };
-const NOTCH_TRI = [
-  [224, 234.7], // 左底
-  [352, 234.7], // 右底
-  [288, 167.8], // V 谷
-];
+/* ── 圆角方块（全幅，比例对齐 UI 的 rounded-md：半径 ≈ 边长 21%） ── */
+const MARGIN = 16; // 四周留 3% 安全边，避免抗锯齿边缘贴死画布
+const CARD = { cx: 256, cy: 256, hw: 256 - MARGIN, hh: 256 - MARGIN, r: 104 };
 
 const BG = [0x4f, 0x46, 0xe5]; // indigo-600（品牌 accent）
 const WHITE = [0xff, 0xff, 0xff];
 
+/* ── BookMarked 字形：lucide 原始路径（24 viewBox，stroke-width 2） ──
+   path1: M4 19.5 v-15 A2.5 2.5 0 0 1 6.5 2 H20 v20 H6.5 a2.5 2.5 0 0 1 0 -5 H20
+   path2: M10 2 v8 l3 -3 l3 3 V2                                              */
+
+/** 把 SVG 弧（端点表示）拉直成折线点（512 画布坐标） */
+function arcPoints(p0, p1, r, sweep, steps = 12) {
+  const dx = p1[0] - p0[0];
+  const dy = p1[1] - p0[1];
+  const d = Math.hypot(dx, dy);
+  const h = d / 2;
+  const l = Math.sqrt(Math.max(r * r - h * h, 0));
+  const mx = (p0[0] + p1[0]) / 2;
+  const my = (p0[1] + p1[1]) / 2;
+  // sweep=1（正角方向，y 向下屏坐标系里为顺时针）→ 圆心在弦左侧法向
+  const sign = sweep === 1 ? 1 : -1;
+  const cx = mx + (sign * l * -dy) / d;
+  const cy = my + (sign * l * dx) / d;
+  const a0 = Math.atan2(p0[1] - cy, p0[0] - cx);
+  let a1 = Math.atan2(p1[1] - cy, p1[0] - cx);
+  if (sweep === 1) {
+    while (a1 <= a0) a1 += Math.PI * 2;
+  } else {
+    while (a1 >= a0) a1 -= Math.PI * 2;
+  }
+  const pts = [];
+  for (let i = 1; i <= steps; i++) {
+    const a = a0 + ((a1 - a0) * i) / steps;
+    pts.push([cx + r * Math.cos(a), cy + r * Math.sin(a)]);
+  }
+  return pts;
+}
+
+/** 构建 BookMarked 字形的全部描边线段（512 画布坐标） */
+function buildGlyphSegments() {
+  // lucide 24 空间 → 512 画布：内容跨 (4..20, 2..22)，居中缩放
+  const S = 13; // 缩放：字形高 20×13=260，宽 16×13=208
+  const T = (x, y) => [256 + (x - 12) * S, 256 + (y - 12) * S];
+  const STROKE = 2 * S;
+
+  // path1：书本轮廓
+  const p = [];
+  p.push(T(4, 19.5)); // M
+  p.push(T(4, 4.5)); // v-15
+  p.push(...arcPoints(T(4, 4.5), T(6.5, 2), 2.5 * S, 1)); // A → 右折上角
+  p.push(T(20, 2)); // H20
+  p.push(T(20, 22)); // v20
+  p.push(T(6.5, 22)); // H6.5
+  p.push(...arcPoints(T(6.5, 22), T(6.5, 17), 2.5 * S, 1)); // a → 左侧书脊回弯
+  p.push(T(20, 17)); // H20
+
+  // path2：内嵌书签（燕尾缺口）
+  const q = [T(10, 2), T(10, 10), T(13, 7), T(16, 10), T(16, 2)];
+
+  const segs = [];
+  for (const line of [p, q]) {
+    for (let i = 0; i < line.length - 1; i++) segs.push([line[i], line[i + 1]]);
+  }
+  return { segs, halfStroke: STROKE / 2 };
+}
+
+const GLYPH = buildGlyphSegments();
+
 /** 采样一个点（512 坐标）：返回 [r,g,b,a] */
 function sample(px, py) {
-  // 外框卡片（Indigo）
+  // Indigo 圆角方块
   if (sdRoundRect(px, py, CARD.cx, CARD.cy, CARD.hw, CARD.hh, CARD.r) < 0) {
-    // 内部书签（白色）：矩形减去底部 V 缺口
-    const inRect = px >= BOOK.x1 && px <= BOOK.x2 && py >= BOOK.y1 && py <= BOOK.y2;
-    const inNotch = inTriangle([px, py], NOTCH_TRI[0], NOTCH_TRI[1], NOTCH_TRI[2]);
-    if (inRect && !inNotch) return [...WHITE, 255];
+    // 白色 BookMarked 描边字形：任一线段的胶囊距离内即命中（round cap/join）
+    for (const [a, b] of GLYPH.segs) {
+      if (distToSeg(px, py, a, b) <= GLYPH.halfStroke) return [...WHITE, 255];
+    }
     return [...BG, 255];
   }
   return [0, 0, 0, 0];

@@ -6,10 +6,10 @@
 
 ---
 
-## 🎬 宣传片（15 秒）
+## 🎬 宣传片
 
 <p align="center">
-  <img src="assets/promo.gif" alt="MarkAI 宣传片：一条线穿过输入、扫描、删除确认与品牌落版" width="720">
+  <img src="assets/promo.gif" alt="MarkAI 宣传片：归位——一张纸从书签堆折成目录与工作区，六条书签各归其位，品牌落版" width="720">
 </p>
 
 ---

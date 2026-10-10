@@ -1,15 +1,11 @@
 # MarkAI — 智能书签管家 Agent
 
-> 赋予 AI「最高管理权」的浏览器书签管理器。**自由对话的 Agent**：聊天即可让它整理、扫描、清理你的收藏夹，所有操作透明可见，删除永远需要你确认。
+> 一个的浏览器书签管理器插件。**自由对话的 Agent**：聊天即可让它整理、扫描、清理你的收藏夹，所有操作透明可见，删除永远需要你确认。
 
 基于 **WXT + React 19 + TypeScript + Tailwind CSS v4 + shadcn/ui + Zustand** 构建，兼容 Chrome / Edge（Manifest V3）。
 
----
-
-## 🎬 宣传片
-
 <p align="center">
-  <img src="assets/promo.gif" alt="MarkAI 宣传片：归位——一张纸从书签堆折成目录与工作区，六条书签各归其位，品牌落版" width="720">
+  <img src="assets/promo.gif" alt="宣传片" width="720">
 </p>
 
 ---
@@ -110,27 +106,6 @@ src/
 │ └── ...
 └── assets/main.css # Tailwind v4 设计 token（Slate + Indigo，禁阴影禁毛玻璃）
 ```
-
-
-
-## 说明
-
-- 图标为程序化生成的 MarkAI 品牌图标（Indigo 实底 + 白色书签，SDF 超采样抗锯齿，16px 依然可辨），可用 `node scripts/generate-icons.mjs` 重新生成；如需自绘替换 `public/icon/*.png`（16/32/48/96/128）
-- `check_urls` 会向所选书签站点发起 HEAD 请求（8s 超时，并发池 5、每批 50），用于实测死链
-- 聊天历史（多会话）、待删清单持久化在 `chrome.storage.local`，可在设置页一键清空（墓碑机制防其他窗口复活）
-- popup 的「去处理」会直达完整页的待删除清单（`page.html#deletions`）
-
-## 测试
-
-- 运行：`npx tsx tests/agent.test.ts`（共 **500 项**，覆盖 SSE 流式解析、工具循环与死循环检测、网络错误自动重连、URL 分类、批量创建、多会话墓碑/清空/远端合并、配置解析边界、任务端到端链路、大库工具（check_urls_bulk / auto_categorize / cleanup_sweep）、删除提议终态保护、拖拽落点与 Chrome `move(index)` 语义、路径解析不含元根、失败不虚报计数、上下文预算记账、**设计 token 一致性（断裂 token 不生成 CSS、浅/深两套 token 集合必须一致）**、**操作日志与撤销（含删除还原、顺序还原、并发批量移动/删除、跨窗口一致性、5000+ 节点规模）**）
-- 测试替身对 `chrome.bookmarks.move` 实现了 **Chromium 真实 index 语义**（同父向后移动 `index--`、`index == oldIndex || oldIndex + 1` 为空操作），因此"拖拽排序"类用例能被证伪；忽略 index 的替身会让这类测试永远为真
-- 撤销的验收不是"按钮能点"，而是替身里「一轮移动/重命名/新建/排序/复制 → 撤销 → 整棵树含顺序与操作前逐节点深比对一致」；每条新测试都用「回滚实现 → 必须变红」反证过
-- 反证（证明测试不是假绿）：`node scripts/falsify.mjs` —— 逐条把实现回滚成 bug 版本，要求对应测试**必须失败**；任何一条「回滚后仍然全绿」都会以非零码退出（当前 174 条，逐条回滚后必须变红才算通过）。⚠️ 运行期间会临时改写工作区源码，**不要与 `tsc`/测试/构建并行运行**
-- 本地验证：`npm run compile`（tsc）→ `npm test` → `npm run build`
-- 错误处理约定与"静默失败"清扫清单：[`docs/error-handling.md`](docs/error-handling.md)——什么时候必须如实上报、什么时候可以忽略，以及还剩哪些没逐处审计
-- 隐私与权限：数据存哪、什么会离开你的机器、如何清除见 [`docs/privacy.md`](docs/privacy.md)；
-  每个权限的用途与去掉的后果见 [`docs/permissions.md`](docs/permissions.md)
-  （后者的权限清单由测试与 `wxt.config.ts` 强制核对，改一边不改另一边会失败）
 
 ## 许可
 

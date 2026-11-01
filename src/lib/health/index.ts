@@ -1,6 +1,5 @@
 import { getPreset, resolveConfig } from '@/lib/providers';
 import type { AIConfig } from '@/lib/ai/types';
-import { CRASH_KEY } from '@/lib/health/fixes';
 import { diagnose } from '@/lib/health/diagnostics';
 import type { HealthReport, HealthSnapshot } from '@/lib/health/types';
 
@@ -140,10 +139,9 @@ export async function readSnapshot(): Promise<HealthSnapshot> {
     .then((p) => p.permissions ?? [])
     .catch(() => [] as string[]);
 
-  const store = await chrome.storage.local.get(['markai.undo', 'markai.organize.log', CRASH_KEY]).catch(() => ({}) as Record<string, unknown>);
+  const store = await chrome.storage.local.get(['markai.undo', 'markai.organize.log']).catch(() => ({}) as Record<string, unknown>);
   const undoPoints = (store as Record<string, unknown>)['markai.undo'];
   const logEntries = (store as Record<string, unknown>)['markai.organize.log'];
-  const crash = (store as Record<string, unknown>)[CRASH_KEY] as { count?: number } | undefined;
 
   let bookmarks: HealthSnapshot['bookmarks'] = null;
   try {
@@ -172,7 +170,6 @@ export async function readSnapshot(): Promise<HealthSnapshot> {
     bookmarks,
     storageBytes,
     lastAiError: lastAiErrorOf(logEntries),
-    crashCount: typeof crash?.count === 'number' ? crash.count : 0,
   };
 }
 

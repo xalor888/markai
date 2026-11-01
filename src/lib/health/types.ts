@@ -30,8 +30,7 @@ export type FixAction =
   | 'undo.drop-corrupt'
   | 'undo.trim-overflow'
   | 'log.mark-orphan'
-  | 'log.trim-limit'
-  | 'runtime.clear-crash-mark';
+  | 'log.trim-limit';
 
 export interface Issue {
   /** 稳定标识（`area.problem`），测试与去重都靠它 */
@@ -93,8 +92,6 @@ export interface HealthSnapshot {
   storageBytes: number | null;
   /** 上一次自动整理/分类留下的错误（来自整理记录） */
   lastAiError: string | null;
-  /** service worker 非正常退出次数（由 SW 自己在 storage 里累加） */
-  crashCount: number;
 }
 
 /** 诊断结论 */

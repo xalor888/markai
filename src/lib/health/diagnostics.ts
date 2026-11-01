@@ -295,20 +295,6 @@ export function diagnose(snapshot: HealthSnapshot): HealthReport {
     });
   }
 
-  /* ── 运行时 ── */
-  if (snapshot.crashCount > 0) {
-    issues.push({
-      id: 'runtime.crashed',
-      area: 'runtime',
-      severity: 'high',
-      title: `后台异常退出 ${snapshot.crashCount} 次`,
-      detail: '后台脚本被浏览器回收或崩溃时会留下这条标记；自动整理在重启后仍会继续。',
-      count: snapshot.crashCount,
-      fix: { action: 'runtime.clear-crash-mark', label: '清除这个标记' },
-      manualHint: '如果反复出现，导出一份诊断报告反馈。',
-    });
-  }
-
   // 展示顺序：先按严重度，再按 area（保证确定性）
   issues.sort((a, b) => SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] || a.id.localeCompare(b.id));
 

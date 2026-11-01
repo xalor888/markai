@@ -25,9 +25,6 @@ export interface FixResult {
 const CONFIG_KEY = 'markai.config';
 const UNDO_KEY = 'markai.undo';
 const LOG_KEY = 'markai.organize.log';
-/** service worker 非正常退出的计数（由 SW 启动时读取/累加，这里只负责清零） */
-export const CRASH_KEY = 'markai.runtime.crash';
-
 type Dict = Record<string, unknown>;
 
 async function readDict(key: string): Promise<Dict> {
@@ -200,11 +197,6 @@ async function markOrphanLog(): Promise<FixResult> {
 
 /* ────────────────────────── 运行时 ────────────────────────── */
 
-async function clearCrashMark(): Promise<FixResult> {
-  const ok = await writeDict(CRASH_KEY, { count: 0, clearedAt: Date.now() });
-  return ok ? { ok: true, detail: '已清除异常退出计数。再次出现时计数会重新开始。' } : { ok: false, detail: '写入失败。' };
-}
-
 /** 动作 → 实现（显式映射，缺一个会编译报错） */
 const FIXES: Record<FixAction, () => Promise<FixResult>> = {
   'config.fill-defaults': fillConfigDefaults,
@@ -214,7 +206,6 @@ const FIXES: Record<FixAction, () => Promise<FixResult>> = {
   'undo.trim-overflow': trimUndoOverflow,
   'log.mark-orphan': markOrphanLog,
   'log.trim-limit': trimLog,
-  'runtime.clear-crash-mark': clearCrashMark,
 };
 
 export async function runFix(action: FixAction): Promise<FixResult> {

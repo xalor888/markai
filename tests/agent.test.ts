@@ -43,7 +43,7 @@ import {
   STREAM_DRAFT_KEY,
 } from '../src/lib/ai/stream-draft';
 import { diagnose, formatDiagnosticReport, MAX_LOG_ENTRIES, MAX_UNDO_POINTS } from '../src/lib/health/diagnostics';
-import { runFix, runFixes, CRASH_KEY } from '../src/lib/health/fixes';
+import { runFix, runFixes } from '../src/lib/health/fixes';
 import type { HealthSnapshot } from '../src/lib/health/types';
 import { CHAT_WIDTH_MAX, CHAT_WIDTH_MAX_COMPACT, CHAT_WIDTH_MIN, clampChatWidth } from '../src/lib/chat-width';
 import {
@@ -10087,7 +10087,6 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       bookmarks: { total: 10, folders: 3, emptyFolders: 0, maxDepth: 3, orphaned: 0, duplicateNameGroups: 0 },
       storageBytes: 1024,
       lastAiError: null,
-      crashCount: 0,
       ...patch,
     });
 
@@ -10192,7 +10191,7 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
 
     ok('问题按严重度排序（严重的在前面，顺序稳定）', () => {
-      const r = diagnose(healthy({ permissions: [], crashCount: 1, storageBytes: 9 * 1024 * 1024 }));
+      const r = diagnose(healthy({ permissions: [], storageBytes: 9 * 1024 * 1024 }));
       const order = r.issues.map((i) => i.severity);
       const rank = { critical: 0, high: 1, medium: 2, low: 3 } as Record<string, number>;
       for (let i = 1; i < order.length; i++) {
@@ -10205,8 +10204,7 @@ async function okA(name: string, fn: () => Promise<void> | void) {
         healthy({
           configError: 'boom',
           permissions: [],
-          crashCount: 5,
-          storageBytes: 99 * 1024 * 1024,
+                    storageBytes: 99 * 1024 * 1024,
           undoPoints: [{ bad: 1 }, { bad: 2 }],
           lastAiError: 'x',
         }),
@@ -10322,10 +10320,10 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
 
     await okA('修复：多个动作去重执行，且一条失败不影响其他', async () => {
-      const calls = await runFixes(['runtime.clear-crash-mark', 'runtime.clear-crash-mark']);
+      // 用 trim-log 验证去重：它是幂等的（记录没超上限时什么都不改）
+      const calls = await runFixes(['log.trim-limit', 'log.trim-limit']);
       assert.equal(calls.length, 1, '同一动作只应执行一次');
-      const store = storageMap.get(CRASH_KEY) as { count: number } | undefined;
-      assert.equal(store?.count, 0, JSON.stringify(store));
+      assert.equal(calls[0]!.result.ok, true, calls[0]!.result.detail);
     });
 
     await okA('修复器：未知动作如实失败，不静默成功', async () => {
@@ -10819,8 +10817,7 @@ async function okA(name: string, fn: () => Promise<void> | void) {
         bookmarks: { total: 1, folders: 1, emptyFolders: 0, maxDepth: 1, orphaned: 0, duplicateNameGroups: 0 },
         storageBytes: 0,
         lastAiError: null,
-        crashCount: 0,
-      });
+        });
       assert.equal(
         report.issues.some((i) => i.id === 'undo.corrupt'),
         false,
@@ -10877,6 +10874,63 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     ok('没传全量列表时不猜孤儿（宁可不说，也不要编一个数字）', () => {
       const stats = analyzeBookmarks(tree);
       assert.equal(stats.orphaned, 0);
+    });
+  }
+
+  /* ══════════ T110: 健康检查不许读"没人写"的数据 ══════════ */
+  console.log('\n[T110] 健康检查的数据来源必须真实存在');
+  {
+    /*
+     * 缺陷（本轮的）：`diagnose` 里有一条「后台异常退出 N 次」，读的是 `markai.runtime.crash`，
+     * 但**没有任何地方写入这个 key**。于是这条检测永远不触发——
+     * 界面上看着像个真的监控，实际是死代码，而 0.2.37 的说明里还声称它能检测崩溃。
+     *
+     * 这类"读一份没人写的数据"很难靠肉眼发现，所以做成守卫：
+     * 扫 health 模块读取的 key，每个都必须在 health 目录之外真的被写过。
+     */
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const healthDir = join(root, 'src/lib/health');
+    const healthFiles = readdirSync(healthDir).filter((f) => f.endsWith('.ts'));
+
+    // health 模块读取的所有 markai.* key
+    const readKeys = new Set<string>();
+    for (const f of healthFiles) {
+      const src = readFileSync(join(healthDir, f), 'utf8');
+      for (const m of src.matchAll(/['"](markai\.[a-zA-Z0-9._]+)['"]/g)) readKeys.add(m[1]!);
+    }
+
+    /** 递归收集 src 下除 health 外的所有源码 */
+    const collect = (dir: string, out: string[] = []): string[] => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const full = join(dir, e.name);
+        if (e.isDirectory()) {
+          if (e.name === 'health' || e.name === 'node_modules') continue;
+          collect(full, out);
+        } else if (/\.(ts|tsx)$/.test(e.name)) {
+          out.push(full);
+        }
+      }
+      return out;
+    };
+    const otherSrc = collect(join(root, 'src'))
+      .map((f) => readFileSync(f, 'utf8'))
+      .join('\n');
+
+    ok('health 模块读到的每个 markai.* key 都在别处真的被写过', () => {
+      assert.ok(readKeys.size > 0, '没扫到任何 key，守卫本身失效了');
+      const unwritten = [...readKeys].filter((k) => !otherSrc.includes(`'${k}'`) && !otherSrc.includes(`"${k}"`));
+      assert.deepEqual(
+        unwritten,
+        [],
+        `这些 key 在 health 之外没有任何写入方，对应的检测永远不会触发：${JSON.stringify(unwritten)}`,
+      );
+    });
+
+    ok('已删除的崩溃计数不再出现（检测不到就别装作能检测）', () => {
+      assert.equal(otherSrc.includes('markai.runtime.crash'), false);
+      const healthSrc = healthFiles.map((f) => readFileSync(join(healthDir, f), 'utf8')).join('\n');
+      assert.equal(healthSrc.includes('crashCount'), false);
+      assert.equal(healthSrc.includes('runtime.crashed'), false);
     });
   }
 

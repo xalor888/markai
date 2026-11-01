@@ -28,7 +28,7 @@ import {
   Wrench,
   type LucideIcon,
 } from 'lucide-react';
-import { memo, useState, type ReactNode } from 'react';
+import { memo, useCallback, useState, type ReactNode } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { formatRelativeTime, safeJsonParse, truncate } from '@/lib/format';
@@ -162,27 +162,29 @@ export const MessageView = memo(function MessageView({
   isLast?: boolean;
   onRetry?: () => void;
 }) {
-  // 超长消息折叠（hooks 必须在提前 return 之前声明）
-  const [longExpanded, setLongExpanded] = useState(false);
-  const LONG_LIMIT = 800;
-  // 订阅书签树：文件夹重命名/移动后，历史消息的上下文路径实时更新（不能读 getState 一次性快照）
-  const roots = useBookmarkStore((s) => s.roots);
+  /**
+   * 上下文文件夹路径：**只订阅这一条消息自己那条路径的字符串**，不订阅整棵树。
+   *
+   * 原先订阅的是 `s.roots` 整个数组：每次 `loadTree()` 都是新引用，于是任何一次书签刷新
+   * 都会让**全部历史消息**重渲染——组件上的 `memo` 直接白付（它比的是 props，不是 store）。
+   * 改成 selector 返回字符串后，路径没变的消息拿到同一个值，memo 才真正生效。
+   */
+  const contextPath = useBookmarkStore(
+    useCallback(
+      (s) => {
+        const id = message.contextFolderId;
+        if (!id) return '';
+        return findNode(s.roots, id) ? resolveTitlePath(s.roots, id) : '';
+      },
+      [message.contextFolderId],
+    ),
+  );
 
   if (message.role === 'user') {
     const text = message.blocks
       .filter((b): b is { kind: 'text'; text: string } => b.kind === 'text')
       .map((b) => b.text)
       .join('');
-    // 上下文文件夹（发送时附带）：展示 Agent 视野，可点击在树中定位；文件夹已删则不显示
-    const contextPath = message.contextFolderId
-      ? findNode(roots, message.contextFolderId)
-        ? resolveTitlePath(roots, message.contextFolderId)
-        : ''
-      : '';
-    const showText =
-      text.length > LONG_LIMIT && !longExpanded
-        ? Array.from(text).slice(0, LONG_LIMIT).join('') + '…'
-        : text;
     return (
       <div className="flex justify-end">
         <div className="max-w-[85%]">
@@ -197,18 +199,9 @@ export const MessageView = memo(function MessageView({
               <span className="truncate">{contextPath}</span>
             </button>
           )}
-          <div className="select-text rounded-md rounded-br-xs bg-accent px-3 py-2 text-[13px] leading-5 whitespace-pre-wrap text-accent-foreground">
-            {showText}
+          <div className="select-text rounded-md rounded-br-xs bg-accent px-3 py-2 text-md whitespace-pre-wrap text-accent-foreground">
+            {text}
           </div>
-          {text.length > LONG_LIMIT && (
-            <button
-              type="button"
-              onClick={() => setLongExpanded((v) => !v)}
-              className="mt-0.5 ml-auto block text-2xs text-accent transition-colors hover:underline"
-            >
-              {longExpanded ? '收起' : '展开全文'}
-            </button>
-          )}
         </div>
       </div>
     );
@@ -232,66 +225,29 @@ export const MessageView = memo(function MessageView({
     <div className="group" title={formatRelativeTime(message.createdAt)}>
       <div className="space-y-1.5">
         {message.blocks.length === 0 && !streaming && (
-          <p className="text-[13px] leading-5 text-muted-foreground">（Agent 未返回内容，可点击 ↻ 重新生成）</p>
+          <p className="text-md text-muted-foreground">（Agent 未返回内容，可点击 ↻ 重新生成）</p>
         )}
-        {fullText.length > LONG_LIMIT && !longExpanded ? (
-          // 超长回复折叠：先显示截断文本，展开后渲染完整富文本；工具块始终可见（删除卡片需可交互）
-          <>
-            <div className="select-text rounded-md rounded-tl-xs border border-border bg-bubble px-3 py-2.5 text-[13px] leading-5 text-foreground">
-              <MarkdownText text={Array.from(fullText).slice(0, LONG_LIMIT).join('') + '…'} />
-              {streaming && <span className="stream-cursor ml-0.5 inline-block h-3.5 w-[2px] translate-y-0.5 bg-accent" />}
-            </div>
-            <button
-              type="button"
-              onClick={() => setLongExpanded(true)}
-              className="text-2xs text-accent transition-colors hover:underline"
-            >
-              展开全文
-            </button>
-            {message.blocks
-              .filter((b): b is { kind: 'tool'; record: ToolCallRecord } => b.kind === 'tool')
-              .map((b) =>
-                b.record.deletions && b.record.deletions.length > 0 ? (
-                  <DeletionCard key={b.record.id} proposals={b.record.deletions} />
-                ) : (
-                  <ToolChip key={b.record.id} record={b.record} />
-                ),
+        {message.blocks.map((block, i) => {
+          const isLast = i === message.blocks.length - 1;
+          return block.kind === 'text' ? (
+            <div
+              key={i}
+              className={cn(
+                // 助手气泡要与面板底色（bg-card）区分开：用 muted 底色而不是 card 半透明，
+                // 后者在 card 上几乎看不出差别，等于「有背景但没效果」
+                'select-text rounded-md rounded-tl-xs border border-border bg-bubble px-3 py-2.5 text-foreground',
+                !streaming && 'hover:border-border',
               )}
-          </>
-        ) : (
-          <>
-            {message.blocks.map((block, i) => {
-              const isLast = i === message.blocks.length - 1;
-              return block.kind === 'text' ? (
-                <div
-                  key={i}
-                  className={cn(
-                    // 助手气泡要与面板底色（bg-card）区分开：用 muted 底色而不是 card 半透明，
-                    // 后者在 card 上几乎看不出差别，等于「有背景但没效果」
-                    'select-text rounded-md rounded-tl-xs border border-border bg-bubble px-3 py-2.5 text-foreground',
-                    !streaming && 'hover:border-border',
-                  )}
-                >
-                  <MarkdownText text={block.text} />
-                  {streaming && isLast && block.text && <span className="stream-cursor ml-0.5 inline-block h-3.5 w-[2px] translate-y-0.5 bg-accent" />}
-                </div>
-              ) : block.record.deletions && block.record.deletions.length > 0 ? (
-                <DeletionCard key={block.record.id} proposals={block.record.deletions} />
-              ) : (
-                <ToolChip key={block.record.id} record={block.record} />
-              );
-            })}
-            {fullText.length > LONG_LIMIT && (
-              <button
-                type="button"
-                onClick={() => setLongExpanded(false)}
-                className="text-2xs text-accent transition-colors hover:underline"
-              >
-                收起
-              </button>
-            )}
-          </>
-        )}
+            >
+              <MarkdownText text={block.text} />
+              {streaming && isLast && block.text && <span className="stream-cursor ml-0.5 inline-block h-3.5 w-[2px] translate-y-0.5 bg-accent" />}
+            </div>
+          ) : block.record.deletions && block.record.deletions.length > 0 ? (
+            <DeletionCard key={block.record.id} proposals={block.record.deletions} />
+          ) : (
+            <ToolChip key={block.record.id} record={block.record} />
+          );
+        })}
         {/* 底部操作条（hover 显示）：复制整条回复（纯文本 / Markdown）/ 重试（仅最后一条） */}
         <div className="-ml-1 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
           {cleanCopy && (

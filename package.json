@@ -14,7 +14,8 @@
     "zip:firefox": "wxt zip -b firefox",
     "compile": "tsc --noEmit",
     "test": "tsx tests/agent.test.ts",
-    "postinstall": "wxt prepare"
+    "postinstall": "wxt prepare",
+    "test:e2e": "node scripts/e2e-smoke.mjs"
   },
   "dependencies": {
     "clsx": "^2.1.1",

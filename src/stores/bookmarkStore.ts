@@ -24,6 +24,14 @@ interface BookmarkState {
   contextMenu: TreeContextMenu | null;
   searchQuery: string; // 中栏搜索关键字（空 = 浏览模式）
   revealId: string | null; // 「在树中显示」目标（树组件消费后清空）
+  /**
+   * 用户「选文件夹」/「在树中定位」的次数（每次 +1，包括点的就是当前已选中的那个）。
+   *
+   * 为什么不能只比较 `selectedFolderId` 是否变化：默认选中的是「书签栏」，
+   * 用户在时间线里点它想看内容时，值没变 → 监听变化的那套逻辑不会触发 →
+   * 表现成「点了没反应」。计数是这类"同一目标再次点击"的唯一可靠信号。
+   */
+  folderSelectTick: number;
 
   loadTree: () => Promise<void>;
   selectFolder: (id: string | null) => void;
@@ -127,6 +135,7 @@ export const useBookmarkStore = create<BookmarkState>((set, get) => ({
   contextMenu: null,
   searchQuery: '',
   revealId: null,
+  folderSelectTick: 0,
 
   async loadTree() {
     if (get().loading) return;
@@ -179,7 +188,14 @@ export const useBookmarkStore = create<BookmarkState>((set, get) => ({
 
   selectFolder(id) {
     // 切换文件夹时清空多选（原生行为，避免跨目录残留选择）
-    set({ selectedFolderId: id, searchQuery: '', selectedBookmarkIds: [] });
+    set((s) => ({
+      selectedFolderId: id,
+      searchQuery: '',
+      selectedBookmarkIds: [],
+      // 即使点的是「已经选中的那个文件夹」也要 +1：时间线视图据此回到列表，
+      // 否则用户点了树里的文件夹却什么都没发生（T77 回归）。
+      folderSelectTick: s.folderSelectTick + 1,
+    }));
     schedulePersistUI();
   },
 
@@ -310,6 +326,8 @@ export const useBookmarkStore = create<BookmarkState>((set, get) => ({
         // 定位时清理多选（与 selectFolder 一致），避免多选条悬空
         selectedBookmarkIds: [],
         searchQuery: '',
+        // 定位也是一次"用户要求看某个文件夹"：时间线视图据此回到列表
+        folderSelectTick: s.folderSelectTick + 1,
         // 通知树组件滚动到目标节点
         revealId: id,
       };
@@ -330,13 +348,28 @@ export const useBookmarkStore = create<BookmarkState>((set, get) => ({
 /** 监听书签变更事件自动刷新树（去抖，页面级调用一次） */
 export function initBookmarkListeners(): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
+  /**
+   * 连续变更时退避刷新。
+   *
+   * 补整理 1 万条会持续产生 onMoved 事件；固定 300ms 去抖意味着整场要跑
+   * 约 66 次 `loadTree`（每次 = getTree 30ms + 一万节点重渲染），
+   * 实测主线程出现 200ms~1.3s 的长帧。
+   * 改成：短时间内连续触发超过 5 次就把间隔拉到 1.2 秒——
+   * 补整理期间树看着「没怎么动」是可接受的（有进度条），卡顿不可接受。
+   */
+  let burst = 0;
   const scheduleRefresh = () => {
+    burst += 1;
+    const delay = burst > 5 ? 1200 : 300;
     if (timer) clearTimeout(timer);
     timer = setTimeout(() => {
       timer = undefined;
+      burst = 0;
       void useBookmarkStore.getState().loadTree();
-    }, 300);
+    }, delay);
   };
+
+
 
   chrome.bookmarks.onCreated.addListener(scheduleRefresh);
   chrome.bookmarks.onRemoved.addListener(scheduleRefresh);
@@ -348,6 +381,7 @@ export function initBookmarkListeners(): () => void {
     chrome.bookmarks.onRemoved.removeListener(scheduleRefresh);
     chrome.bookmarks.onMoved.removeListener(scheduleRefresh);
     chrome.bookmarks.onChanged.removeListener(scheduleRefresh);
+    if (timer) clearTimeout(timer);
   };
 }
 

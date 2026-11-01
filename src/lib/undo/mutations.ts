@@ -24,13 +24,24 @@ export async function jCreate(opt: {
 export async function jMove(
   id: string,
   dest: { parentId: string; index?: number },
+  /**
+   * 已知的「移动前」信息（批量场景用）。
+   *
+   * 默认实现每次都 `getChildren(旧父目录)` 再 findIndex——单条无所谓，但批量移动 1 万条时
+   * 等于每条都把 1 万项读一遍并线性查找一次，整体退化成 O(n²)（实测 1 万条补整理要 402 秒）。
+   * 调用方若能自己维护一份父目录顺序（见 OrganizeContext.order），就把这两个值传进来。
+   */
+  known?: { fromParentId?: string; fromIndex?: number },
 ): Promise<chrome.bookmarks.BookmarkTreeNode> {
   // 旧父目录与下标必须在移动**之前**读取
   const nodes = await chrome.bookmarks.get(id).catch(() => []);
   const node = nodes[0];
   let fromParentId: string | undefined;
   let fromIndex = -1;
-  if (node?.parentId) {
+  if (known?.fromParentId !== undefined && known.fromIndex !== undefined && known.fromIndex >= 0) {
+    fromParentId = known.fromParentId;
+    fromIndex = known.fromIndex;
+  } else if (node?.parentId) {
     fromParentId = node.parentId;
     const siblings = await chrome.bookmarks.getChildren(node.parentId).catch(() => []);
     fromIndex = siblings.findIndex((s) => s.id === id);

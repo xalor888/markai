@@ -349,8 +349,22 @@ export function ConfigForm() {
     }
   };
 
+  // 未配置完成时给一条三步引导：装完扩展直接落在这里的新用户不知道"先填哪个"
+  const needsSetup = !config.baseUrl || !config.model || (preset?.needsKey === true && !config.apiKey);
+
   return (
     <div className="space-y-4">
+      {needsSetup && (
+        <div className="animate-fade-in rounded-lg border border-accent/30 bg-accent-muted/60 px-3.5 py-2.5">
+          <p className="text-xs font-medium text-accent">三步开始用</p>
+          <ol className="mt-1 space-y-0.5 text-2xs leading-4 text-muted-foreground">
+            <li>1. 选服务商（国内网络建议 DeepSeek 或 Moonshot Kimi；本地无成本用 Ollama）</li>
+            <li>2. 填 API Key（只存在这台电脑的浏览器里，请求由后台直连服务商）</li>
+            <li>3. 点下面的「测试连接」，通过后打开书签页（或浏览器侧边栏）就能开始整理</li>
+          </ol>
+        </div>
+      )}
+
       {/* ── AI 服务 ── */}
       <Section icon={Plug} title="AI 服务">
         <div className="space-y-3.5">
@@ -622,6 +636,50 @@ export function ConfigForm() {
               <option value="on">开启（先展示计划）</option>
             </Select>
           </Field>
+
+          <label className="flex cursor-pointer items-center gap-2.5 rounded-sm border border-border bg-muted/40 px-3 py-2.5 transition-colors hover:border-border hover:bg-muted">
+            <Checkbox
+              checked={config.autoOrganizeNew ?? true}
+              onCheckedChange={(v) => void update({ autoOrganizeNew: v })}
+              aria-label="新书签自动整理"
+            />
+            <span className="min-w-0 flex-1">
+              <span className="block text-xs font-medium text-foreground">新书签自动整理</span>
+              <span className="mt-0.5 block text-2xs leading-4 text-muted-foreground">
+                {config.autoOrganizeNew ?? true
+                  ? '收藏新页面后自动识别并归类：先认你已有的分类，认不出时才问 AI 或按域名归入「自动整理」。每一步都能在「整理记录」里看见并撤销。'
+                  : '关闭：新书签保持在你放的位置，需要手动整理（可随时在「整理记录」里补整理）'}
+              </span>
+            </span>
+          </label>
+
+          {/* 二级开关：只在上面的总开关打开时出现，避免调一个不生效的选项 */}
+          {(config.autoOrganizeNew ?? true) && (
+            <label className="ml-5 flex cursor-pointer items-center gap-2.5 rounded-sm border border-border bg-muted/20 px-3 py-2 transition-colors hover:bg-muted/40">
+              <Checkbox
+                checked={config.autoOrganizeAi ?? true}
+                onCheckedChange={(v) => void update({ autoOrganizeAi: v })}
+                aria-label="允许 AI 参与自动整理"
+              />
+              <span className="min-w-0 flex-1">
+                <span className="block text-xs font-medium text-foreground">允许 AI 参与自动整理</span>
+                <span className="mt-0.5 block text-2xs leading-4 text-muted-foreground">
+                  {config.autoOrganizeAi ?? true
+                    ? '认不出归属时会问一次模型（每次收藏最多一次请求）。关闭后只用本地规则与域名，不发任何网址。'
+                    : '已关闭：只用本地规则（站点名 / 类别匹配）与域名兜底，收藏动作不会向服务商发送网址。'}
+                </span>
+              </span>
+            </label>
+          )}
+
+          {/* 设置页里能直接看到「它都干了什么」，而不是让用户自己找顶栏入口 */}
+          <button
+            type="button"
+            onClick={() => void openUrl(chrome.runtime.getURL('page.html#organize'))}
+            className="self-start text-2xs text-accent transition-colors hover:underline"
+          >
+            查看整理记录与补整理 →
+          </button>
         </div>
       </Section>
 
@@ -878,7 +936,7 @@ export function ConfigForm() {
 export function OptionsHeader() {
   return (
     <header className="sticky top-0 z-10 border-b border-border bg-background/95 px-4 py-2.5 backdrop-blur-sm">
-      <div className="mx-auto flex max-w-lg items-center justify-between">
+      <div className="mx-auto flex max-w-2xl items-center justify-between">
         <BrandMark subtitle="设置" />
         <Badge variant="outline">书签管家 Agent</Badge>
       </div>

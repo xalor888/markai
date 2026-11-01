@@ -200,6 +200,10 @@ export function resolveConfig(saved?: Partial<AIConfig> | null): AIConfig {
     contextWindow,
     compressThreshold,
     autoCompress: saved?.autoCompress ?? false,
+    autoOrganizeNew: saved?.autoOrganizeNew ?? true,
+    // ⚠️ 这里是**白名单**：新增的配置字段必须同时加进来，否则 UI 存进去了、
+    // 后台读出来却被丢掉——设置看起来生效了，实际仍是默认值（T81 就是踩了这个坑）。
+    autoOrganizeAi: saved?.autoOrganizeAi ?? true,
     configVersion: CONFIG_VERSION,
   };
 }

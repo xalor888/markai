@@ -73,6 +73,17 @@ export interface AIConfig {
   compressThreshold?: number;
   /** 上下文自动压缩：达到阈值时压缩早期消息再继续 */
   autoCompress?: boolean;
+  /**
+   * 新书签自动整理：新建书签后自动分类归位（默认开启）。
+   * 关闭后只保留手动整理入口，不产生任何后台移动。
+   */
+  autoOrganizeNew?: boolean;
+  /**
+   * 自动整理是否允许调用 AI（默认 true）。
+   * 关掉后仍会走本地规则与域名兜底——功能不消失，只是「收藏一个书签」不再产生一次 API 调用。
+   * 面向两类用户：在意 token 成本的，以及不想让收藏动作把网址发给服务商的。
+   */
+  autoOrganizeAi?: boolean;
 }
 
 /** ── UI ↔ background 长连接 Port 协议（聊天流式代理） ── */
@@ -115,6 +126,9 @@ export type ChatOutbound =
 /** ── 一次性消息协议（runtime.sendMessage，用于非流式请求） ── */
 
 /** UI → background */
+import type { OrganizeLogEntry, OrganizeStats } from '@/lib/ai/organize-log';
+import type { OptOutEntry } from '@/lib/ai/organize-optout';
+
 export type OneShotInbound =
   | { type: 'ai:test'; config: AIConfig }
   | { type: 'ai:models'; config: AIConfig }
@@ -125,7 +139,25 @@ export type OneShotInbound =
   | { type: 'undo:list' }
   | { type: 'undo:apply'; id?: string }
   // 查询当前是否有 Agent 任务在跑（SW 活着才有准确状态；SW 已回收 = 任务已中断）
-  | { type: 'task:status' };
+  | { type: 'task:status' }
+  // 自动整理记录：回看 / 清空 / 重试失败的 / 补整理散落书签
+  | { type: 'organize:list' }
+  | { type: 'organize:clear' }
+  | { type: 'organize:retry'; id: string }
+  // 一次性重试所有「可重试」的失败记录（网络抖动后常有十几条）
+  | { type: 'organize:retry:all' }
+  | { type: 'organize:sweep' }
+  // 补整理可能持续几分钟（逐条走判定），必须能中途停
+  | { type: 'organize:sweep:cancel' }
+  // 查当前进度：面板被关掉再打开时用它把进度条恢复回来
+  | { type: 'organize:sweep:status' }
+  // 撤销某次自动整理（按日志条目的 runId 找对应撤销点）
+  | { type: 'organize:undo'; id: string }
+  // 自动整理的「站点免打扰」名单：查看 / 清空
+  | { type: 'organize:optout:list' }
+  | { type: 'organize:optout:clear' }
+  // 只恢复某一个站点（比「全部恢复」细一档）
+  | { type: 'organize:optout:remove'; domain: string };
 
 /** background → UI（sendResponse 载荷） */
 export type OneShotOutbound =
@@ -136,7 +168,25 @@ export type OneShotOutbound =
   | { type: 'seed:value'; text?: string; folderId?: string; notice?: string }
   | { type: 'undo:list:result'; points: UndoPoint[]; notice?: string; noticeAt?: number }
   | { type: 'undo:apply:result'; result: UndoApplyResult }
-  | { type: 'task:status:result'; running: boolean };
+  | { type: 'task:status:result'; running: boolean }
+  | { type: 'organize:list:result'; entries: OrganizeLogEntry[]; stats: OrganizeStats }
+  | { type: 'organize:clear:result'; ok: boolean }
+  | { type: 'organize:retry:result'; ok: boolean; detail: string }
+  | { type: 'organize:retry:all:result'; attempted: number; succeeded: number; failed: number; detail: string }
+  | { type: 'organize:sweep:result'; started: boolean; count: number; detail: string }
+  | { type: 'organize:sweep:cancel:result'; ok: boolean; detail: string }
+  | {
+      type: 'organize:sweep:status:result';
+      running: boolean;
+      done?: number;
+      total?: number;
+      moved?: number;
+      failed?: number;
+    }
+  | { type: 'organize:undo:result'; ok: boolean; detail: string }
+  | { type: 'organize:optout:list:result'; domains: OptOutEntry[] }
+  | { type: 'organize:optout:clear:result'; ok: boolean }
+  | { type: 'organize:optout:remove:result'; ok: boolean };
 
 /** contextMenus 种子指令（存储中转，侧边栏挂载时消费） */
 export interface SeedPayload {

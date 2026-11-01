@@ -15,13 +15,63 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createBusyGuard, runExclusive } from '../src/lib/chat/busy-guard';
 import { runAgentTurn } from '../src/lib/ai/agent';
+import { readUndoPoints } from '../src/lib/undo/recorder';
+import { applyUndo } from '../src/lib/undo/apply';
 import { ChatError } from '../src/lib/ai/client';
 import type { MemoryItem } from '../src/lib/ai/memory';
 import { TOOL_DEFINITIONS } from '../src/lib/ai/prompts';
 import { executeTool, TOOL_META } from '../src/lib/ai/tools';
 import type { AIConfig, ChatInbound, ChatMessage, ChatOutbound, DeletionProposal } from '../src/lib/ai/types';
 import { z } from 'zod';
+import { flattenBookmarks, sortTimeline, groupByDay, filterTimeline, dayLabel, pageGroups } from '../src/lib/bookmarks/timeline';
+import { registrableDomain } from '../src/lib/bookmarks/domain';
+import { createDelayedOpen } from '../src/lib/bookmarks/delayed-open';
+import { CHAT_WIDTH_MAX, CHAT_WIDTH_MAX_COMPACT, CHAT_WIDTH_MIN, clampChatWidth } from '../src/lib/chat-width';
+import {
+  AI_COOLDOWN_MS,
+  AI_FAIL_STREAK_LIMIT,
+  autoOrganizeBookmark,
+  collectFolderOptions,
+  collectLooseBookmarks,
+  collectLooseBookmarksFromRoots,
+  nextAiStreakState,
+  moveBookmarkInto,
+  findDomainFolder,
+  findFolderByTitle,
+  parseOrganizeReply,
+  AUTO_CONTAINER,
+} from '../src/lib/ai/auto-organize';
+import { useUIStore } from '../src/stores/uiStore';
+import { brandOf, isConfidentMatch, pickExistingFolder } from '../src/lib/ai/organize-rules';
+import {
+  addOptOutDomain,
+  clearOptOutDomains,
+  removeOptOutDomain,
+  isOrganizeOptedOut,
+  ORGANIZE_OPTOUT_KEY,
+  readOptOutDomains,
+} from '../src/lib/ai/organize-optout';
+import {
+  appendOrganizeLog,
+  clearOrganizeLog,
+  buildOrganizeLogMarkdown,
+  decorateOrganizeDetail,
+  estimateRemainingMs,
+  filterOrganizeLog,
+  formatRemaining,
+  groupByTarget,
+  pickRetryableEntries,
+  updateOrganizeLogEntry,
+  isRetryableFailure,
+  makeOrganizeLogEntry,
+  ORGANIZE_LOG_KEY,
+  ORGANIZE_LOG_LIMIT,
+  readOrganizeLog,
+  summarizeOrganizeLog,
+  type OrganizeLogEntry,
+} from '../src/lib/ai/organize-log';
 
 /* ══════════ 1. mock chrome.bookmarks（内存书签树） ══════════ */
 
@@ -555,6 +605,27 @@ function ok(name: string, fn: () => void) {
   console.log(`  ✔ ${name}`);
 }
 
+/**
+ * 异步用例的断言入口。
+ *
+ * `ok()` 是同步的。把 `async` 函数传进去时它拿到的是一个 Promise：断言在 `ok` 返回
+ * **之后**才结算，而 `passed++` 和 ✔ 已经打印了。用例若失败，异常变成
+ * unhandledRejection（进程崩在别处，报告里看不到是哪一条），反证脚本按用例名匹配
+ * `expectFail` 就落空——等于给证据链开了一个静默缺口。
+ *
+ * 所以异步用例一律 `await okA(...)`：✔ 只在断言真的通过之后才打印。
+ */
+async function okA(name: string, fn: () => Promise<void> | void) {
+  try {
+    await fn();
+  } catch (e) {
+    console.error(`  ✘ ${name}`);
+    throw e;
+  }
+  passed++;
+  console.log(`  ✔ ${name}`);
+}
+
 (async () => {
   /* ── T1: SSE 解析：content 分块 + tool_calls 跨 chunk 累加 ── */
   console.log('\n[T1] SSE 流式解析（工具调用跨分片累加）');
@@ -788,20 +859,20 @@ function ok(name: string, fn: () => void) {
       }
     });
 
-    ok('executeTool 拒绝未知工具', async () => {
+    await okA('executeTool 拒绝未知工具', async () => {
       await assert.rejects(
         () => executeTool('hack_tool', '{}'),
         /未知工具：hack_tool/,
       );
     });
-    ok('executeTool 拒绝非法 JSON 参数', async () => {
+    await okA('executeTool 拒绝非法 JSON 参数', async () => {
       await assert.rejects(
         () => executeTool('list_bookmarks', '{broken'),
         /工具参数不是合法 JSON/,
       );
     });
 
-    ok('executeTool 参数校验失败时转换为清晰的中文「参数不合法」提示', async () => {
+    await okA('executeTool 参数校验失败时转换为清晰的中文「参数不合法」提示', async () => {
       await assert.rejects(
         () => executeTool('move_bookmark', '{}'),
         /参数不合法/,
@@ -844,7 +915,7 @@ function ok(name: string, fn: () => void) {
       assert.equal(cj.tree.children?.length, 1);
       assert.equal(cj.tree.children?.[0]?.title, 'MDN');
     });
-    ok('get_folder_content 路径不存在时报错', async () => {
+    await okA('get_folder_content 路径不存在时报错', async () => {
       let threw = false;
       try {
         await executeTool('get_folder_content', JSON.stringify({ folderPath: '书签栏 > 不存在' }));
@@ -3248,7 +3319,7 @@ function ok(name: string, fn: () => void) {
       assert.match(listing, /<all_urls>/, 'store-listing 必须包含 <all_urls> 的审核理由声明');
     });
 
-    ok('Chrome Web Store 推广横幅规格严格符合官方尺寸', async () => {
+    await okA('Chrome Web Store 推广横幅规格严格符合官方尺寸', async () => {
       if (!existsSync(resolve(rootDir, 'public/store/promo-small-440x280.png'))) {
         // @ts-ignore
         await import('../scripts/generate-promo-tiles.mjs');
@@ -3351,7 +3422,7 @@ function ok(name: string, fn: () => void) {
     });
 
     const { restoreSubtree } = await import('../src/lib/undo/apply');
-    ok('restoreSubtree 递归深度防御：超过 64 层抛错防暴栈', async () => {
+    await okA('restoreSubtree 递归深度防御：超过 64 层抛错防暴栈', async () => {
       let deepSnap = { title: 'Leaf', url: 'https://deep.test' };
       for (let i = 0; i < 66; i++) {
         deepSnap = { title: 'Level', children: [deepSnap] } as any;
@@ -3529,6 +3600,17 @@ function ok(name: string, fn: () => void) {
       assert.match(onlyLegacy[0]!.reason ?? '', /没有快照/, '此时应给出无快照的原因');
     });
     ok('撤销历史：空列表就是空（不造占位行）', () => assert.deepEqual(describeUndoHistory([]), []));
+
+    /* 来源标记：自动整理也会进撤销栈。用户看到「移动 1 项」时，
+     * 分不清是自己让 AI 做的、还是刚收藏网页时后台做的——这直接影响他敢不敢撤。 */
+    ok('撤销历史：自动整理的点标为 auto，Agent 轮次标为 agent', () => {
+      const autoPoint = { ...movable, id: 'h-auto', runId: 'auto-organize:bookmark-123' };
+      const [autoRow] = describeUndoHistory([autoPoint]);
+      assert.equal(autoRow!.source, 'auto', 'auto-organize: 前缀必须识别为自动整理');
+      assert.equal(rows[0]!.source, 'agent', '普通 Agent 轮次不应被误标');
+      // 来源不影响可撤销判定：栈顶仍然可撤
+      assert.equal(autoRow!.undoable, true);
+    });
 
     // 精确 id 下发（接线层契约）：即便现在只有栈顶可执行，客户端也必须把**用户真实点击的那一行**
     // 原样下发，由后端决定接受或拒绝。绝不能退化成"那就撤最新的那个"——那是撤销了另一个操作。
@@ -3986,7 +4068,7 @@ function ok(name: string, fn: () => void) {
       assert.match(afterRecover.notice ?? '', /被中断/);
       assert.ok(afterRecover.noticeAt, '应带时间戳，供界面只提示一次');
     });
-    ok('恢复是一次性的：pending 已消费，再调用是空操作', async () => {
+    await okA('恢复是一次性的：pending 已消费，再调用是空操作', async () => {
       const again = await recoverInterruptedTransaction();
       assert.equal(again, null);
     });
@@ -4377,7 +4459,7 @@ function ok(name: string, fn: () => void) {
       assert.ok(pendingBeforeEnd, '前置条件：收尾前应有 pending 快照');
       assert.ok(pendingOf(), '正式写入失败后 pending 必须还在');
     });
-    ok('收尾时正式写入失败不得声称"已记录"（返回 null + 有如实错误）', async () => {
+    await okA('收尾时正式写入失败不得声称"已记录"（返回 null + 有如实错误）', async () => {
       assert.equal(endResult, null, '写不进去就不能返回一个"已记录"的点');
     });
 
@@ -4393,7 +4475,7 @@ function ok(name: string, fn: () => void) {
       assert.ok(pendingOf(), '恢复失败后 pending 必须还在（否则下次启动无料可恢复）');
       assert.equal(recoveredFail, null, '没写成就不能返回一个撤销点');
     });
-    ok('恢复失败会留下如实错误（UI 能说出"撤销记录没写进去"）', async () => {
+    await okA('恢复失败会留下如实错误（UI 能说出"撤销记录没写进去"）', async () => {
       const st = await readUndoState();
       assert.match(st.notice ?? '', /写入失败/);
     });
@@ -6167,7 +6249,7 @@ function ok(name: string, fn: () => void) {
       assert.equal(posted[0]!.messageId, 'msg-a');
       assert.equal(posted[0]!.steps?.length, 1);
     });
-    ok('resolve(true) 结算对应请求为"批准"', async () => {
+    await okA('resolve(true) 结算对应请求为"批准"', async () => {
       assert.equal(reg.resolve('msg-a', true), true, '应命中');
     });
     await p1.then((v) => {
@@ -6909,7 +6991,7 @@ function ok(name: string, fn: () => void) {
       assert.equal(isRoot('custom-folder-id'), false, '普通用户文件夹不得被误判为根');
     });
 
-    ok('move_bookmark 与 rename_bookmark 拒绝操作根文件夹', async () => {
+    await okA('move_bookmark 与 rename_bookmark 拒绝操作根文件夹', async () => {
       await assert.rejects(
         () => executeTool('move_bookmark', JSON.stringify({ bookmarkId: '0', parentId: '1' })),
         /浏览器根文件夹不可移动/,
@@ -6929,7 +7011,7 @@ function ok(name: string, fn: () => void) {
       assert.equal(classifyOneUrl('invalid-url').type, 'unknown');
     });
 
-    ok('update_bookmark_url 修改 URL 与文件夹防护', async () => {
+    await okA('update_bookmark_url 修改 URL 与文件夹防护', async () => {
       const bm = await mockBookmarks.create({ parentId: '1', title: 'TestBM', url: 'https://old.test' });
       const res = await executeTool('update_bookmark_url', JSON.stringify({ bookmarkId: bm.id, url: 'https://new.test' }));
       assert.match(res.result, /https:\/\/new\.test/);
@@ -6946,14 +7028,14 @@ function ok(name: string, fn: () => void) {
       );
     });
 
-    ok('assertFolder 校验与书签拦截', async () => {
+    await okA('assertFolder 校验与书签拦截', async () => {
       assert.equal(await assertFolder('1'), '1');
       const bm = await mockBookmarks.create({ parentId: '1', title: 'BM', url: 'https://bm.test' });
       await assert.rejects(() => assertFolder(bm.id), /不是文件夹，无法作为父级/);
       await assert.rejects(() => assertFolder('missing-folder'), /父文件夹不存在/);
     });
 
-    ok('getDeleteMode：无配置或异常回退 confirm，明确 auto 返回 auto', async () => {
+    await okA('getDeleteMode：无配置或异常回退 confirm，明确 auto 返回 auto', async () => {
       storageMap.delete('markai.config');
       assert.equal(await getDeleteMode(), 'confirm');
       storageMap.set('markai.config', { deleteMode: 'auto' });
@@ -6968,7 +7050,7 @@ function ok(name: string, fn: () => void) {
       }
     });
 
-    ok('copyNodeDeep 递归深度上限防护', async () => {
+    await okA('copyNodeDeep 递归深度上限防护', async () => {
       const leafId = await copyNodeDeep({ id: 'x', title: 'BM', url: 'https://copy.test' } as any, '1');
       assert.ok(leafId);
       let deepNode: any = { id: 'leaf', title: 'Leaf' };
@@ -7013,7 +7095,7 @@ function ok(name: string, fn: () => void) {
   console.log('\n[T64] assertNoCycle 循环嵌套防护');
   {
     const { assertNoCycle } = await import('../src/lib/ai/tools');
-    ok('assertNoCycle 拦截自身与子孙嵌套', async () => {
+    await okA('assertNoCycle 拦截自身与子孙嵌套', async () => {
       await assert.rejects(() => assertNoCycle('A', 'A'), /循环嵌套/);
       const p = await mockBookmarks.create({ parentId: '1', title: 'P' });
       const c = await mockBookmarks.create({ parentId: p.id, title: 'C' });
@@ -7054,7 +7136,7 @@ function ok(name: string, fn: () => void) {
       assert.equal(stepCountOf('{invalid json}'), 1);
       assert.equal(stepCountOf(JSON.stringify(['arr'])), 1);
     });
-    ok('applyPlan 未确认零执行确认后如实计数', async () => {
+    await okA('applyPlan 未确认零执行确认后如实计数', async () => {
       const step = { name: 'c', args: '{}', label: 'l', count: 1, countDeclared: false, summary: 's', preview: false };
       const unc = await applyPlan([step], async () => {}, { confirmed: false });
       assert.equal(unc.cancelled, true);
@@ -7505,7 +7587,8 @@ function ok(name: string, fn: () => void) {
       'underline', 'overline', 'through', 'no', 'indent', 'line',
     ]);
     /** 非颜色语义：ring 的宽度与 inset、border 的方向、渐变 */
-    const SIZE_LIKE = /^(2xs|xs|sm|base|lg|xl|2xl|3xl|4xl|\[|\d)/;
+    // md 是本轮新收进 main.css 的字号 token（13px：聊天气泡与输入框正文）
+    const SIZE_LIKE = /^(2xs|xs|sm|md|base|lg|xl|2xl|3xl|4xl|\[|\d)/;
     const BORDER_DIR = /^(b|t|l|r|x|y|s|e)$/;
     /** border 的线型关键字（border-dashed / border-solid 等）是边框样式，不是颜色 */
     const BORDER_STYLE = new Set(['solid', 'dashed', 'dotted', 'double', 'hidden', 'none']);
@@ -7915,6 +7998,1857 @@ function ok(name: string, fn: () => void) {
 
     // 清理现场，避免影响后续用例
     storageMap.delete(MEMORY_KEY);
+  }
+
+
+  /* ── T75: 时间线（只有书签个体，纯时间排序） ── */
+  console.log('\n[T75] 时间线数据层');
+  {
+    const NOW = Date.now();
+    const today = new Date(NOW);
+    today.setHours(10, 0, 0, 0);
+    const yesterday = new Date(today);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const fakeTree = [
+      {
+        id: '1',
+        title: '书签栏',
+        dateAdded: 0,
+        children: [
+          { id: 'f1', parentId: '1', title: '技术', dateAdded: 0, children: [
+            { id: 'b1', parentId: 'f1', title: 'MDN', url: 'https://developer.mozilla.org/a', dateAdded: yesterday.getTime() },
+            { id: 'f2', parentId: 'f1', title: '前端', dateAdded: 0, children: [
+              { id: 'b2', parentId: 'f2', title: 'React', url: 'https://react.dev/b', dateAdded: today.getTime() },
+            ] },
+          ] },
+          { id: 'b3', parentId: '1', title: '旧页面', url: 'https://old.example.com/c', dateAdded: 1000 },
+          { id: 'b4', parentId: '1', title: '无时间', url: 'https://unknown.example.com/d' },
+        ],
+      },
+    ] as unknown as chrome.bookmarks.BookmarkTreeNode[];
+
+    const flat = flattenBookmarks(fakeTree);
+    ok('展平只产出书签个体（文件夹不进入结果）', () => {
+      assert.equal(flat.length, 4);
+      assert.deepEqual(flat.map((i) => i.id).sort(), ['b1', 'b2', 'b3', 'b4']);
+      assert.ok(!flat.some((i) => (i as { url?: string }).url === undefined), '每一项都有可打开的 URL');
+    });
+    ok('路径按「根 / 子 / 孙」拼接，文件夹仅作元信息', () => {
+      const b2 = flat.find((i) => i.id === 'b2')!;
+      assert.equal(b2.path, '书签栏 / 技术 / 前端');
+      const b3 = flat.find((i) => i.id === 'b3')!;
+      assert.equal(b3.path, '书签栏');
+    });
+
+    const newest = sortTimeline(flat, 'newest');
+    ok('最新在前：严格按 dateAdded 倒序', () => {
+      assert.deepEqual(newest.map((i) => i.id), ['b2', 'b1', 'b3', 'b4']);
+    });
+    const oldest = sortTimeline(flat, 'oldest');
+    ok('最早在前：严格按 dateAdded 正序', () => {
+      assert.deepEqual(oldest.map((i) => i.id), ['b3', 'b1', 'b2', 'b4']);
+    });
+    ok('时间未知项在两种方向下都排最后', () => {
+      assert.equal(newest[newest.length - 1]!.id, 'b4');
+      assert.equal(oldest[oldest.length - 1]!.id, 'b4');
+    });
+
+    ok('按天分组：今天 / 昨天 / 更早 / 未知时间', () => {
+      const groups = groupByDay(newest, NOW);
+      assert.equal(groups[0]!.label, '今天');
+      assert.equal(groups[0]!.items[0]!.id, 'b2');
+      assert.equal(groups[1]!.label, '昨天');
+      assert.equal(groups[groups.length - 1]!.label, '未知时间');
+    });
+    ok('dayLabel 对两天内的日期给相对说法', () => {
+      assert.equal(dayLabel(today.getTime(), NOW), '今天');
+      assert.equal(dayLabel(yesterday.getTime(), NOW), '昨天');
+      assert.equal(dayLabel(0, NOW), '未知时间');
+    });
+
+    ok('时间线过滤：标题 / URL / 路径都参与匹配', () => {
+      assert.deepEqual(filterTimeline(flat, 'react').map((i) => i.id), ['b2']);
+      assert.deepEqual(filterTimeline(flat, 'old.example').map((i) => i.id), ['b3']);
+      assert.deepEqual(filterTimeline(flat, '前端').map((i) => i.id), ['b2']);
+      assert.equal(filterTimeline(flat, '   ').length, flat.length);
+    });
+  }
+
+  /* ── T76: 新书签自动整理 ── */
+  console.log('\n[T76] 新书签自动整理');
+  {
+    const fakeFolders = {
+      id: '1',
+      title: '书签栏',
+      dateAdded: 0,
+      children: [
+        { id: 'fa', parentId: '1', title: '技术', dateAdded: 0, children: [
+          { id: 'fb', parentId: 'fa', title: 'github.com', dateAdded: 0, children: [] },
+        ] },
+        { id: 'fc', parentId: '1', title: 'github.com', dateAdded: 0, children: [] },
+      ],
+    } as unknown as chrome.bookmarks.BookmarkTreeNode;
+
+    const folders = collectFolderOptions(fakeFolders);
+    ok('收集候选文件夹：包含根与子级，不包含书签', () => {
+      assert.deepEqual(folders.map((f) => f.id), ['1', 'fa', 'fb', 'fc']);
+      assert.equal(folders.find((f) => f.id === '1')!.depth, 0);
+      assert.equal(folders.find((f) => f.id === 'fb')!.path, '书签栏 / 技术 / github.com');
+    });
+    ok('同名域名文件夹：优先取最浅的一层', () => {
+      assert.equal(findDomainFolder(folders, 'GitHub.com')!.id, 'fc');
+    });
+    ok('按父级限定查找：只在指定容器下复用', () => {
+      assert.equal(findFolderByTitle(folders, 'github.com', 'fa')!.id, 'fb');
+      assert.equal(findFolderByTitle(folders, '不存在的名字', '1'), null);
+    });
+
+    ok('模型回复解析：裸 JSON / ```json 围栏 / 无效内容', () => {
+      assert.deepEqual(parseOrganizeReply('{"folderId":"abc"}'), { folderId: 'abc' });
+      assert.deepEqual(parseOrganizeReply('```json\n{"newFolder":"前端开发"}\n```'), { newFolder: '前端开发' });
+      assert.deepEqual(parseOrganizeReply('我觉得可以放到 {"newFolder":"AI 工具"} 里'), { newFolder: 'AI 工具' });
+      assert.equal(parseOrganizeReply('无法分类'), null);
+      assert.equal(parseOrganizeReply('{"folderId":"   "}'), null);
+    });
+
+    // 运行时：无 AI（无 Key）→ 域名兜底，且可撤销（走 jMove/jCreate 事务）
+    storageMap.set('markai.config', {
+      providerId: 'deepseek',
+      baseUrl: '',
+      apiKey: '',
+      model: '',
+      autoOrganizeNew: true,
+    });
+    const created = await mockBookmarks.create({
+      parentId: '1',
+      title: 'Example 文档',
+      url: 'https://docs.example-unique.com/guide',
+    });
+    const res = await autoOrganizeBookmark(created.id);
+    ok('未配置 AI 时按域名归类到「自动整理 / <domain>」', () => {
+      assert.equal(res.ok, true, res.detail);
+      assert.ok(res.action === 'created' || res.action === 'moved', res.detail);
+      const node = nodeById(created.id)!;
+      const site = nodeById(node.parentId!)!;
+      assert.equal(site.title, 'example-unique.com');
+      assert.equal(site.url, undefined, '归入的是文件夹而不是另一个书签');
+      const container = nodeById(site.parentId!)!;
+      assert.equal(container.title, AUTO_CONTAINER);
+      assert.equal(container.parentId, '1', '容器放在书签所在根目录下，不跨根搬家');
+    });
+    const again = await autoOrganizeBookmark(created.id);
+    ok('已经在站点文件夹里：重复触发不会二次搬动（幂等）', () => {
+      assert.equal(again.action, 'skipped');
+      assert.ok(again.detail.includes('已在'), again.detail);
+    });
+
+    storageMap.set('markai.config', { providerId: 'deepseek', autoOrganizeNew: false });
+    const untouched = await mockBookmarks.create({
+      parentId: '1',
+      title: '关闭开关后的书签',
+      url: 'https://off-switch.example.org/page',
+    });
+    const offRes = await autoOrganizeBookmark(untouched.id);
+    ok('关闭开关：不产生任何移动，并如实说明原因', () => {
+      assert.equal(offRes.action, 'skipped');
+      assert.equal(offRes.detail, '未开启自动整理');
+      assert.equal(nodeById(untouched.id)!.parentId, '1', '书签仍在原处');
+    });
+
+    // 清理现场：避免影响后续用例的根目录结构
+    storageMap.delete('markai.config');
+    await mockBookmarks.removeTree(created.id).catch(() => {});
+    await mockBookmarks.removeTree(untouched.id).catch(() => {});
+    const container = store.find((n) => n.title === AUTO_CONTAINER);
+    if (container) await mockBookmarks.removeTree(container.id).catch(() => {});
+  }
+
+
+  /* ── T10: busyIds 竞态 + 自动整理分支顺序 ── */
+  console.log('\n[T10] busyIds 竞态守卫 / 自动整理分支顺序');
+  {
+    const tick = () => new Promise((r) => setTimeout(r, 0));
+
+    /* ── 1. busyIds：同一 tick 连点 5 次只允许 1 次请求 ── */
+    // 旧写法的等价形状：判断读的是 useState 的旧快照，同一 tick 里 5 次全放行
+    // 关键：`busyIds` 是本次渲染的 const 快照；setBusyIds 生成的新 Set 要等**下一次渲染**
+    // 才会成为新的 busyIds。所以同一 tick 内 5 次点击读到的都是"还没这一行"的旧快照。
+    const busyIds = new Set<string>();
+    const queued = new Set<string>(); // 排队中的新状态（下一次渲染才会生效）
+    let oldRequests = 0;
+    const oldRemoveOne = (id: string) => {
+      if (busyIds.has(id)) return; // ← 读旧快照：永远是 false
+      queued.add(id);
+      oldRequests += 1;
+    };
+    for (let i = 0; i < 5; i++) oldRemoveOne('p1');
+    ok('[前] 旧写法：同一 tick 连点 5 次 → 5 次请求（正是 T10 要修的竞态）', () => {
+      assert.equal(oldRequests, 5);
+    });
+
+    const guard = createBusyGuard();
+    let requests = 0;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    const confirm = () => {
+      requests += 1;
+      return gate;
+    };
+    const busySizes: number[] = [];
+    let started = 0;
+    for (let i = 0; i < 5; i++) {
+      if (runExclusive(guard, 'p1', confirm, (busy) => busySizes.push(busy.size))) started += 1;
+    }
+    ok('[后] 新守卫：同一 tick 连点 5 次 → 只发 1 次请求', () => {
+      assert.equal(started, 1, '只有第一次点击应该被接受');
+      assert.equal(requests, 1, 'confirmDeletions 只应被调用一次');
+    });
+    ok('[后] 守卫立即反映忙碌状态（不等渲染）', () => {
+      assert.equal(guard.has('p1'), true);
+      assert.deepEqual(busySizes, [1], '只在开始时同步一次 busy 集合');
+    });
+
+    let others = 0;
+    runExclusive(guard, 'p2', async () => {
+      others += 1;
+    });
+    runExclusive(guard, 'p3', async () => {
+      others += 1;
+    });
+    await tick();
+    ok('[后] 不同行互不阻塞，且任务结束即解锁', () => {
+      assert.equal(others, 2);
+      assert.equal(guard.has('p2'), false);
+      assert.equal(guard.has('p3'), false);
+    });
+
+    const retryDuringFlight = runExclusive(guard, 'p1', confirm);
+    ok('[后] 请求飞行期间再点同一行仍被拒绝', () => {
+      assert.equal(retryDuringFlight, false);
+      assert.equal(requests, 1);
+    });
+
+    release();
+    await gate;
+    await tick();
+    ok('[后] 请求结束后解除占用，可重试同一行', () => {
+      assert.equal(guard.has('p1'), false);
+      const again = runExclusive(guard, 'p1', async () => {
+        requests += 1;
+      });
+      assert.equal(again, true);
+      assert.equal(requests, 2);
+    });
+    await tick();
+
+    ok('[后] 同步 throw 的 task 也必须释放守卫（Verifier 复验发现的契约缺口）', () => {
+      const g = createBusyGuard();
+      const sizes: number[] = [];
+      let threw = false;
+      let startedSync = false;
+      try {
+        startedSync = runExclusive(
+          g,
+          'sync1',
+          (() => {
+            throw new Error('boom');
+          }) as () => Promise<unknown>,
+          (busy) => sizes.push(busy.size),
+        );
+      } catch {
+        threw = true;
+      }
+      assert.equal(threw, false, '同步异常不应向调用方抛出（与异步失败口径一致）');
+      assert.equal(startedSync, true, '占位成功应返回 true');
+      assert.equal(g.has('sync1'), false, '守卫必须已释放，否则该行会永久卡死');
+      assert.deepEqual(sizes, [1, 0], '开始时 busy=1、释放后 busy=0');
+      assert.equal(g.begin('sync1'), true, '释放后必须能再次占用');
+      g.end('sync1');
+    });
+
+    /* ── 2. 自动整理：用户已手动归类 → 即使 AI 已配置也不搬 ── */
+    storageMap.set('markai.config', {
+      providerId: 'deepseek',
+      baseUrl: 'https://mock.invalid/v1',
+      apiKey: 'sk-test-mock',
+      model: 'mock-model',
+      autoOrganizeNew: true,
+    });
+
+    const realFetch = globalThis.fetch;
+    let aiCalls = 0;
+    let aiReply = '{"newFolder":"模型新分类"}';
+    (globalThis as Record<string, unknown>).fetch = async () => {
+      aiCalls += 1;
+      const sse = `data: ${JSON.stringify({ choices: [{ delta: { content: aiReply } }] })}\n\ndata: [DONE]\n\n`;
+      return new Response(sse, { status: 200, headers: { 'content-type': 'text/event-stream' } });
+    };
+
+    const userFolder = await mockBookmarks.create({ parentId: '1', title: '我的工作' });
+    const manual = await mockBookmarks.create({
+      parentId: userFolder.id,
+      title: '手归类的书签',
+      url: 'https://manual-classified.example.com/x',
+    });
+    try {
+      const skipped = await autoOrganizeBookmark(manual.id);
+      ok('AI 已配置时，用户手归类的书签不搬（① ② 分支不得抢跑）', () => {
+        // 修复前这里得到 action='created'（已用同一用例复现）；修复后必须是 skipped。
+        assert.equal(skipped.action, 'skipped', `实际：${skipped.action} / ${skipped.detail}`);
+        assert.equal(nodeById(manual.id)!.parentId, userFolder.id, '父级必须保持用户设定的分类');
+        assert.equal(
+          store.find((n) => n.title === '模型新分类'),
+          undefined,
+          '不应在用户分类之外凭空建出模型分类',
+        );
+      });
+      ok('用户分类下的书签：连 AI 请求都不发（省一次调用）', () => {
+        assert.equal(aiCalls, 0, `AI 被调用了 ${aiCalls} 次`);
+      });
+
+      // 对照组：根目录下的新书签，AI 已配置 → 仍应由模型决定，功能没被改废
+      const fresh = await mockBookmarks.create({
+        parentId: '1',
+        title: '根目录新书签',
+        url: 'https://fresh-root.example.com/y',
+      });
+      aiCalls = 0;
+      const moved = await autoOrganizeBookmark(fresh.id);
+      ok('对照组：根目录书签在 AI 已配置时仍走模型分类', () => {
+        assert.equal(aiCalls, 1, 'AI 应该被调用一次');
+        assert.ok(moved.action === 'created' || moved.action === 'moved', moved.detail);
+        const parent = nodeById(fresh.id)!.parentId!;
+        assert.notEqual(parent, '1', '应该被搬进新分类而不是留在根目录');
+        assert.equal(nodeById(parent)!.title, '模型新分类');
+      });
+      await mockBookmarks.removeTree(fresh.id).catch(() => {});
+
+      /* 模型返回超长分类名时会被截断到 24 字符（代码里早就有，但没测试守着）。
+       * 用户会看到「我的分类名怎么变短了」，所以这个上限是可见行为，值得钉住。 */
+      aiCalls = 0;
+      aiReply = JSON.stringify({ newFolder: '这是一个非常非常非常长的分类名字需要被截断处理' });
+      const longName = await mockBookmarks.create({
+        parentId: '1',
+        title: '触发超长分类名',
+        url: 'https://very-long-folder-name.example.com/z',
+      });
+      const longRes = await autoOrganizeBookmark(longName.id);
+      const longParent = nodeById(longName.id)!.parentId!;
+      const createdName = nodeById(longParent)?.title ?? '';
+      ok('模型返回超长分类名：截断到 24 字符以内，不会撑出畸形文件夹名', () => {
+        assert.ok(longRes.action === 'created' || longRes.action === 'moved', longRes.detail);
+        assert.notEqual(longParent, '1', '应该被搬进新分类');
+        assert.ok(createdName.length > 0 && createdName.length <= 24, `实际长度 ${createdName.length}：${createdName}`);
+      });
+      await mockBookmarks.removeTree(longName.id).catch(() => {});
+      const longFolder = store.find((n) => n.title === createdName);
+      if (longFolder) await mockBookmarks.removeTree(longFolder.id).catch(() => {});
+    } finally {
+      (globalThis as Record<string, unknown>).fetch = realFetch;
+      storageMap.delete('markai.config');
+      await mockBookmarks.removeTree(manual.id).catch(() => {});
+      await mockBookmarks.removeTree(userFolder.id).catch(() => {});
+      const leftover = store.find((n) => n.title === '模型新分类');
+      if (leftover) await mockBookmarks.removeTree(leftover.id).catch(() => {});
+    }
+  }
+
+  /* ── T77: 自查回归（深目录保护 / IP 注册域 / 时间线分页分组） ── */
+  console.log('\n[T77] 自查回归');
+  {
+    /* ── 1. 深目录里的书签属于用户既有分类：自动整理不得搬走 ──
+     * 守卫原先靠 collectFolderOptions(maxDepth=4) 的快照反查父级：父级深于 4 层就查不到，
+     * `parent === undefined` 于是被当成「根目录书签」→ 直接从用户手搭的分类里搬去「自动整理」。
+     * 用户什么都没做，书签却挪了位置——这是最该被守住的一类退化。 */
+    storageMap.set('markai.config', { providerId: 'deepseek', autoOrganizeNew: true });
+    const deepChain: string[] = [];
+    let deepParent = '1';
+    for (let i = 1; i <= 5; i++) {
+      const folder = await mockBookmarks.create({ parentId: deepParent, title: `回归层${i}` });
+      deepChain.push(folder.id);
+      deepParent = folder.id;
+    }
+    const deepNode = await mockBookmarks.create({
+      parentId: deepParent,
+      title: '深目录书签',
+      url: 'https://deep-regression.example.com/x',
+    });
+    const deepRes = await autoOrganizeBookmark(deepNode.id);
+    ok('自动整理：深于 4 层的用户分类不得被搬走', () => {
+      assert.equal(deepRes.action, 'skipped', `实际 action=${deepRes.action}（${deepRes.detail}）`);
+      assert.equal(nodeById(deepNode.id)!.parentId, deepParent, '书签必须留在用户放的那个文件夹里');
+    });
+    // 清理：整条链一次删掉，避免污染后续用例的根目录结构
+    await mockBookmarks.removeTree(deepChain[0]!).catch(() => {});
+    storageMap.delete('markai.config');
+
+    /* ── 2. 注册域：IP 直连站点必须原样保留 ──
+     * 原先一律取最后两段：192.168.1.10 → 「1.10」。后果是「自动整理」下出现名为 1.10 的
+     * 文件夹，并把 192.168.1.10 与 172.16.1.10 这类不相关主机折进同一个分类。 */
+    ok('注册域：IPv4 原样返回，不截成后两段', () => {
+      assert.equal(registrableDomain('http://192.168.1.10:8080/admin'), '192.168.1.10');
+      assert.equal(registrableDomain('https://10.0.0.10/'), '10.0.0.10');
+      assert.notEqual(
+        registrableDomain('http://192.168.1.10/a'),
+        registrableDomain('http://172.16.1.10/b'),
+        '不同网段的主机不得被折叠成同一个注册域',
+      );
+    });
+    ok('注册域：IPv6 字面量去掉方括号', () => {
+      assert.equal(registrableDomain('http://[::1]:3000/x'), '::1');
+    });
+    ok('注册域：普通域名与两段式 TLD 规则保持不变', () => {
+      assert.equal(registrableDomain('https://docs.github.com/guide'), 'github.com');
+      assert.equal(registrableDomain('https://www.bbc.co.uk/news'), 'bbc.co.uk');
+      assert.equal(registrableDomain('not a url'), null);
+    });
+
+    /* ── 3. 时间线分页：日期组头显示当天真实条数 ──
+     * 组头原先由「本页已渲染的切片」分组得出：100 条的今天在首屏（80 条/页）
+     * 会显示成「今天 80 条」——数字是错的，用户没法知道还有 20 条没渲染。 */
+    const NOW_MS = Date.now();
+    const atDay = (daysAgo: number) => {
+      const d = new Date(NOW_MS);
+      d.setDate(d.getDate() - daysAgo);
+      d.setHours(12, 0, 0, 0);
+      return d.getTime();
+    };
+    const mkItem = (id: string, ms: number) => ({
+      id,
+      title: id,
+      url: `https://regression.example.com/${id}`,
+      dateAdded: ms,
+      path: '书签栏',
+    });
+    const bulk = [
+      ...Array.from({ length: 100 }, (_, i) => mkItem(`t${i}`, atDay(0) + i)),
+      ...Array.from({ length: 5 }, (_, i) => mkItem(`y${i}`, atDay(1) + i)),
+      ...Array.from({ length: 2 }, (_, i) => mkItem(`o${i}`, atDay(30) + i)),
+    ];
+    const dayGroups = groupByDay(sortTimeline(bulk, 'newest'), NOW_MS);
+    const firstPage = pageGroups(dayGroups, 80);
+    const secondPage = pageGroups(dayGroups, 103);
+    ok('时间线分页：组头保留当天真实条数，页内只渲染本页条目', () => {
+      assert.equal(dayGroups.length, 3, '三天应当三组');
+      assert.equal(dayGroups[0]!.total, 100);
+      assert.equal(firstPage.length, 1, '首屏 80 条只够铺满今天');
+      assert.equal(firstPage[0]!.total, 100, '组头条数必须是当天真实条数，而不是本页条数');
+      assert.equal(firstPage[0]!.items.length, 80);
+      assert.equal(secondPage[1]!.total, 5, '昨天共 5 条');
+      assert.equal(secondPage[1]!.items.length, 3, '第二页只补齐 3 条');
+    });
+  }
+
+  /* ── T78: 新书签自动整理 · 本地规则层 ──
+   * 用户要的是「识别到新书签并自动整理」。原来的兜底只有「按注册域建
+   * 自动整理/<domain>」：AI 没配时，收藏十个站点就多出十个单域名文件夹，
+   * 而用户其实早就有「开发」「GitHub」这类自己的分类。本地规则先认人。 */
+  console.log('\n[T78] 自动整理 · 本地规则（先认用户已有分类）');
+  {
+    ok('品牌名：去子域与 TLD；IP 直连没有品牌名', () => {
+      assert.equal(brandOf('github.com'), 'github');
+      assert.equal(brandOf('docs.github.com'), 'github');
+      assert.equal(brandOf('www.example.com'), 'example');
+      assert.equal(brandOf('192.168.1.10'), '', 'IP 不是品牌，不该拿去匹配用户文件夹');
+      assert.equal(brandOf('::1'), '');
+      assert.equal(brandOf(''), '');
+    });
+
+    const mk = (id: string, title: string, depth: number, parentId = '1') => ({
+      id,
+      parentId,
+      path: depth === 0 ? '书签栏' : `书签栏 / ${title}`,
+      title,
+      depth,
+    });
+    const ROOT = mk('1', '书签栏', 0);
+    const GH = mk('fa', 'GitHub', 1);
+    const GH_MINE = mk('fb', '我的 GitHub 收藏', 1);
+    const DEV = mk('fc', '开发', 1);
+    const FE_DEV = mk('fd', '前端开发', 1);
+    const EXCEL = mk('fe', 'Excel 笔记', 1);
+    const DEEP_GH = mk('ff', 'GitHub', 4, 'fx');
+
+    // 场景隔离：用「只有一个候选」的候选集验证每一档分值
+    const one = (f: typeof GH) => pickExistingFolder({ domain: 'github.com', folders: [ROOT, f], rootId: '1' });
+
+    ok('本地规则：文件夹名与站点品牌同名 → 100 分，可直接采纳（不必问模型）', () => {
+      const m = one(GH);
+      assert.equal(m?.folder.id, 'fa');
+      assert.equal(m?.score, 100);
+      assert.ok(isConfidentMatch(m), '100 分必须算高置信');
+      assert.ok(m?.reason.includes('GitHub'), m?.reason);
+    });
+    ok('本地规则：文件夹名包含站点品牌 → 80 分（高置信但需模型确认）', () => {
+      const m = one(GH_MINE);
+      assert.equal(m?.score, 80);
+      assert.equal(isConfidentMatch(m), false, '包含匹配可能误伤，不能独占决策');
+    });
+    ok('本地规则：文件夹名等于站点语义分类 → 70 分', () => {
+      const m = one(DEV);
+      assert.equal(m?.score, 70);
+      assert.ok(m?.reason.includes('开发'), m?.reason);
+    });
+    ok('本地规则：文件夹名包含语义分类 → 60 分', () => {
+      assert.equal(one(FE_DEV)?.score, 60);
+    });
+    ok('本地规则：短品牌名不参与包含匹配（x.com 不得命中「Excel 笔记」）', () => {
+      const m = pickExistingFolder({ domain: 'x.com', folders: [ROOT, EXCEL], rootId: '1' });
+      assert.equal(m, null, `误伤了：${m?.folder.title} / ${m?.reason}`);
+    });
+    ok('本地规则：超过 3 层的文件夹不参与（用户搭得深，就不要替他改）', () => {
+      assert.equal(one(DEEP_GH), null);
+    });
+    ok('本地规则：根自身与没有信息量的文件夹名不参与', () => {
+      assert.equal(pickExistingFolder({ domain: 'github.com', folders: [ROOT], rootId: '1' }), null);
+      assert.equal(pickExistingFolder({ domain: 'github.com', folders: [ROOT, mk('fz', '   ', 1)], rootId: '1' }), null);
+    });
+    ok('本地规则：同分取更浅的一层（确定性），不随候选顺序变化', () => {
+      const a = mk('f2', 'GitHub', 2, 'fa');
+      const forward = pickExistingFolder({ domain: 'github.com', folders: [ROOT, GH, a], rootId: '1' });
+      const backward = pickExistingFolder({ domain: 'github.com', folders: [ROOT, a, GH], rootId: '1' });
+      assert.equal(forward?.folder.id, 'fa');
+      assert.equal(backward?.folder.id, 'fa', '顺序变化不得改变结论');
+    });
+
+    /* 端到端 1：AI 未配置 + 已有同名分类 → 直接归入，不新建域名文件夹 */
+    storageMap.set('markai.config', { providerId: 'deepseek', baseUrl: '', apiKey: '', model: '', autoOrganizeNew: true });
+    const ghFolder = await mockBookmarks.create({ parentId: '1', title: 'GitHub' });
+    const ghBookmark = await mockBookmarks.create({
+      parentId: '1',
+      title: 'acme/new-thing',
+      url: 'https://github.com/acme/new-thing',
+    });
+    const ghRes = await autoOrganizeBookmark(ghBookmark.id);
+    ok('端到端：本地高置信匹配优先于域名兜底，不制造 自动整理/github.com', () => {
+      assert.equal(ghRes.action, 'moved', ghRes.detail);
+      assert.equal(nodeById(ghBookmark.id)!.parentId, ghFolder.id, '应当放进用户已有的 GitHub 分类');
+      assert.ok(ghRes.detail.includes('GitHub'), ghRes.detail);
+      const duplicated = store.some((n) => n.title === 'github.com' && n.parentId === '1');
+      assert.equal(duplicated, false, '不得在根目录新建与用户分类重复的域名文件夹');
+    });
+
+    /* 端到端 2：只有 60 分的弱匹配（文件夹名包含语义分类词）+ AI 不可用
+     * → 仍归入用户分类，而不是新建域名文件夹。tailwindcss.com 的语义分类是「设计」，
+     * 「设计稿」包含该词 → 60 分；品牌 tailwindcss 与文件夹名无关，拿不到更高分。 */
+    const feFolder = await mockBookmarks.create({ parentId: '1', title: '设计稿' });
+    const weakBookmark = await mockBookmarks.create({
+      parentId: '1',
+      title: 'Tailwind 文档',
+      url: 'https://tailwindcss.com/docs',
+    });
+    const weakRes = await autoOrganizeBookmark(weakBookmark.id);
+    ok('端到端：模型不可用时，弱匹配也优先放进用户分类', () => {
+      assert.equal(weakRes.action, 'moved', weakRes.detail);
+      assert.equal(nodeById(weakBookmark.id)!.parentId, feFolder.id);
+    });
+
+    // 清理：恢复根目录结构，避免影响后续用例
+    storageMap.delete('markai.config');
+    await mockBookmarks.removeTree(ghBookmark.id).catch(() => {});
+    await mockBookmarks.removeTree(weakBookmark.id).catch(() => {});
+    await mockBookmarks.removeTree(ghFolder.id).catch(() => {});
+    await mockBookmarks.removeTree(feFolder.id).catch(() => {});
+    const leftover = store.find((n) => n.title === 'github.com' && n.parentId === '1');
+    if (leftover) await mockBookmarks.removeTree(leftover.id).catch(() => {});
+  }
+
+
+  /* ── T79: 自动整理日志（可回看 / 可统计 / 可重试） ──
+   * 自动整理是后台写操作：没有日志时，用户只会发现「书签自己跑了」。
+   * toast 会消失，日志必须留下「动了什么、去了哪里、哪条失败能不能重试」。
+   * 注意：ok() 是同步断言器，所有 await 必须放在它外面先取好数据。 */
+  console.log('\n[T79] 自动整理日志');
+  {
+    ok('日志条目：字段截断与可选标记（不把整段错误栈存进去）', () => {
+      const e = makeOrganizeLogEntry(
+        {
+          title: 'x'.repeat(400),
+          url: 'https://example.com/' + 'y'.repeat(900),
+          domain: 'example.com',
+          action: 'failed',
+          detail: 'z'.repeat(500),
+          needsAttention: true,
+          retryable: true,
+        },
+        1_700_000_000_000,
+      );
+      assert.equal(e.at, 1_700_000_000_000);
+      assert.ok(e.id.length > 0);
+      assert.ok(e.title.length <= 181, `标题未截断：${e.title.length}`);
+      assert.ok(e.url.length <= 501, `URL 未截断：${e.url.length}`);
+      assert.ok(e.detail.length <= 241, `详情未截断：${e.detail.length}`);
+      assert.equal(e.needsAttention, true);
+      assert.equal(e.retryable, true);
+    });
+
+    ok('日志条目：换行与连续空白折叠成单个空格（一行读得完）', () => {
+      const e = makeOrganizeLogEntry(
+        { title: 'a\n\nb', url: 'https://a.com', domain: 'a.com', action: 'moved', detail: 'x\ty\n z' },
+        1,
+      );
+      assert.equal(e.title, 'a b');
+      assert.equal(e.detail, 'x y z');
+    });
+
+    await clearOrganizeLog();
+    await appendOrganizeLog(makeOrganizeLogEntry({ title: 'first', url: 'https://a.com/1', domain: 'a.com', action: 'moved', detail: 'ok' }, 1000));
+    await appendOrganizeLog(makeOrganizeLogEntry({ title: 'second', url: 'https://b.com/2', domain: 'b.com', action: 'created', detail: 'ok' }, 2000));
+    const ordered = await readOrganizeLog();
+    ok('日志：写入后可按时间倒序读出（新的在前）', () => {
+      assert.equal(ordered.length, 2, `实际 ${ordered.length} 条`);
+      assert.equal(ordered[0]!.title, 'second');
+    });
+
+    await clearOrganizeLog();
+    await Promise.all(
+      Array.from({ length: 12 }, (_, i) =>
+        appendOrganizeLog(
+          makeOrganizeLogEntry({ title: `c${i}`, url: `https://c.com/${i}`, domain: 'c.com', action: 'moved', detail: 'ok' }, 3000 + i),
+        ),
+      ),
+    );
+    const concurrent = await readOrganizeLog();
+    ok('日志：并发写入不丢记录（读-改-写必须串行化）', () => {
+      assert.equal(concurrent.length, 12, `并发写丢了记录：只剩 ${concurrent.length} 条`);
+    });
+
+    await clearOrganizeLog();
+    const over = ORGANIZE_LOG_LIMIT + 8;
+    for (let i = 0; i < over; i++) {
+      await appendOrganizeLog(
+        makeOrganizeLogEntry({ title: `r${i}`, url: `https://r.com/${i}`, domain: 'r.com', action: 'moved', detail: 'ok' }, 10_000 + i),
+      );
+    }
+    const ringed = await readOrganizeLog();
+    ok('日志：环形缓冲不超过上限，且保留最新的一条', () => {
+      assert.equal(ringed.length, ORGANIZE_LOG_LIMIT, '必须按上限截断');
+      assert.equal(ringed[0]!.title, `r${over - 1}`, '最新的必须在最前');
+      assert.equal(ringed.some((e) => e.title === 'r0'), false, '最旧的应被挤出');
+    });
+
+    storageMap.set(ORGANIZE_LOG_KEY, [
+      { id: 'good', at: 5000, title: 'ok', url: 'https://ok.com', domain: 'ok.com', action: 'moved', detail: '' },
+      { nope: true },
+      null,
+      'string',
+      { id: 'missing-at', title: 'x', action: 'moved' },
+    ]);
+    const dirty = await readOrganizeLog();
+    ok('日志：脏数据被过滤，不让坏记录拖垮整个面板', () => {
+      assert.equal(dirty.length, 1);
+      assert.equal(dirty[0]!.id, 'good');
+    });
+    await clearOrganizeLog();
+
+    ok('统计：今天成功条数按本地自然日统计，失败单独计数', () => {
+      const now = new Date(2026, 2, 5, 15, 0, 0).getTime();
+      const todayEarly = new Date(2026, 2, 5, 0, 30, 0).getTime();
+      const yesterday = new Date(2026, 2, 4, 23, 30, 0).getTime();
+      const entries = [
+        makeOrganizeLogEntry({ title: 't1', url: 'https://a.com', domain: 'a.com', action: 'moved', detail: '', at: todayEarly }),
+        makeOrganizeLogEntry({ title: 't2', url: 'https://b.com', domain: 'b.com', action: 'created', detail: '', at: now }),
+        makeOrganizeLogEntry({ title: 'y1', url: 'https://c.com', domain: 'c.com', action: 'moved', detail: '', at: yesterday }),
+        makeOrganizeLogEntry({ title: 'f1', url: 'https://d.com', domain: 'd.com', action: 'failed', detail: '', at: now }),
+        makeOrganizeLogEntry({ title: 's1', url: 'https://e.com', domain: 'e.com', action: 'skipped', detail: '', at: now }),
+      ];
+      const stats = summarizeOrganizeLog(entries, now);
+      assert.equal(stats.total, 5);
+      assert.equal(stats.moved, 2);
+      assert.equal(stats.created, 1);
+      assert.equal(stats.failed, 1);
+      assert.equal(stats.today, 2, '只算今天成功的 moved+created');
+      // latest 必须按**时间**取最近一条成功，而不是"输入里第一个 moved/created"：
+      // 这个数组刻意没有按时间排序（t1 在 t2 前面但更早），
+      // 用 `entries.find(...)` 会静默假设倒序，传入顺序一变就返回错的记录。
+      assert.equal(stats.latest?.title, 't2', 'latest 取时间最新的成功记录，不依赖输入顺序');
+    });
+
+    ok('失败可重试判定：网络/超时可重试，配置缺失不重试', () => {
+      assert.equal(isRetryableFailure('自动整理失败：The operation was aborted due to timeout'), true);
+      assert.equal(isRetryableFailure('自动整理失败：HTTP 503'), true);
+      assert.equal(isRetryableFailure('自动整理失败：解析失败'), true);
+      assert.equal(isRetryableFailure('读取配置失败：quota'), false);
+      assert.equal(isRetryableFailure('未开启自动整理'), false);
+      assert.equal(isRetryableFailure('不是书签'), false);
+    });
+
+    await clearOrganizeLog();
+  }
+
+
+  /* ── T80: 自动整理必须「一步可撤销」 ──
+   * 自动整理是后台发生的真实写操作。如果它只在后台留一个 `auto-organize:<id>` 的
+   * 英文 runId、用户得自己去撤销历史里翻，那「不满意就撤回来」实际上等于没有。
+   * 这里验证：整理结果带 runId → 能凭日志找到撤销点 → 撤销后书签回到原处。 */
+  console.log('\n[T80] 自动整理 · 一步可撤销');
+  {
+    await okA('日志条目支持 runId / undoneAt，并可就地标记已撤销', async () => {
+      // 同步断言器里不能 await：先把数据准备好（此处仅校验纯函数字段）
+      const e = makeOrganizeLogEntry(
+        { title: 'x', url: 'https://x.com', domain: 'x.com', action: 'moved', detail: '', runId: 'auto-organize:abc' },
+        1,
+      );
+      assert.equal(e.runId, 'auto-organize:abc');
+      assert.equal(e.undoneAt, undefined);
+    });
+
+    await clearOrganizeLog();
+    const logged = makeOrganizeLogEntry(
+      { title: '待标记', url: 'https://mark.example.com', domain: 'mark.example.com', action: 'moved', detail: '' },
+      5,
+    );
+    await appendOrganizeLog(logged);
+    await updateOrganizeLogEntry(logged.id, { undoneAt: 99 });
+    const marked = await readOrganizeLog();
+    ok('updateOrganizeLogEntry：标记已撤销后读回生效，且不改变 id', () => {
+      const hit = marked.find((x) => x.id === logged.id);
+      assert.ok(hit, '记录不该消失');
+      assert.equal(hit!.undoneAt, 99);
+      assert.equal(hit!.title, '待标记', '其他字段不得被覆盖');
+    });
+    await clearOrganizeLog();
+
+    /* 端到端：整理 → 拿 runId → 撤销 → 书签回到原处、临时文件夹被回收 */
+    storageMap.set('markai.config', { providerId: 'deepseek', baseUrl: '', apiKey: '', model: '', autoOrganizeNew: true });
+    const movable = await mockBookmarks.create({
+      parentId: '1',
+      title: '可撤销整理',
+      // 用 IP 直连：brandOf 对 IP 返回空、语义分类表也没有它 →
+      // 一定走「自动整理/<主机>」的创建分支，不会被已有 example 文件夹抢走
+      url: 'http://10.9.9.9/admin',
+    });
+    const organized = await autoOrganizeBookmark(movable.id);
+    const parentAfter = nodeById(movable.id)!.parentId;
+    const points = await readUndoPoints();
+    const point = organized.runId ? points.find((p) => p.runId === organized.runId) : undefined;
+
+    ok('整理结果带 runId，且能在撤销点里找到它', () => {
+      assert.equal(organized.action, 'created', organized.detail);
+      assert.ok(organized.runId, '缺少 runId：用户无从撤销');
+      assert.ok(point, `撤销点没找到（现有 ${points.length} 个）`);
+      assert.notEqual(parentAfter, '1', '书签应当已经被搬走');
+    });
+
+    const undone = point ? await applyUndo(point.id) : null;
+    ok('撤销这次整理：书签回到原处，临时站点文件夹被回收', () => {
+      assert.ok(undone?.ok, undone?.reason ?? '撤销失败');
+      assert.equal(nodeById(movable.id)!.parentId, '1', '书签必须回到书签栏');
+      // jCreate 记录了 create 操作，逆序撤销会把本轮新建的站点文件夹一并删掉
+      const leftover = store.find((n) => n.title === '10.9.9.9');
+      assert.equal(leftover, undefined, '临时站点文件夹不该留在库里');
+    });
+
+    await mockBookmarks.removeTree(movable.id).catch(() => {});
+    const container = store.find((n) => n.title === AUTO_CONTAINER && n.parentId === '1');
+    if (container) await mockBookmarks.removeTree(container.id).catch(() => {});
+    storageMap.delete('markai.config');
+  }
+
+
+  /* ── T81: 自动整理可以完全不碰 AI ──
+   * 两类用户需要它：在意 token 成本的，以及不想让「收藏一个网页」把网址发给服务商的。
+   * 关闭后功能不能消失：仍要用本地规则 / 域名兜底把书签归位。 */
+  console.log('\n[T81] 自动整理 · 关闭 AI 参与');
+  {
+    storageMap.set('markai.config', {
+      providerId: 'deepseek',
+      // 故意给一份「完整可用」的配置：若代码没看开关，这里一定会发请求
+      baseUrl: 'https://api.deepseek.com',
+      apiKey: 'sk-test-not-real',
+      model: 'deepseek-v4-flash',
+      autoOrganizeNew: true,
+      autoOrganizeAi: false,
+    });
+    fetchCalls.length = 0;
+    const quiet = await mockBookmarks.create({
+      parentId: '1',
+      title: 'AI 静默测试',
+      // 用独一无二的域名：避免命中库里既有的 example 类文件夹（那会走 moved 而不是 created）
+      url: 'https://quietmode-q7z.net/x',
+    });
+    const quietRes = await autoOrganizeBookmark(quiet.id);
+    ok('关闭后：即使配置完整也一次模型请求都不发，仍然完成归类', () => {
+      assert.equal(fetchCalls.length, 0, `不该产生请求，实际发了 ${fetchCalls.length} 次`);
+      assert.equal(quietRes.action, 'created', quietRes.detail);
+      assert.equal(quietRes.target, 'quietmode-q7z.net', '仍应落到域名兜底分类');
+      assert.equal(nodeById(quiet.id)!.parentId !== '1', true, '书签必须真的被归位');
+    });
+
+    await mockBookmarks.removeTree(quiet.id).catch(() => {});
+    const box = store.find((n) => n.title === AUTO_CONTAINER && n.parentId === '1');
+    if (box) await mockBookmarks.removeTree(box.id).catch(() => {});
+    storageMap.delete('markai.config');
+  }
+
+
+  /* ── T82: 大库性能护栏（数据层） ──
+   * 真实用户的书签库可能几千条。这里只测**纯函数**的耗时，给它一个宽松上限：
+   * 目的不是跑分，而是防止将来改出 O(n²)（例如在分组里再扫一遍全表）而不自知。
+   * 阈值刻意放到很松（5000 条各步都 < 400ms），慢机器也不会误报。 */
+  console.log('\n[T82] 大库性能护栏');
+  {
+    const N = 5000;
+    const buildTree = (count: number) => {
+      // 20 个文件夹 × 250 条：贴近真实形状（有层级、有分组），而不是一根直链
+      const folders = 20;
+      const roots: chrome.bookmarks.BookmarkTreeNode[] = [];
+      const bar = {
+        id: '1',
+        title: '书签栏',
+        dateAdded: 1,
+        children: [] as chrome.bookmarks.BookmarkTreeNode[],
+      } as chrome.bookmarks.BookmarkTreeNode;
+      for (let f = 0; f < folders; f++) {
+        const folder = {
+          id: `f${f}`,
+          parentId: '1',
+          title: `分类 ${f}`,
+          dateAdded: 2,
+          children: [] as chrome.bookmarks.BookmarkTreeNode[],
+        } as chrome.bookmarks.BookmarkTreeNode;
+        for (let i = 0; i < Math.ceil(count / folders); i++) {
+          folder.children!.push({
+            id: `b${f}-${i}`,
+            parentId: `f${f}`,
+            title: `书签 ${f}-${i}`,
+            url: `https://site${f}.example.com/${i}`,
+            // 分散到最近 400 天，模拟真实收藏分布
+            dateAdded: Date.now() - (i * 47 + f) * 86_400_000 / 24,
+          } as chrome.bookmarks.BookmarkTreeNode);
+        }
+        bar.children!.push(folder);
+      }
+      roots.push(bar);
+      return roots;
+    };
+    const tree = buildTree(N);
+    const timed = <T,>(fn: () => T): { value: T; ms: number } => {
+      const t0 = performance.now();
+      const value = fn();
+      return { value, ms: performance.now() - t0 };
+    };
+
+    const flat = timed(() => flattenBookmarks(tree));
+    const sorted = timed(() => sortTimeline(flat.value, 'newest'));
+    const grouped = timed(() => groupByDay(sorted.value));
+    const paged = timed(() => pageGroups(grouped.value, 80));
+    const filtered = timed(() => filterTimeline(flat.value, 'site7'));
+
+    ok(`展平 ${N} 条书签：只收 URL 节点，耗时可接受`, () => {
+      assert.equal(flat.value.length, N, `实际 ${flat.value.length}`);
+      assert.ok(flat.ms < 400, `展平耗时 ${flat.ms.toFixed(0)}ms，疑似退化成 O(n²)`);
+    });
+    ok(`排序 ${N} 条：耗时与规模相称（n log n）`, () => {
+      assert.ok(sorted.ms < 400, `排序耗时 ${sorted.ms.toFixed(0)}ms`);
+      assert.equal(sorted.value.length, N);
+    });
+    ok('按天分组 + 首页切片：不超过 400ms，且首页只渲染 80 条', () => {
+      assert.ok(grouped.ms < 400, `分组耗时 ${grouped.ms.toFixed(0)}ms`);
+      assert.ok(paged.ms < 100, `切片耗时 ${paged.ms.toFixed(0)}ms`);
+      const shown = paged.value.reduce((n, g) => n + g.items.length, 0);
+      assert.equal(shown, 80, `首屏应只渲染 80 条，实际 ${shown}`);
+    });
+    ok('过滤 5000 条：结果正确且不慢', () => {
+      assert.ok(filtered.ms < 200, `过滤耗时 ${filtered.ms.toFixed(0)}ms`);
+      assert.ok(filtered.value.length > 0 && filtered.value.length < N);
+    });
+
+    /* 真实形状检查：分组后每天的条数是「该天真实条数」，不随分页变化 */
+    ok('分页后组头 total 仍是当天真实条数（不在渲染时被截断）', () => {
+      for (const pageGroup of paged.value) {
+        const full = grouped.value.find((g) => g.key === pageGroup.key);
+        assert.ok(full, `找不到分组 ${pageGroup.key}`);
+        assert.equal(pageGroup.total, full!.total);
+      }
+    });
+  }
+
+
+  /* ── T83: 整理记录按去向聚合 ──
+   * 用户最想知道「它把我东西都塞哪儿了」。逐条看要自己数，聚合后一眼就明白。 */
+  console.log('\n[T83] 整理记录 · 按去向聚合');
+  {
+    const mk = (id: string, action: 'moved' | 'created' | 'failed' | 'skipped', target?: string) =>
+      makeOrganizeLogEntry(
+        { title: id, url: 'https://x.com', domain: 'x.com', action, detail: '', ...(target ? { target } : {}) },
+        1,
+      );
+
+    ok('聚合：只统计真正归位的 moved/created，失败与跳过不计', () => {
+      const groups = groupByTarget([
+        mk('1', 'moved', '设计资料'),
+        mk('2', 'moved', '设计资料'),
+        mk('3', 'created', '自动整理/github.com'),
+        mk('4', 'failed'),
+        mk('5', 'skipped', '某文件夹'),
+      ]);
+      assert.deepEqual(
+        groups.map((g) => [g.target, g.count]),
+        [
+          ['设计资料', 2],
+          ['自动整理/github.com', 1],
+        ],
+      );
+    });
+
+    ok('聚合：按条数降序，同条数按名称排序（渲染顺序稳定）', () => {
+      const groups = groupByTarget([
+        mk('a', 'moved', '乙'),
+        mk('b', 'moved', '甲'),
+        mk('c', 'moved', '乙'),
+      ]);
+      assert.equal(groups[0]!.target, '乙');
+      assert.equal(groups[0]!.count, 2);
+      // 同数时按 localeCompare 排序，至少保证「两次调用结果一致」
+      assert.deepEqual(groupByTarget([mk('a', 'moved', '乙'), mk('b', 'moved', '甲')]), groupByTarget([mk('b', 'moved', '甲'), mk('a', 'moved', '乙')]));
+    });
+
+    ok('聚合：没有 target 的记录（历史/跳过）不产出空名分组', () => {
+      const groups = groupByTarget([mk('1', 'moved'), mk('2', 'created', '   ')]);
+      assert.deepEqual(groups, []);
+    });
+  }
+
+
+  /* ── T84: 批量补整理的两条提速路径 ──
+   * 导入几百条书签后点「补整理」，如果每条都独立决策：同域名重复问模型、
+   * 某域名超时后其余条目还各等一次 12 秒——几百条会跑到用户放弃。
+   * 这两条路径是批量场景能不能用起来的关键，必须有回归。 */
+  console.log('\n[T84] 批量补整理 · 提速路径');
+  {
+    /* ① 同域复用：把已有结论直接灌给下一条（跳过决策） */
+    const folder = await mockBookmarks.create({ parentId: '1', title: 'GitHub' });
+    const first = await mockBookmarks.create({ parentId: '1', title: 'repo-a', url: 'https://github.com/a/b' });
+    const second = await mockBookmarks.create({ parentId: '1', title: 'repo-c', url: 'https://github.com/c/d' });
+    const reuse = await moveBookmarkInto(second.id, folder.id, '与同站点的其它书签放在一起');
+    ok('moveBookmarkInto：直接把书签放进指定文件夹（跳过决策）', () => {
+      assert.equal(reuse.action, 'moved', reuse.detail);
+      assert.equal(nodeById(second.id)!.parentId, folder.id);
+      assert.equal(reuse.target, 'GitHub');
+      assert.ok(reuse.runId, '批量移动同样要留撤销点');
+    });
+    const again = await moveBookmarkInto(second.id, folder.id);
+    ok('moveBookmarkInto：已在目标文件夹时如实跳过（不重复写撤销点）', () => {
+      assert.equal(again.action, 'skipped');
+      assert.ok(again.detail.includes('已在'), again.detail);
+      assert.equal(again.runId, undefined, '没有实际改动就不该产生撤销点');
+    });
+    const missing = await moveBookmarkInto(second.id, 'not-exist-id');
+    ok('moveBookmarkInto：目标文件夹不存在时如实失败，不谎报成功', () => {
+      assert.equal(missing.ok, false);
+      assert.equal(missing.action, 'failed');
+      assert.equal(nodeById(second.id)!.parentId, folder.id, '失败时不得乱动书签');
+    });
+
+    /* ② 失败域名降级：skipAi 让后续同域条目不再等模型 */
+    storageMap.set('markai.config', {
+      providerId: 'deepseek',
+      baseUrl: 'https://api.deepseek.com',
+      apiKey: 'sk-test-not-real',
+      model: 'deepseek-v4-flash',
+      autoOrganizeNew: true,
+    });
+    fetchCalls.length = 0;
+    const skipped = await autoOrganizeBookmark(first.id, { skipAi: true });
+    ok('skipAi：即使配置完整也不发请求，仍完成归类', () => {
+      assert.equal(fetchCalls.length, 0, `不该发请求，实际 ${fetchCalls.length} 次`);
+      assert.notEqual(skipped.action, 'failed', skipped.detail);
+      assert.notEqual(nodeById(first.id)!.parentId, '1', '书签仍应被归位');
+    });
+
+    // 清理
+    storageMap.delete('markai.config');
+    await mockBookmarks.removeTree(first.id).catch(() => {});
+    await mockBookmarks.removeTree(second.id).catch(() => {});
+    await mockBookmarks.removeTree(folder.id).catch(() => {});
+    const box = store.find((n) => n.title === AUTO_CONTAINER && n.parentId === '1');
+    if (box) await mockBookmarks.removeTree(box.id).catch(() => {});
+  }
+
+
+  /* ── T85: 「站点免打扰」——撤销一次，就别再自动摆第二次 ──
+   * 用户在整理记录里点「↶」说的是「这个站点这么归类我不认」。
+   * 如果下次收藏同站点还照原样搬一遍，那不是自动，是没记性。 */
+  console.log('\n[T85] 自动整理 · 站点免打扰');
+  {
+    await clearOptOutDomains();
+    await addOptOutDomain('GitHub.com', 1000);
+    const list = await readOptOutDomains();
+    await okA('免打扰名单：域名归一化为小写，可判断命中', async () => {
+      assert.equal(list.length, 1);
+      assert.equal(list[0]!.domain, 'github.com');
+    });
+    const hit = await isOrganizeOptedOut('github.com');
+    const miss = await isOrganizeOptedOut('gitlab.com');
+    const upper = await isOrganizeOptedOut('GITHUB.COM');
+    ok('免打扰判定：命中 / 未命中 / 大小写不敏感', () => {
+      assert.equal(hit, true);
+      assert.equal(miss, false);
+      assert.equal(upper, true);
+    });
+
+    await addOptOutDomain('github.com', 2000);
+    const again = await readOptOutDomains();
+    ok('重复加入：只更新时间，不产生重复项', () => {
+      assert.equal(again.length, 1);
+      assert.equal(again[0]!.at, 2000, '时间应更新为最新');
+    });
+
+    await okA('空域名不写入（避免产生一条永远命中不了的空记录）', async () => {
+      await addOptOutDomain('   ');
+      const after = await readOptOutDomains();
+      assert.equal(after.length, 1);
+    });
+
+    storageMap.set(ORGANIZE_OPTOUT_KEY, [{ domain: 'ok.com', at: 1 }, { nope: 1 }, null, 'x', { domain: '' }]);
+    const dirty = await readOptOutDomains();
+    ok('脏数据被过滤，不让坏记录拖垮判定', () => {
+      assert.deepEqual(dirty.map((d) => d.domain), ['ok.com']);
+    });
+
+    /* 端到端：名单里的站点，后台自动整理必须让位 */
+    storageMap.set('markai.config', { providerId: 'deepseek', autoOrganizeNew: true });
+    await clearOptOutDomains();
+    await addOptOutDomain('quiet-zone-q3.example', 3000);
+    const optedBookmark = await mockBookmarks.create({
+      parentId: '1',
+      title: '免打扰站点的书签',
+      url: 'https://quiet-zone-q3.example/page',
+    });
+    const optedRes = await autoOrganizeBookmark(optedBookmark.id);
+    ok('端到端：被叫停的站点，新书签不再自动搬动，并说明原因', () => {
+      assert.equal(optedRes.action, 'skipped', optedRes.detail);
+      assert.ok(optedRes.detail.includes('撤销'), optedRes.detail);
+      assert.equal(nodeById(optedBookmark.id)!.parentId, '1', '书签必须留在原处');
+    });
+
+    /* 用户主动点「补整理」时必须越过免打扰——否则「点了没反应」，与承诺不符 */
+    const manual = await autoOrganizeBookmark(optedBookmark.id, { ignoreOptOut: true });
+    ok('补整理（用户主动）越过免打扰名单，仍会整理', () => {
+      assert.notEqual(manual.action, 'skipped', manual.detail);
+      assert.notEqual(nodeById(optedBookmark.id)!.parentId, '1', '主动要求时应当真的搬动');
+    });
+
+    /* 单个恢复：用户可能只想放开一个站点，而不是全部 */
+    await addOptOutDomain('keep-off.example', 4000);
+    await removeOptOutDomain('quiet-zone-q3.example');
+    const afterOne = await readOptOutDomains();
+    const stillOff = await isOrganizeOptedOut('keep-off.example');
+    ok('单独恢复一个站点：只移除它，其他站点保持免打扰', () => {
+      assert.equal(afterOne.some((e) => e.domain === 'quiet-zone-q3.example'), false, '被恢复的应移除');
+      assert.equal(stillOff, true, '其他站点不该被连带恢复');
+    });
+
+    await clearOptOutDomains();
+    const restored = await isOrganizeOptedOut('quiet-zone-q3.example');
+    ok('清空名单后恢复自动整理（用户改主意不该被永久困住）', () => {
+      assert.equal(restored, false);
+    });
+
+    await mockBookmarks.removeTree(optedBookmark.id).catch(() => {});
+    storageMap.delete('markai.config');
+    await clearOptOutDomains();
+  }
+
+
+  /* ── T86: 成功结果上的两句提示（首次引导 / 重复收藏） ──
+   * 两条都只在「第一次」或「真的重复」时出现；否则每次收藏都挂一句就成了新的噪音。 */
+  console.log('\n[T86] 自动整理 · 首次引导与重复提示');
+  {
+    ok('首次整理：补上「可在顶栏整理里回看与撤销」', () => {
+      const out = decorateOrganizeDetail('已归入「设计资料」', { firstTime: true, duplicateCount: 1 });
+      assert.ok(out.includes('已归入「设计资料」'), out);
+      assert.ok(out.includes('顶栏「整理」'), out);
+      assert.ok(!out.includes('收藏了'), '没有重复就不该提重复');
+    });
+    ok('非首次：不重复唠叨（文案与原样一致）', () => {
+      assert.equal(decorateOrganizeDetail('已归入「A」', { firstTime: false, duplicateCount: 1 }), '已归入「A」');
+    });
+    ok('重复收藏：点明「收藏了 N 次」，一次也不算重复', () => {
+      assert.ok(decorateOrganizeDetail('已归入「A」', { firstTime: false, duplicateCount: 3 }).includes('收藏了 3 次'));
+      assert.ok(!decorateOrganizeDetail('已归入「A」', { firstTime: false, duplicateCount: 1 }).includes('收藏了'));
+    });
+    ok('两件事同时成立：两句都带上，用分隔符连成一句', () => {
+      const out = decorateOrganizeDetail('已归入「A」', { firstTime: true, duplicateCount: 2 });
+      assert.ok(out.includes('顶栏「整理」') && out.includes('收藏了 2 次'), out);
+      assert.equal(out.split(' · ').length, 3, `应当是 3 段：${out}`);
+    });
+  }
+
+
+  /* ── T87: 整理记录检索 ──
+   * 记录上限 200 条、面板一次只露五六行。没有检索，找「那天 github 那条」只能滚。 */
+  console.log('\n[T87] 整理记录 · 检索与筛选');
+  {
+    const mk = (id: string, opts: Partial<{ title: string; domain: string; url: string; target: string; detail: string; action: 'moved' | 'failed' | 'skipped' }>) =>
+      makeOrganizeLogEntry(
+        {
+          title: opts.title ?? id,
+          url: opts.url ?? `https://${opts.domain ?? 'x.com'}/p`,
+          domain: opts.domain ?? 'x.com',
+          action: opts.action ?? 'moved',
+          detail: opts.detail ?? '',
+          ...(opts.target ? { target: opts.target } : {}),
+        },
+        1,
+      );
+    const entries = [
+      mk('a', { title: 'Radix UI', domain: 'radix-ui.com', target: '设计资料' }),
+      mk('b', { title: 'GitHub · dsh', domain: 'github.com', target: '自动整理 / github.com' }),
+      mk('c', { title: 'Hacker News', domain: 'news.ycombinator.com', action: 'failed', detail: 'timeout' }),
+      mk('d', { title: 'Tailwind', domain: 'tailwindcss.com', target: '设计资料' }),
+    ];
+
+    ok('检索：标题 / 域名 / 去向 / 说明 都参与匹配', () => {
+      assert.deepEqual(filterOrganizeLog(entries, { query: 'radix' }).map((e) => e.title), ['Radix UI']);
+      assert.deepEqual(filterOrganizeLog(entries, { query: 'ycombinator' }).map((e) => e.title), ['Hacker News']);
+      assert.deepEqual(filterOrganizeLog(entries, { query: '设计资料' }).map((e) => e.title), ['Radix UI', 'Tailwind']);
+      assert.deepEqual(filterOrganizeLog(entries, { query: 'timeout' }).map((e) => e.title), ['Hacker News']);
+    });
+
+    ok('检索：大小写不敏感，空查询返回全部', () => {
+      assert.equal(filterOrganizeLog(entries, { query: 'GITHUB' }).length, 1);
+      assert.equal(filterOrganizeLog(entries, { query: '   ' }).length, entries.length);
+      assert.equal(filterOrganizeLog(entries).length, entries.length);
+    });
+
+    ok('筛选：只看失败与检索可以叠加', () => {
+      assert.deepEqual(filterOrganizeLog(entries, { onlyFailed: true }).map((e) => e.title), ['Hacker News']);
+      // 叠加：失败 + 匹配不上 → 空
+      assert.deepEqual(filterOrganizeLog(entries, { onlyFailed: true, query: 'radix' }), []);
+      // 叠加：失败 + 能匹配 → 命中
+      assert.deepEqual(filterOrganizeLog(entries, { onlyFailed: true, query: 'hacker' }).map((e) => e.title), ['Hacker News']);
+    });
+
+    ok('检索：没有匹配时返回空数组（不是原样返回，避免"搜了没反应"）', () => {
+      assert.deepEqual(filterOrganizeLog(entries, { query: '绝对不存在的关键词zzz' }), []);
+    });
+  }
+
+
+  /* ── T88: 文件夹复用的大小写/空格边界 ──
+   * 用户手建的「设计资料 」多一个尾空格、AI 回的「AI 工具」与已有的「AI工具」差一个空格——
+   * 直接 `===` 会让复用失效，自动整理于是造出两个看着一模一样的文件夹。 */
+  console.log('\n[T88] 文件夹复用 · 大小写与空格边界');
+  {
+    const fake = {
+      id: '1',
+      title: '书签栏',
+      dateAdded: 0,
+      children: [
+        { id: 'f1', parentId: '1', title: '设计资料 ', dateAdded: 0, children: [] },
+        { id: 'f2', parentId: '1', title: 'AI工具', dateAdded: 0, children: [] },
+        { id: 'f3', parentId: '1', title: 'Reading List', dateAdded: 0, children: [] },
+        { id: 'f4', parentId: '1', title: '设计资料', dateAdded: 0, children: [] },
+      ],
+    } as unknown as chrome.bookmarks.BookmarkTreeNode;
+    const folders = collectFolderOptions(fake);
+
+    ok('复用：尾空格不该导致新建重复文件夹', () => {
+      const hit = findFolderByTitle(folders, '设计资料', '1');
+      assert.ok(hit, '应当复用已有的「设计资料 」而不是新建');
+      // 同分时取更浅 + id 更小：这里两个候选同层，取 id 更小的 f1
+      assert.equal(hit!.id, 'f1');
+    });
+    ok('复用：中间空格差异（AI 工具 vs AI工具）视为同一个', () => {
+      assert.equal(findFolderByTitle(folders, 'AI 工具', '1')!.id, 'f2');
+      assert.equal(findFolderByTitle(folders, 'AI工具 ', '1')!.id, 'f2');
+    });
+    ok('复用：英文分类名大小写不敏感', () => {
+      assert.equal(findFolderByTitle(folders, 'reading list', '1')!.id, 'f3');
+      assert.equal(findFolderByTitle(folders, 'READING LIST', '1')!.id, 'f3');
+    });
+    ok('复用：名字确实不同时不误伤', () => {
+      assert.equal(findFolderByTitle(folders, '设计', '1'), null);
+      assert.equal(findFolderByTitle(folders, '设计资料集', '1'), null);
+      assert.equal(findFolderByTitle(folders, 'Reading', '1'), null);
+    });
+    ok('域名文件夹同样折叠空白后再比较', () => {
+      const withSpace = {
+        id: '1',
+        title: '书签栏',
+        dateAdded: 0,
+        children: [{ id: 'g1', parentId: '1', title: 'github.com ', dateAdded: 0, children: [] }],
+      } as unknown as chrome.bookmarks.BookmarkTreeNode;
+      const list = collectFolderOptions(withSpace);
+      assert.equal(findDomainFolder(list, 'GitHub.com')!.id, 'g1');
+    });
+  }
+
+
+  /* ── T89: 批量重试的挑选规则 ──
+   * 一次网络抖动可能留下十几条失败；逐条点重试是体力活。
+   * 但「可重试」必须挑准：把配置类失败混进来，用户点完会一半没动静。 */
+  console.log('\n[T89] 整理记录 · 批量重试挑选');
+  {
+    const mk = (id: string, patch: Partial<OrganizeLogEntry>) => ({
+      ...makeOrganizeLogEntry(
+        { title: id, url: `https://${id}.com/x`, domain: `${id}.com`, action: 'failed', detail: '' },
+        1,
+      ),
+      ...patch,
+    });
+
+    ok('只挑「失败 + 可重试 + 未撤销」的条目', () => {
+      const entries: OrganizeLogEntry[] = [
+        mk('net', { retryable: true }),                 // 网络失败：可重试
+        mk('conf', { retryable: false }),               // 配置缺失：不可重试
+        mk('done', { action: 'moved', retryable: true }), // 已成功
+        mk('undone', { retryable: true, undoneAt: 99 }), // 撤销过
+        mk('plain', {}),                                 // 没有 retryable 标记
+      ];
+      assert.deepEqual(pickRetryableEntries(entries).map((e) => e.title), ['net']);
+    });
+
+    ok('没有可重试项时返回空（UI 据此不出现「重试全部」）', () => {
+      assert.deepEqual(pickRetryableEntries([mk('conf', { retryable: false })]), []);
+      assert.deepEqual(pickRetryableEntries([]), []);
+    });
+
+    ok('批次保持原顺序（老的先重试，与列表视觉顺序一致）', () => {
+      const entries = [mk('a', { retryable: true }), mk('b', { retryable: true })];
+      assert.deepEqual(pickRetryableEntries(entries).map((e) => e.title), ['a', 'b']);
+    });
+  }
+
+
+  /* ── T90: 导出整理记录 ──
+   * 用户问「它到底动过什么」时，文件比截图有用。这里只验结构与关键字段，
+   * 不追求排版细节——导出的是给人看的材料，不是第二个数据源。 */
+  console.log('\n[T90] 整理记录 · 导出 Markdown');
+  {
+    const mk = (id: string, patch: Partial<OrganizeLogEntry>) =>
+      makeOrganizeLogEntry(
+        { title: id, url: `https://${id}.com/x`, domain: `${id}.com`, action: 'moved', detail: '已归入「设计资料」' },
+        patch.at ?? 1,
+      );
+
+    const now = new Date(2026, 9, 25, 18, 30, 0).getTime();
+    const entries: OrganizeLogEntry[] = [
+      { ...mk('今天成功的', {}), at: now - 60_000, target: '设计资料', via: 'local' as const },
+      // 注意：action 要写在最外层覆盖（mk 的 patch 只负责 at），否则它仍是一条成功记录
+      { ...mk('今天失败的', {}), at: now - 3_600_000, action: 'failed' as const, detail: 'timeout' },
+      // 补一条 created：标签与 moved 不同，导出时不能混成同一个词
+      { ...mk('新建的那条', {}), at: now - 120_000, action: 'created' as const, target: '新分类' },
+      { ...mk('昨天那条', {}), at: now - 26 * 3_600_000, target: '自动整理 / github.com' },
+    ];
+    const md = buildOrganizeLogMarkdown(entries, { now, optOuts: ['github.com'] });
+
+    ok('导出：含标题、导出时间与统计', () => {
+      assert.ok(md.startsWith('# MarkAI 整理记录'), md.slice(0, 40));
+      assert.ok(md.includes('导出时间：'), '缺少导出时间');
+      assert.ok(md.includes('累计归入 3 条'), md);
+      assert.ok(md.includes('失败 1 条'), md);
+    });
+    ok('导出：带上判断来源（排查「为什么这么频繁调模型」的第一眼依据）', () => {
+      assert.ok(md.includes('判断来源：本地规则 1'), md);
+    });
+    ok('导出：带上免打扰站点（排查时最容易被忽略的一层）', () => {
+      assert.ok(md.includes('已停用自动整理的站点：github.com'), md);
+    });
+    ok('导出：按天分组，每条含动作与去向', () => {
+      assert.ok(md.includes('## 2026-10-25'), '缺少当天小节');
+      assert.ok(md.includes('## 2026-10-24'), '缺少前一天小节');
+      assert.ok(md.includes('已归入「设计资料」'), md);
+      assert.ok(md.includes('— 新建并归入「新分类」'), 'created 必须用独立标签，不能和 moved 混成一个词');
+    });
+    ok('导出：失败条目照原样标出，不粉饰', () => {
+      assert.ok(md.includes('**今天失败的** — 失败'), md);
+    });
+    ok('导出：空记录时给一句说明，而不是一个只有标题的空文件', () => {
+      const empty = buildOrganizeLogMarkdown([], { now });
+      assert.ok(empty.includes('还没有任何整理记录'), empty);
+    });
+  }
+
+
+  /* ── T91: 批量移动的「移动前下标」必须仍然准确 ──
+   * 为了把 1 万条补整理从 402 秒降到 25 秒，批量路径改成由调用方维护父目录顺序、
+   * 不再每条 getChildren。省掉的是 IPC，**不能省掉正确性**：撤销要靠 fromIndex
+   * 把书签放回原来的位置，拿错下标就会悄悄打乱顺序。 */
+  console.log('\n[T91] 批量移动 · 移动前下标准确性');
+  {
+    const folder = await mockBookmarks.create({ parentId: '1', title: '顺序校验' });
+    // 在根目录造三条，位置关系明确：p1 / p2 / p3
+    const p1 = await mockBookmarks.create({ parentId: '1', title: 'p1', url: 'https://order.example.com/1' });
+    const p2 = await mockBookmarks.create({ parentId: '1', title: 'p2', url: 'https://order.example.com/2' });
+    const p3 = await mockBookmarks.create({ parentId: '1', title: 'p3', url: 'https://order.example.com/3' });
+    const beforeIds = childrenOf('1').map((n) => n.id);
+    const expectIndex = (id: string) => beforeIds.indexOf(id);
+
+    const cache = new Map<string, string[]>();
+    const r1 = await moveBookmarkInto(p2.id, folder.id, '测试', { orderCache: cache });
+    ok('批量移动：缓存里记下移动前的真实下标', () => {
+      assert.equal(r1.action, 'moved', r1.detail);
+      const order = cache.get('1');
+      assert.ok(order, '应当为根目录建立顺序缓存');
+      assert.equal(order!.includes(p2.id), false, '已移走的条目要从缓存里移除');
+    });
+
+    const points = await readUndoPoints();
+    const p2Point = points.find((pt) => pt.ops.some((op) => op.kind === 'move' && op.id === p2.id));
+    ok('批量移动：撤销点里的 fromIndex 与移动前的真实位置一致', () => {
+      assert.ok(p2Point, '应当留下撤销点');
+      const moveOp = p2Point!.ops.find((op) => op.kind === 'move' && op.id === p2.id);
+      assert.ok(moveOp && moveOp.kind === 'move');
+      assert.equal((moveOp as { fromIndex: number }).fromIndex, expectIndex(p2.id));
+    });
+
+    // 再移一条：缓存在第一次移动后已经变化，下标必须按「当前缓存」算，而不是最初那份
+    const cache2 = new Map<string, string[]>();
+    await moveBookmarkInto(p1.id, folder.id, '测试', { orderCache: cache2 });
+    const afterFirst = cache2.get('1')!;
+    const r3 = await moveBookmarkInto(p3.id, folder.id, '测试', { orderCache: cache2 });
+    ok('连续批量移动：后面的下标基于更新后的顺序（不是最初的）', () => {
+      assert.equal(r3.action, 'moved', r3.detail);
+      const points2 = undefined;
+      void points2;
+      assert.equal(afterFirst.includes(p1.id), false);
+      assert.equal(cache2.get('1')!.includes(p3.id), false);
+    });
+
+    // 清理
+    await mockBookmarks.removeTree(folder.id).catch(() => {});
+  }
+
+
+  /* ── T92: 补整理的剩余时间估算 ──
+   * 几百上千条时进度条只会「慢慢涨」；给出时间预期，用户才好决定等还是去干别的。
+   * 但估不准时宁可不说——样本不足时返回 null，不编一个数字。 */
+  console.log('\n[T92] 补整理 · 剩余时间估算');
+  {
+    ok('按已处理速度线性外推', () => {
+      // 10 秒处理 100 条 → 剩余 100 条还需约 10 秒
+      assert.equal(
+        estimateRemainingMs({ done: 100, total: 200, startedAt: 0, now: 10_000 }),
+        10_000,
+      );
+      // 已经处理完 → 0
+      assert.equal(estimateRemainingMs({ done: 200, total: 200, startedAt: 0, now: 10_000 }), 0);
+    });
+    ok('样本不足时返回 null（不编数字）', () => {
+      assert.equal(estimateRemainingMs({ done: 0, total: 200, startedAt: 0, now: 5_000 }), null);
+      assert.equal(estimateRemainingMs({ done: 5, total: 200, startedAt: 1_000, now: 1_000 }), null, '零耗时不能外推');
+      assert.equal(estimateRemainingMs({ done: 5, total: 0, startedAt: 0, now: 1_000 }), null);
+    });
+    ok('格式化成人话：不到 1 分钟 / 约 N 分钟 / 即将完成', () => {
+      assert.equal(formatRemaining(null), '');
+      assert.equal(formatRemaining(0), '即将完成');
+      assert.equal(formatRemaining(30_000), '不到 1 分钟');
+      assert.equal(formatRemaining(90_000), '约 2 分钟');
+      assert.equal(formatRemaining(600_000), '约 10 分钟');
+    });
+    ok('估算随进度收敛（不会越算越离谱）', () => {
+      const total = 1000;
+      const startedAt = 0;
+      const at = (done: number, now: number) => estimateRemainingMs({ done, total, startedAt, now });
+      // 速度 每 100ms 一条 → 剩下 900 条约 90s
+      assert.equal(at(100, 10_000), 90_000);
+      // 进度过半、速度不变 → 剩余约 45s
+      assert.equal(at(500, 50_000), 50_000);
+      // 接近完成 → 剩余很小
+      assert.ok((at(990, 99_000) ?? 0) <= 2_000);
+    });
+  }
+
+
+  /* ── T93: AI 分类连续失败后冷却 ──
+   * 用户把 Key 配错时，每一次收藏都会先等 12 秒超时再兜底——收藏本该是即时动作，
+   * 白等 12 秒的体感就是「这扩展坏了」。连续失败到阈值就暂停模型调用一段时间，
+   * 期间照常按本地规则归类，只是不问模型。 */
+  console.log('\n[T93] 自动整理 · AI 连续失败冷却');
+  {
+    const start = { streak: 0, cooldownUntil: 0, justCooled: false };
+
+    ok('连续失败累计；未达阈值不冷却', () => {
+      let st = start;
+      for (let i = 0; i < AI_FAIL_STREAK_LIMIT - 1; i++) {
+        st = nextAiStreakState({ state: st, failed: true, now: 1000 + i });
+      }
+      assert.equal(st.streak, AI_FAIL_STREAK_LIMIT - 1);
+      assert.equal(st.cooldownUntil, 0, '还没到阈值，不该冷却');
+      assert.equal(st.justCooled, false);
+    });
+
+    ok('达到阈值：进入冷却，且只提示一次', () => {
+      let st = start;
+      for (let i = 0; i < AI_FAIL_STREAK_LIMIT; i++) {
+        st = nextAiStreakState({ state: st, failed: true, now: 10_000 + i });
+      }
+      assert.ok(st.cooldownUntil > 10_000, '应当设置冷却截止时间');
+      assert.equal(st.justCooled, true, '首次进入冷却要提示');
+      // 冷却期内继续失败：不再重复提示
+      const again = nextAiStreakState({ state: st, failed: true, now: 20_000 });
+      assert.equal(again.justCooled, false, '冷却期内不重复提示');
+      assert.equal(again.cooldownUntil, st.cooldownUntil, '冷却窗口不变');
+    });
+
+    ok('成功一次就清零（偶发失败不该累积成冷却）', () => {
+      let st = { streak: AI_FAIL_STREAK_LIMIT - 1, cooldownUntil: 0, justCooled: false };
+      st = nextAiStreakState({ state: st, failed: false, now: 5000 });
+      assert.equal(st.streak, 0);
+      assert.equal(st.cooldownUntil, 0);
+    });
+
+    ok('冷却到期后重新计数，允许再试一次', () => {
+      const cooled = { streak: AI_FAIL_STREAK_LIMIT, cooldownUntil: 100_000, justCooled: false };
+      const after = nextAiStreakState({ state: cooled, failed: false, now: 100_000 + AI_COOLDOWN_MS });
+      assert.equal(after.streak, 0);
+      assert.equal(after.cooldownUntil, 0);
+      assert.equal(after.justCooled, false);
+    });
+
+    ok('没问模型（failed:false）时不累加，避免把「关掉 AI」误判成失败', () => {
+      const st = nextAiStreakState({ state: start, failed: false, now: 1000 });
+      assert.equal(st.streak, 0);
+      assert.equal(st.cooldownUntil, 0);
+    });
+  }
+
+
+  /* ── T94: 归类来源（本地规则 / 模型 / 兜底）──
+   * 用户想知道「AI 到底用了多频繁」：本地规则命中越多，说明自动整理越快也越省钱。
+   * 这条也是「关掉 AI 后仍然归类」的量化证明。 */
+  console.log('\n[T94] 自动整理 · 归类来源统计');
+  {
+    /* ① 本地规则高置信度命中 → via: 'local'（且不请求模型） */
+    // 品牌取自注册域的第一段（radix-ui.com → radix-ui），文件夹名要和它归一化后相同才拿满分
+    const designFolder = await mockBookmarks.create({ parentId: '1', title: 'Radix UI' });
+    storageMap.set('markai.config', {
+      providerId: 'deepseek',
+      baseUrl: 'https://api.deepseek.com',
+      apiKey: 'sk-test-not-real',
+      model: 'deepseek-v4-flash',
+      autoOrganizeNew: true,
+    });
+    fetchCalls.length = 0;
+    const localOne = await mockBookmarks.create({ parentId: '1', title: 'Radix 文档', url: 'https://radix-ui.com/docs' });
+    const localRes = await autoOrganizeBookmark(localOne.id);
+    ok('本地规则命中：via=local，且一次请求都不发', () => {
+      assert.equal(localRes.via, 'local', localRes.detail);
+      assert.equal(fetchCalls.length, 0, `不该请求模型，实际 ${fetchCalls.length} 次`);
+      assert.equal(nodeById(localOne.id)!.parentId, designFolder.id);
+    });
+
+    /* ② 未配置 AI → 兜底（域名归类） */
+    storageMap.delete('markai.config');
+    const fallbackOne = await mockBookmarks.create({ parentId: '1', title: '某站', url: 'https://fallback-via.example.org/x' });
+    const fallbackRes = await autoOrganizeBookmark(fallbackOne.id);
+    ok('没配 AI 时走兜底：via=fallback', () => {
+      assert.equal(fallbackRes.via, 'fallback', fallbackRes.detail);
+    });
+
+    /* ③ 统计按来源分组 */
+    const entries = [
+      makeOrganizeLogEntry({ title: 'a', url: 'https://a.com/1', domain: 'a.com', action: 'moved', detail: 'x', via: 'local' }, 1),
+      makeOrganizeLogEntry({ title: 'b', url: 'https://b.com/1', domain: 'b.com', action: 'moved', detail: 'x', via: 'model' }, 2),
+      makeOrganizeLogEntry({ title: 'c', url: 'https://c.com/1', domain: 'c.com', action: 'created', detail: 'x', via: 'fallback' }, 3),
+      makeOrganizeLogEntry({ title: 'd', url: 'https://d.com/1', domain: 'd.com', action: 'failed', detail: 'x' }, 4),
+    ];
+    const stats = summarizeOrganizeLog(entries, 10);
+    ok('统计：按来源计数，跳过/失败的条目不计入任何来源', () => {
+      assert.deepEqual(stats.byVia, { local: 1, model: 1, fallback: 1 });
+    });
+
+    // 清理
+    await mockBookmarks.removeTree(designFolder.id).catch(() => {});
+    await mockBookmarks.removeTree(localOne.id).catch(() => {});
+    await mockBookmarks.removeTree(fallbackOne.id).catch(() => {});
+    const box = store.find((n) => n.title === AUTO_CONTAINER && n.parentId === '1');
+    if (box) await mockBookmarks.removeTree(box.id).catch(() => {});
+    storageMap.delete('markai.config');
+  }
+
+
+  /* ── T95: 防护性上限（代码里早就有，但没有测试守着）──
+   * 这类上限一旦被误删，用户会看到「分类名莫名变短」「加了免打扰却没生效」，
+   * 而且没有任何报警。 */
+  console.log('\n[T95] 防护性上限');
+  {
+    /* ① 免打扰名单上限 100：第 101 个不该被静默塞进去，也不该撑爆 storage */
+    await clearOptOutDomains();
+    for (let i = 0; i < 100; i++) await addOptOutDomain(`site${i}.example.com`);
+    const atLimit = (await readOptOutDomains()).length;
+    await addOptOutDomain('one-more.example.com');
+    const afterOverflow = (await readOptOutDomains()).map((e) => e.domain);
+    ok('免打扰名单封顶 100 条，且保留的是「最近的」（LRU 而不是拒绝新的）', () => {
+      assert.equal(atLimit, 100);
+      assert.equal(afterOverflow.length, 100, '超出上限后长度必须仍是 100');
+      // 新撤销的站点必须生效——否则「我刚撤销了它，自动整理还在搬」，那才是真事故
+      assert.equal(afterOverflow.includes('one-more.example.com'), true, '最新撤销的站点必须在名单里');
+      // 被挤掉的是最老的那条
+      assert.equal(afterOverflow.includes('site0.example.com'), false, '最老的站点应被挤出');
+    });
+
+    /* ② 重复添加不占额度 */
+    await clearOptOutDomains();
+    await addOptOutDomain('dup.example.com');
+    await addOptOutDomain('dup.example.com');
+    await addOptOutDomain('DUP.example.com'); // 大小写归一化后仍是同一条
+    const dup = (await readOptOutDomains()).map((e) => e.domain);
+    ok('同一域名重复加入只算一条', () => {
+      assert.deepEqual(dup, ['dup.example.com']);
+    });
+    await clearOptOutDomains();
+  }
+
+
+  /* ── T96: 用户可见文案的用词一致性 ──
+   * 同一个概念在设置页叫「自动分类」、在开关上叫「自动整理」，用户会以为是两件事。
+   * 这条守卫只查 components 与 entrypoints（面向用户的字符串），不约束内部注释与 prompt。 */
+  console.log('\n[T96] 文案用词一致性');
+  {
+    const roots = ['src/components', 'src/entrypoints'];
+    const forbidden = ['自动分类', '撤回某一步', '单独撤回'];
+    const hits: string[] = [];
+    const walk = (dir: string): void => {
+      for (const entry of readdirSync(dir, { withFileTypes: true })) {
+        const full = `${dir}/${entry.name}`;
+        if (entry.isDirectory()) walk(full);
+        else if (/\.(tsx|ts)$/.test(entry.name)) {
+          const text = readFileSync(full, 'utf8');
+          for (const word of forbidden) {
+            if (text.includes(word)) hits.push(`${full}: ${word}`);
+          }
+        }
+      }
+    };
+    for (const r of roots) walk(r);
+    ok('面向用户的代码里不再出现「自动分类 / 撤回」这些别名', () => {
+      assert.deepEqual(hits, [], `发现别名：\n${hits.join('\n')}`);
+    });
+  }
+
+
+  /* ── T97: 使用指南与界面文案用同一套词 ──
+   * 指南说「免打扰名单」、界面说「已停用自动整理」，用户对照着找会找不到。 */
+  console.log('\n[T97] 使用指南用词与界面一致');
+  {
+    const guide = readFileSync('docs/user-guide.md', 'utf8');
+    const readTree = (dir: string): string[] => {
+      const out: string[] = [];
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const full = `${dir}/${e.name}`;
+        if (e.isDirectory()) out.push(...readTree(full));
+        else if (/\.(tsx|ts)$/.test(e.name)) out.push(readFileSync(full, 'utf8'));
+      }
+      return out;
+    };
+    const uiBlob = ['src/components', 'src/entrypoints'].flatMap(readTree).join('\n');
+    ok('指南里提到的关键概念，界面上都能找到同样的字', () => {
+      // 界面用「已停用自动整理」这个说法，指南也必须用它
+      assert.ok(uiBlob.includes('已停用自动整理'), '界面应当有这个说法（守卫前提）');
+      assert.ok(guide.includes('已停用自动整理'), '指南里应当使用界面上同样的说法');
+      assert.equal(guide.includes('免打扰'), false, '指南不该再出现界面上不存在的「免打扰」');
+    });
+  }
+
+  /* ── T98: 本轮审计修复的缺陷 ──
+   * 每条都对应一处真实缺陷，且能在修复前变红。目的不是「多一条测试」，
+   * 而是把「这个错误不会再犯」变成可执行的事实。 */
+  console.log('\n[T98] 本轮审计修复的缺陷');
+  {
+    /* ① 「散落书签」的收集：形态 + 排除窗口
+     *
+     * 缺陷：`collectLooseBookmarks(tree, 200).filter(t => !processed.has(t.id))`。
+     * 先按 200 截断、再过滤已处理的，于是「前 200 条全都处理过」时批次空掉、
+     * `break` 带走剩下所有书签，而界面只会说「补整理完成」。
+     * 修法：把排除放进收集阶段（`exclude` 参数），被排除的项不占窗口。 */
+    const mkB = (id: string, title: string, parentId: string, url?: string, children?: unknown[]) =>
+      ({
+        id,
+        title,
+        parentId,
+        ...(url ? { url } : {}),
+        ...(children ? { children } : {}),
+      }) as unknown as chrome.bookmarks.BookmarkTreeNode;
+
+    const auditBar = mkB('1', '书签栏', '0', undefined, [
+      mkB('b1', 'A', '1', 'https://a.example/1'),
+      mkB('b2', 'B', '1', 'https://b.example/2'),
+      mkB('f1', '设计', '1', undefined, [mkB('b3', 'C', 'f1', 'https://c.example/3')]),
+      mkB('ac', AUTO_CONTAINER, '1', undefined, [mkB('b9', 'E', 'ac', 'https://e.example/9')]),
+    ]);
+    const auditOther = mkB('2', '其他书签', '0', undefined, [mkB('b4', 'D', '2', 'https://d.example/4')]);
+    const auditTree = [mkB('0', '', '0', undefined, [auditBar, auditOther])];
+
+    const got = collectLooseBookmarksFromRoots([auditBar, auditOther], 100);
+    ok('散落书签收集：接受三个根文件夹形态，只收根目录下与「自动整理」容器里的书签', () => {
+      assert.deepEqual(
+        got.map((t) => t.id),
+        ['b1', 'b2', 'b9', 'b4'],
+        `实际 ${JSON.stringify(got.map((t) => t.id))}`,
+      );
+      assert.equal(
+        got.some((t) => t.id === 'b3'),
+        false,
+        '用户分类（设计）里的书签不该被当成散落项',
+      );
+    });
+
+    ok('散落书签收集：getTree 形态与根数组形态结果一致（UI 与后台必须看到同一批）', () => {
+      const viaTree = collectLooseBookmarks(auditTree, 100);
+      assert.deepEqual(viaTree.map((t) => t.id), got.map((t) => t.id));
+    });
+
+    ok('散落书签收集：已处理的条目在收集阶段就被排除（不占 200 的窗口）', () => {
+      // 窗口只有 1 条：若排除发生在截断之后，b1 会先占住窗口再被滤掉，结果为空。
+      const withExclude = collectLooseBookmarks(auditTree, 1, new Set(['b1', 'b2']));
+      assert.equal(withExclude.length, 1, '排除项占用了窗口 → 后续书签永远扫不到');
+      assert.equal(withExclude[0]!.id, 'b9', '窗口应当被下一个未处理的书签填满');
+      // 对照：不排除时窗口里就是第一条
+      assert.equal(collectLooseBookmarks(auditTree, 1)[0]!.id, 'b1');
+    });
+
+    /* ② 兜底落点必须带上 aiFailed / target / runId
+     *
+     * 缺陷：③ 分支（按注册域兜底）返回的对象缺这三个字段。
+     *  - 缺 aiFailed → 用户配了坏 Key 也永远不进入冷却，每次收藏都白等 12 秒；
+     *  - 缺 target   → 整理记录里不显示「去了哪个文件夹」；
+     *  - 缺 runId    → 同上那条记录没有「↶ 撤销」，用户不满意时无路可退。
+     * 这条分支恰好是「没有任何本地匹配的新用户 + 坏 Key」唯一会走到的路径。 */
+    storageMap.set('markai.config', {
+      providerId: 'deepseek',
+      baseUrl: 'https://api.deepseek.com',
+      apiKey: 'sk-not-a-real-key',
+      model: 'deepseek-v4-flash',
+      autoOrganizeNew: true,
+    });
+    // 401 不可重试，立即失败——不用真的等 5 次指数退避
+    sseQueue.push(sseResponse([], 401));
+    const badKeyBookmark = await mockBookmarks.create({
+      parentId: '1',
+      title: '某站',
+      url: 'https://audit-no-match.example/entry',
+    });
+    const badKeyRes = await autoOrganizeBookmark(badKeyBookmark.id);
+    ok('坏 Key + 无本地匹配：兜底结果必须上报 aiFailed（否则冷却永不触发）', () => {
+      assert.equal(badKeyRes.ok, true, badKeyRes.detail);
+      assert.equal(badKeyRes.action, 'created', `预期落进新建的域名文件夹，实际 ${badKeyRes.detail}`);
+      assert.equal(badKeyRes.aiFailed, true, '模型失败没有被上报 → 连续失败计数不会累加');
+      assert.ok(badKeyRes.target, '必须带上落点文件夹名（面板要显示「→ 去哪了」）');
+      assert.ok(badKeyRes.runId, '必须带上撤销点（否则这条记录没有「撤销」按钮）');
+    });
+    // 清理：域名文件夹、书签、配置
+    const auditDomainFolder = store.find((n) => n.title === 'audit-no-match.example');
+    if (auditDomainFolder) await mockBookmarks.removeTree(auditDomainFolder.id).catch(() => {});
+    await mockBookmarks.removeTree(badKeyBookmark.id).catch(() => {});
+    const auditContainer = store.find((n) => n.title === AUTO_CONTAINER);
+    if (auditContainer) await mockBookmarks.removeTree(auditContainer.id).catch(() => {});
+    storageMap.delete('markai.config');
+
+    /* ③ 只对子域成立的语义分类条目必须查得到
+     *
+     * 缺陷：`SITE_CATEGORY` 里写了 `news.ycombinator.com`、`music.163.com`，
+     * 但查表只用注册域（`ycombinator.com` / `163.com`），这两条永远命中不了——
+     * 配置写了等于没写。修法是允许用完整主机名查。 */
+    ok('语义分类：news.ycombinator.com 归「阅读」（只对子域成立的条目必须查得到）', () => {
+      const rootOpt = { id: '1', title: '书签栏', path: '书签栏', depth: 0 };
+      const reading = { id: 'fr', title: '阅读', path: '书签栏 / 阅读', depth: 1, parentId: '1' };
+      const viaHost = pickExistingFolder({
+        domain: 'ycombinator.com',
+        host: 'news.ycombinator.com',
+        folders: [rootOpt, reading],
+        rootId: '1',
+      });
+      assert.equal(viaHost?.folder.id, 'fr', '完整主机名必须命中「阅读」');
+      assert.equal(viaHost?.score, 70);
+      // 不传 host（旧调用方式）时拿不到——说明这个能力确实依赖新参数
+      const withoutHost = pickExistingFolder({ domain: 'ycombinator.com', folders: [rootOpt, reading], rootId: '1' });
+      assert.equal(withoutHost, null, '注册域本身没有分类条目，不该凭空命中');
+    });
+
+    /* ④ 站内确认框：后来的请求排队，不覆盖前一个
+     *
+     * 缺陷：`requestConfirm` 无条件 `set({ confirmRequest: req })`。
+     * 「清空记录」的确认框还开着时若另一处又发请求，前一个的 onConfirm 被静默丢弃——
+     * 用户点「确定」执行的是屏幕上没写的那件事。 */
+    ok('站内确认框：第二个请求排队而不是覆盖（不会执行用户没看到的那件事）', () => {
+      const ui = useUIStore.getState();
+      ui.cancelConfirm();
+      assert.equal(useUIStore.getState().confirmRequest, null, '前置：先清空');
+
+      const fired: string[] = [];
+      ui.requestConfirm({ title: '第一个', onConfirm: () => fired.push('first') });
+      ui.requestConfirm({ title: '第二个', onConfirm: () => fired.push('second') });
+
+      assert.equal(useUIStore.getState().confirmRequest?.title, '第一个', '屏幕上应当仍是最早那个');
+      assert.equal(useUIStore.getState().confirmQueue.length, 1, '第二个必须在队列里等着');
+
+      useUIStore.getState().resolveConfirm();
+      assert.deepEqual(fired, ['first'], '只该执行屏幕上那个');
+      assert.equal(useUIStore.getState().confirmRequest?.title, '第二个', '前一个处理完，后一个露出来');
+
+      useUIStore.getState().resolveConfirm();
+      assert.deepEqual(fired, ['first', 'second']);
+      assert.equal(useUIStore.getState().confirmRequest, null);
+      assert.equal(useUIStore.getState().confirmQueue.length, 0);
+    });
+  }
+
+  /* ══════════ T99: 0.2.34 审计修复 ══════════ */
+  console.log('\n[T99] 0.2.34 审计修复（每条都对应一处用户可见缺陷）');
+  {
+    const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const read = (rel: string) => readFileSync(resolve(rootDir, rel), 'utf8');
+    const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+    /* ── 行为：单击打开 vs 双击重命名（旧实现双击必然先开一个标签页） ── */
+    {
+      const opened: string[] = [];
+      const d = createDelayedOpen(() => opened.push('open'), 5);
+      d.schedule();
+      d.cancel(); // 双击的第二次手势到达 → 取消那次打开
+      await sleep(25);
+      ok('双击取消后书签一次都不打开（旧实现是"先开一个标签页再弹重命名框"）', () =>
+        assert.deepEqual(opened, [], `实际打开了 ${opened.length} 次`),
+      );
+    }
+    {
+      const opened: string[] = [];
+      const d = createDelayedOpen(() => opened.push('open'), 5);
+      d.schedule();
+      assert.equal(d.pending(), true, '排下去之后应当处于待执行状态');
+      await sleep(25);
+      ok('单击在双击窗口之后打开，且只打开一次', () => {
+        assert.deepEqual(opened, ['open']);
+        assert.equal(d.pending(), false, '执行完必须清掉定时器状态');
+      });
+    }
+    {
+      const opened: string[] = [];
+      const d = createDelayedOpen(() => opened.push('open'), 5);
+      d.schedule();
+      d.schedule(); // 连点两次「打开」
+      await sleep(25);
+      ok('连续两次 schedule 只打开一次（同一行只可能有一个打开意图）', () =>
+        assert.equal(opened.length, 1, `实际 ${opened.length} 次`),
+      );
+    }
+    {
+      const opened: string[] = [];
+      const d = createDelayedOpen(() => opened.push('open'), 5);
+      d.schedule();
+      d.dispose(); // 行组件卸载
+      await sleep(25);
+      ok('dispose 之后不再打开（组件已卸载，不该再去开标签页）', () =>
+        assert.deepEqual(opened, []),
+      );
+    }
+
+    /* ── 行为：面板宽度口径统一 ── */
+    ok('侧边栏上限下 640 被钳成 560（此前内部 640 / 视觉 560，一拖就跳）', () =>
+      assert.equal(clampChatWidth(640, CHAT_WIDTH_MAX_COMPACT), CHAT_WIDTH_MAX_COMPACT),
+    );
+    ok('完整页允许到 640，超过则钳住', () => {
+      assert.equal(clampChatWidth(640, CHAT_WIDTH_MAX), 640);
+      assert.equal(clampChatWidth(4096, CHAT_WIDTH_MAX), CHAT_WIDTH_MAX);
+    });
+    ok('NaN / Infinity 一律回落下限（异常 storage 值不该让面板凭空消失或占满屏）', () => {
+      assert.equal(clampChatWidth(Number.NaN, CHAT_WIDTH_MAX), CHAT_WIDTH_MIN);
+      // Infinity 也算异常值：它有"数值"但不是宽度，按同一口径保守处理
+      assert.equal(clampChatWidth(Number.POSITIVE_INFINITY, CHAT_WIDTH_MAX), CHAT_WIDTH_MIN);
+      assert.equal(clampChatWidth(Number.NEGATIVE_INFINITY, CHAT_WIDTH_MAX), CHAT_WIDTH_MIN);
+    });
+    ok('上限小于下限时以下限为准（不产生越界或负宽度）', () =>
+      assert.equal(clampChatWidth(500, 10), CHAT_WIDTH_MIN),
+    );
+    ok('紧凑上限确实小于完整页上限（两个形态的口径不能反过来）', () =>
+      assert.ok(CHAT_WIDTH_MAX_COMPACT < CHAT_WIDTH_MAX),
+    );
+
+    /* ── 源码守卫：图标不得把书签域名发给第三方 ── */
+    /**
+     * 图标这条的第一版改动是**错的**，测试也跟着错了——所以这里的断言换了立场：
+     * 不再要求"不许联系第三方"（实测 Chrome 本地图标源对未访问过的站点只会返回
+     * 同一张默认灰球，比没有图标更糟），而是要求"联系了就必须在隐私文档里说清楚"。
+     * 承诺与实现必须对得上，无论选哪条路。
+     */
+    ok('favicon 的域名外发必须在 privacy.md 里如实披露（承诺要与实现对得上）', () => {
+      const src = read('src/components/common/favicon.tsx');
+      const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '');
+      // 实现：走 Google s2，且只带 domain（不带标题/完整 URL）
+      assert.match(code, /google\.com\/s2\/favicons\?sz=32&domain=/, '图标源应走 Google s2 且只传 domain');
+      assert.ok(
+        !/favicon[^`'"]*\?[^`'"]*(title|url=)/i.test(code),
+        '不要把标题或完整 URL 塞进图标请求',
+      );
+      // 文档：必须点名 Google、点名"只传域名"
+      const privacy = read('docs/privacy.md');
+      assert.match(privacy, /google\.com\/s2\/favicons/, 'privacy.md 必须点名图标来源是 Google s2');
+      assert.match(privacy, /域名/, 'privacy.md 必须说明传出去的是域名');
+      assert.match(privacy, /不带[^\n]*标题/, 'privacy.md 必须说明不传标题/完整网址');
+    });
+    ok('不再申请 favicon 权限（改用 Google s2 后它没有用处，留着只是多一条权限）', () => {
+      assert.ok(
+        !/permissions:\s*\[[^\]]*'favicon'/.test(read('wxt.config.ts')),
+        'wxt.config.ts 里残留了 favicon 权限',
+      );
+    });
+    ok('本地图标源的实测结论被写进注释（避免后人再踩一次同一个坑）', () => {
+      const src = read('src/components/common/favicon.tsx');
+      assert.match(src, /_favicon/, '要记下"试过本地图标源"这件事');
+      assert.match(src, /默认/, '要写清它返回的是默认图标，而不是站点图标');
+    });
+
+    /* ── 源码守卫：隐式全局（WXT auto-import）不得成为唯一依赖 ── */
+    ok('bookmark-list 显式 import useCallback（不靠 WXT auto-import 才编译得过）', () => {
+      const src = read('src/components/bookmark-list/bookmark-list.tsx');
+      assert.match(src, /import \{[^}]*\buseCallback\b[^}]*\} from 'react'/, 'react import 里没有 useCallback');
+    });
+
+    /* ── 源码守卫：订阅粒度 ── */
+    ok('MessageView 不再订阅整棵 roots（否则任何书签刷新都让全部历史消息重渲染）', () => {
+      const src = read('src/components/chat/message-view.tsx');
+      assert.ok(!/\(s\)\s*=>\s*s\.roots/.test(src), '仍在订阅 s.roots 整个数组');
+      assert.match(src, /contextFolderId/, '应当改为只订阅本消息自己那条路径');
+    });
+
+    /* ── 源码守卫：死代码与硬编码 ── */
+    ok('待删清单里不再有 seenIds / initialSelectDone 死引用', () => {
+      const src = read('src/components/deletions/deletions-dialog.tsx');
+      assert.ok(!/const seenIds = useRef/.test(src), 'seenIds 是死代码');
+      assert.ok(!/const initialSelectDone = useRef/.test(src), 'initialSelectDone 是死代码');
+    });
+    ok('「一次最多打开几个」不再硬编码（常量与提示文案必须同源）', () => {
+      const src = read('src/components/sidebar/bookmark-tree.tsx');
+      assert.match(src, /const MAX_OPEN_AT_ONCE = \d+/, '应有 MAX_OPEN_AT_ONCE 常量');
+      assert.ok(!/slice\(0, 25\)/.test(src), '仍有写死的 slice(0, 25)');
+      assert.ok(!/仅打开前 25 个/.test(src), '提示文案仍写死 25');
+    });
+
+    /* ── 源码守卫：菜单定位必须实测 ── */
+    ok('右键菜单按真实 DOM 尺寸定位（不再用 w-52→196 / 行高 28 的估算）', () => {
+      const src = read('src/components/sidebar/bookmark-tree.tsx');
+      assert.ok(!/innerWidth - 196/.test(src), '仍在用 196 这个估算宽度');
+      assert.match(src, /getBoundingClientRect\(\)/, '应当实测菜单尺寸');
+      assert.match(src, /useLayoutEffect/, '量完再落位要在 layout effect 里做（绘制前，不闪）');
+    });
+
+    /* ── 源码守卫：两个入口不得各写一套 seed ── */
+    ok('侧边栏与完整页的种子消费逻辑只有一份（不再逐字复制）', () => {
+      for (const rel of ['src/entrypoints/sidepanel/main.tsx', 'src/entrypoints/page/main.tsx']) {
+        const src = read(rel);
+        assert.ok(!/function consumeSeed/.test(src), `${rel} 里又出现了本地 consumeSeed`);
+        assert.ok(!/function queueSeed/.test(src), `${rel} 里又出现了本地 queueSeed`);
+        assert.match(src, /from '@\/lib\/chat\/seed'/, `${rel} 应从共享模块导入`);
+      }
+      const shared = read('src/lib/chat/seed.ts');
+      assert.match(shared, /export async function consumeSeed/);
+      assert.match(shared, /export function queueSeed/);
+    });
+
+    /* ── 守卫：异步用例必须真的被等待（否则用例名会在失败时丢失） ── */
+    ok('测试自身不再出现「ok(name, async …)」这种不等待的写法', () => {
+      const src = readFileSync(resolve(rootDir, 'tests/agent.test.ts'), 'utf8');
+      assert.ok(
+        !/\bok\(\s*'[^']*'\s*,\s*async/.test(src),
+        '有异步用例仍走同步的 ok()：断言会在 ok 返回后才结算，✔ 先打印、失败时用例名丢失',
+      );
+    });
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

@@ -56,6 +56,14 @@ profile 的人或恶意软件可以读到它——请像对待其他本地凭据
 - 不读你的浏览历史、不注入网页脚本、不修改任何网站内容
   （权限清单见 [permissions.md](./permissions.md)：只有 `bookmarks` / `storage` / `tabs` /
   `tabGroups` / `contextMenus` / `sidePanel`，没有 `history`、没有 content script）；
+- **站点图标来自 Google**（这一条是例外，必须说清楚）：书签行的图标走
+  `google.com/s2/favicons`，请求里带的是**域名**（如 `github.com`），
+  **不带**书签标题、完整网址、路径或收藏时间。也就是说 Google 能看到
+  「这台机器在什么时候问过哪些站的图标」，看不到你收藏的是哪个具体页面。
+  为什么不去掉：换成浏览器本地图标源（`/_favicon/`）实测是坏的——
+  它只查本机浏览历史缓存，没访问过的站点一律返回同一张默认灰球，整列图标无法区分。
+  想彻底不联系 Google，可以自行在 `src/components/common/favicon.tsx` 里
+  把 `src` 改成返回空串，代价是全部退化成首字母方块；
 - 不因为"改进产品"而收集任何使用数据。
 
 ## 4. 如何清除

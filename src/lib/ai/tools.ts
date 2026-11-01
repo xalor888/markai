@@ -8,6 +8,7 @@ import { jCreate, jMove, jRemove, jUpdate, recordMoveBatch } from '@/lib/undo/mu
 import { buildDuplicateGroups, normalizeUrl, pickDuplicateKeeper, type DupeNode } from './dedupe';
 import { ensureOrderCheckpoint } from '@/lib/undo/recorder';
 import { addMemoryItem, deleteMemoryItem, getMemories, searchMemories } from './memory';
+import { registrableDomain } from '@/lib/bookmarks/domain';
 
 /** 工具执行结果 */
 export interface ToolOutput {
@@ -534,28 +535,6 @@ async function classifyUrls(args: unknown): Promise<ToolOutput> {
       items,
     }),
   };
-}
-
-/** 常见两段式国家/地区域名后缀（注册域需取三段，如 co.uk / com.cn） */
-const TWO_PART_TLDS = new Set([
-  'co.uk', 'org.uk', 'ac.uk', 'gov.uk', 'com.cn', 'net.cn', 'org.cn', 'gov.cn', 'edu.cn',
-  'com.hk', 'com.tw', 'com.jp', 'co.jp', 'ne.jp', 'or.jp', 'co.kr', 'com.sg', 'com.au',
-  'com.br', 'com.mx', 'co.in', 'com.tr', 'co.za', 'com.ar', 'com.ua', 'com.ru',
-]);
-
-/** 提取注册域（www. 与子域剥离；两段式 TLD 保留三段）用于分组 */
-function registrableDomain(raw: string): string | null {
-  try {
-    const host = new URL(raw).hostname.toLowerCase();
-    const parts = host.split('.').filter(Boolean);
-    if (parts.length < 2) return host || null;
-    // 常见 ccTLD 组合（co.uk 等）：注册域 = 最后三段
-    const lastTwo = parts.slice(-2).join('.');
-    if (TWO_PART_TLDS.has(lastTwo) && parts.length >= 3) return parts.slice(-3).join('.');
-    return parts.slice(-2).join('.');
-  } catch {
-    return null;
-  }
 }
 
 const autoCategorizeSchema = z.object({

@@ -1,6 +1,7 @@
-import { BookmarkPlus, LayoutPanelLeft, Settings, Trash2 } from 'lucide-react';
+import { BookmarkPlus, LayoutPanelLeft, Settings, Trash2, Wand2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
+import { ErrorBoundary } from '@/components/common/error-boundary';
 import '@/assets/main.css';
 import { AI_STORAGE_KEY } from '@/stores/aiStore';
 import type { AIConfig, ChatMessage, DeletionProposal } from '@/lib/ai/types';
@@ -8,6 +9,7 @@ import { resolveConfig, PROVIDERS } from '@/lib/providers';
 import { ThemeProvider } from '@/components/theme/theme-provider';
 import { ToastViewport } from '@/components/toast/toast';
 import { openUrl } from '@/lib/open-url';
+import { ORGANIZE_LOG_KEY, readOrganizeLog, summarizeOrganizeLog, type OrganizeStats } from '@/lib/ai/organize-log';
 import { appVersion } from '@/lib/version';
 import { BrandMark } from '@/components/theme/theme-provider';
 import { Badge } from '@/components/ui/badge';
@@ -30,6 +32,8 @@ function PopupApp() {
   const [saveError, setSaveError] = useState('');
   const [taskRunning, setTaskRunning] = useState(false);
   const [autoDeleteMode, setAutoDeleteMode] = useState(false);
+  /** 自动整理摘要：popup 是用户最容易看到「它刚帮我干了什么」的地方 */
+  const [organizeStats, setOrganizeStats] = useState<OrganizeStats | null>(null);
 
   // 当前活动标签页是否可收藏（http/https 才可）
   useEffect(() => {
@@ -51,6 +55,9 @@ function PopupApp() {
         }
       })
       .catch(() => setTaskRunning(false));
+    void readOrganizeLog()
+      .then((entries) => setOrganizeStats(summarizeOrganizeLog(entries)))
+      .catch(() => setOrganizeStats(null));
     void chrome.storage.local
       .get([AI_STORAGE_KEY, 'markai.config'])
       .then((data) => {
@@ -109,7 +116,9 @@ function PopupApp() {
       changes: { [key: string]: chrome.storage.StorageChange },
       area: chrome.storage.AreaName,
     ) => {
-      if (area === 'local' && (changes[AI_STORAGE_KEY] || changes['markai.config'])) refresh(false);
+      if (area === 'local' && (changes[AI_STORAGE_KEY] || changes['markai.config'] || changes[ORGANIZE_LOG_KEY])) {
+        refresh(false);
+      }
     };
     chrome.storage.onChanged.addListener(onChanged);
     return () => chrome.storage.onChanged.removeListener(onChanged);
@@ -208,6 +217,32 @@ function PopupApp() {
           )}
         </div>
 
+        {/* 自动整理摘要：把后台行为摊到台面上 */}
+        <button
+          type="button"
+          onClick={() => openFullPage('#organize')}
+          className="w-full rounded-lg border border-border bg-card p-3.5 text-left transition-colors hover:border-accent/30 hover:bg-muted"
+          title="查看整理记录（动了哪些书签、能否重试）"
+        >
+          <div className="flex items-center gap-2">
+            <Wand2 className="h-3.5 w-3.5 text-accent" />
+            <span className="text-xs font-medium text-foreground">自动整理</span>
+            <Badge variant="outline" className="ml-auto">
+              今天 {organizeStats?.today ?? 0} 条
+            </Badge>
+          </div>
+          <p className="mt-2 text-2xs leading-4 text-muted-foreground">
+            {organizeStats?.latest
+              ? `最近：${organizeStats.latest.title}${organizeStats.latest.target ? ` → ${organizeStats.latest.target}` : ''}`
+              : '收藏新页面后会自动归类，记录会出现在这里。'}
+          </p>
+          {(organizeStats?.failed ?? 0) > 0 && (
+            <p className="mt-1 text-2xs text-destructive">
+              有 {organizeStats?.failed} 条整理失败，可查看并重试
+            </p>
+          )}
+        </button>
+
         {/* 最近动态（点击打开完整页） */}
         <button
           type="button"
@@ -240,7 +275,8 @@ function PopupApp() {
 
         {/* 入口按钮 */}
         <div className="grid grid-cols-1 gap-2">
-          <Button variant="default" onClick={() => openFullPage()}>
+          {/* 两个实心按钮会互相抢注意力：AI 未配置时真正的下一步是「去配置」 */}
+          <Button variant={aiConfigured ? 'default' : 'outline'} onClick={() => openFullPage()}>
             打开完整管理页
           </Button>
           <Button
@@ -273,9 +309,11 @@ function PopupApp() {
 }
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
-  <>
-    <PopupApp />
-    {/* 弹窗原先没有 toast 视口：任何 pushToast 在这里都不可见（打开失败也没提示） */}
-    <ToastViewport />
-  </>,
+  <ErrorBoundary area="MarkAI 弹出窗">
+    <>
+      <PopupApp />
+      {/* 弹窗原先没有 toast 视口：任何 pushToast 在这里都不可见（打开失败也没提示） */}
+      <ToastViewport />
+    </>
+  </ErrorBoundary>,
 );

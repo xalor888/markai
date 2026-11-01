@@ -22,6 +22,10 @@ export const DEFAULT_CONFIG: AIConfig = {
   contextWindow: undefined,
   compressThreshold: 0.8,
   autoCompress: false,
+  // 新书签自动整理：默认开启（新增书签即归类，无需手动点）
+  autoOrganizeNew: true,
+  // 自动整理允许调用 AI（关掉则只用本地规则，见 auto-organize.ts）
+  autoOrganizeAi: true,
   configVersion: CONFIG_VERSION,
 };
 

@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { LocateFixed } from 'lucide-react';
+import { Loader2, LocateFixed, Trash2 } from 'lucide-react';
 import { useAIStore } from '@/stores/aiStore';
+import { useUIStore } from '@/stores/uiStore';
 import { useBookmarkStore } from '@/stores/bookmarkStore';
+import { createBusyGuard } from '@/lib/chat/busy-guard';
 import { formatRelativeTime, getHost, truncate } from '@/lib/format';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -17,13 +19,37 @@ export function DeletionsDialog({ open, onOpenChange }: { open: boolean; onOpenC
   const pendingDeletions = useAIStore((s) => s.pendingDeletions);
   const confirmDeletions = useAIStore((s) => s.confirmDeletions);
   const declineAllDeletions = useAIStore((s) => s.declineAllDeletions);
-  const [checked, setChecked] = useState<Set<string>>(new Set());
-  // 已见过的提议 id：仅对新增项默认勾选，不覆盖用户手动取消的选择
-  const seenIds = useRef(new Set<string>());
+  /* 勾选状态由「全部候选 − 用户取消的」推导出来。
+   * 取消的 id 存在 store 里：关掉面板再打开，用户的「这几条我不想删」必须还在，
+   * 否则重开时被重置成全选，下一次点删除就会连它们一起删掉。 */
+  const uncheckedIds = useUIStore((s) => s.deletionUnchecked);
+  const setUncheckedIds = useUIStore((s) => s.setDeletionUnchecked);
+  const checked = useMemo(() => {
+    const set = new Set<string>();
+    for (const p of pendingDeletions) {
+      if (!uncheckedIds.has(p.id)) set.add(p.id);
+    }
+    return set;
+  }, [pendingDeletions, uncheckedIds]);
+  const setChecked = (next: Set<string> | ((prev: Set<string>) => Set<string>)) => {
+    const resolved =
+      typeof next === 'function'
+        ? next(new Set(pendingDeletions.filter((p) => !uncheckedIds.has(p.id)).map((p) => p.id)))
+        : next;
+    const keep = new Set(pendingDeletions.map((p) => p.id));
+    const unchecked = new Set<string>();
+    for (const id of keep) {
+      if (!resolved.has(id)) unchecked.add(id);
+    }
+    setUncheckedIds(unchecked);
+  };
   // 执行清理的进行中状态（防止重复点击）
   const [executing, setExecuting] = useState(false);
-  // 本次打开是否已做初始全选（防止 pending 引用变化时把用户手动取消的项重新勾上）
-  const initialSelectDone = useRef(false);
+  // 逐条删除的进行中集合：只锁对应行，支持连续点多行。
+  // T10：真正的守卫在 ref（同步可变，begin() 原子占用），state 只负责渲染；
+  // 否则同一 tick 连点同一行会读到旧快照、重复提交。
+  const busyGuard = useRef(createBusyGuard());
+  const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
 
   // useMemo 稳定引用：pending 若为每次渲染新建的数组，会被下面 useEffect 的依赖数组
   // 视为「每次都在变」，导致打开对话框时 effect 每渲染都重跑 + setChecked 每渲染都产生新 Set，
@@ -33,33 +59,18 @@ export function DeletionsDialog({ open, onOpenChange }: { open: boolean; onOpenC
     [pendingDeletions],
   );
 
-  // 打开时全选当前项；打开期间新提议到达时只勾选新增项
+  /* 默认全选由 `uncheckedIds` 推导（见上面的 checked useMemo），所以这里**不再需要**「打开时全选」。
+   * 之前那套 initialSelectDone + setChecked(ids) 会把用户在上一轮取消的勾选覆盖掉。 */
   useEffect(() => {
     if (!open) return;
-    if (!initialSelectDone.current) {
-      // 本次打开的首次运行：清理残留勾选 + 全选当前项
-      initialSelectDone.current = true;
-      const ids = new Set(pending.map((p) => p.id));
-      for (const p of pending) seenIds.current.add(p.id);
-      setChecked(ids);
-      return;
-    }
-    // 后续（新提议到达 / 跨窗口合并）：清理失效勾选，只勾选新增项，不覆盖用户手动取消
+    // 只清理「已经不在候选里」的 id，避免 unchecked 集合无限增长
     const validIds = new Set(pending.map((p) => p.id));
-    setChecked((prev) => {
-      const next = new Set([...prev].filter((id) => validIds.has(id)));
-      const fresh = pending.filter((p) => !seenIds.current.has(p.id));
-      for (const p of pending) seenIds.current.add(p.id);
-      for (const p of fresh) next.add(p.id);
-      return next;
-    });
+    const next = new Set([...useUIStore.getState().deletionUnchecked].filter((id) => validIds.has(id)));
+    if (next.size !== useUIStore.getState().deletionUnchecked.size) {
+      useUIStore.getState().setDeletionUnchecked(next);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, pending]);
-
-  // 关闭时重置初始标记（下次打开重新全选）
-  useEffect(() => {
-    if (!open) initialSelectDone.current = false;
-  }, [open]);
 
   // 仅统计仍处于 pending 的勾选项：checked 可能残留已执行/已放弃的旧 id（状态切换后 pending 收缩）
   const checkedCount = pending.filter((p) => checked.has(p.id)).length;
@@ -76,6 +87,32 @@ export function DeletionsDialog({ open, onOpenChange }: { open: boolean; onOpenC
       else next.add(id);
       return next;
     });
+  };
+
+  /**
+   * 逐条删除：点一次就执行这一条，对话框保持打开，方便连续清理多条。
+   * busy 与 executing 互斥，避免与「执行清理」并发提交同一批提议；
+   * finally 解锁保证失败后按钮立刻可重试（不会出现「点一次之后再点没反应」）。
+   */
+  const removeOne = async (id: string) => {
+    if (executing) return;
+    if (!busyGuard.current.begin(id)) return;
+    setBusyIds(busyGuard.current.snapshot());
+    try {
+      await confirmDeletions([id]);
+    } catch {
+      // 失败已由 store 如实 toast；finally 解锁后可直接重试
+    } finally {
+      busyGuard.current.end(id);
+      setBusyIds(busyGuard.current.snapshot());
+      // 已处理项从勾选集合移除，底部计数与按钮状态立即同步
+      setChecked((prev) => {
+        if (!prev.has(id)) return prev;
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
   };
 
   return (
@@ -144,6 +181,21 @@ export function DeletionsDialog({ open, onOpenChange }: { open: boolean; onOpenC
                   </p>
                 </div>
                 <span className="shrink-0 text-2xs text-muted-foreground">{formatRelativeTime(p.createdAt)}</span>
+                {/* 逐条删除：不必先勾选再点底部按钮（原先只有批量路径，单条清理要绕两步） */}
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    void removeOne(p.id);
+                  }}
+                  disabled={executing || busyIds.has(p.id)}
+                  className="mt-0.5 shrink-0 rounded-sm p-1 text-destructive/80 transition-colors hover:bg-destructive/10 hover:text-destructive disabled:cursor-not-allowed disabled:opacity-50"
+                  title="立即删除这一项"
+                  aria-label={`删除 ${p.title}`}
+                >
+                  {busyIds.has(p.id) ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                </button>
               </div>
             ))}
           </div>

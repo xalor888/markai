@@ -1,11 +1,12 @@
 import { ArrowDownUp, BookmarkPlus, Copy, ExternalLink, Folder, FolderInput, FolderOpen, FolderPlus, Link2, Search, Sparkles, Trash2, X } from 'lucide-react';
-import { memo, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
 import { useAIStore } from '@/stores/aiStore';
 import { useBookmarkStore, copyNodeDeep, findNode, buildFolderChildCounts, resolveTitlePath, type TreeContextMenu } from '@/stores/bookmarkStore';
 import { useUIStore } from '@/stores/uiStore';
 import { copyText } from '@/lib/clipboard';
 import { formatRelativeTime, getHost } from '@/lib/format';
 import { isSelfOrDescendant, resolveDropIndex } from '@/lib/bookmark-dnd';
+import { createDelayedOpen } from '@/lib/bookmarks/delayed-open';
 import { pushToast } from '@/lib/toast';
 import { openUrl, openUrls } from '@/lib/open-url';
 import { describeBulk } from '@/lib/bookmarks/bulk';
@@ -37,6 +38,14 @@ export function BookmarkList({ className, compact = false }: { className?: strin
   const roots = useBookmarkStore((s) => s.roots);
   const selectedFolderId = useBookmarkStore((s) => s.selectedFolderId);
   const selectedIds = useBookmarkStore((s) => s.selectedBookmarkIds);
+  /**
+   * 选中集合的 O(1) 索引。
+   *
+   * 列表每渲染一行都要判断"这行选没选中"，直接 `selectedIds.includes(id)` 是 O(n×m)：
+   * 1200 条全选时等于 144 万次比较，且铺在渲染热路径上。集合只随 selectedIds 变，
+   * 用 useMemo 建一次即可。
+   */
+  const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const toggleSelect = useBookmarkStore((s) => s.toggleSelect);
   const selectMany = useBookmarkStore((s) => s.selectMany);
   const clearSelection = useBookmarkStore((s) => s.clearSelection);
@@ -45,6 +54,8 @@ export function BookmarkList({ className, compact = false }: { className?: strin
   const openDialog = useUIStore((s) => s.openDialog);
 
   const [children, setChildren] = useState<BNode[] | null>(null);
+  /** 子项加载失败的原因（真失败，不是删除/移动竞态） */
+  const [loadErr, setLoadErr] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState<BNode[] | null>(null);
   const [query, setQuery] = useState('');
   const [sortBy, setSortBy] = useState<SortKey>('manual');
@@ -56,15 +67,26 @@ export function BookmarkList({ className, compact = false }: { className?: strin
   useEffect(() => {
     if (!selectedFolderId || query.trim()) {
       setChildren(null);
+      setLoadErr(null);
       return;
     }
     let cancelled = false;
+    setLoadErr(null);
     void chrome.bookmarks
       .getChildren(selectedFolderId)
       .then((c) => {
         if (!cancelled) setChildren(c);
       })
-      .catch(() => {}); // 删除/移动竞态下 getChildren 可能拒绝，静默忽略
+      .catch((e: unknown) => {
+        /* 原先这里是 `catch(() => {})`：删除/移动竞态的拒绝确实该忽略，
+         * 但**真失败**（文件夹已不存在、权限问题）也会被一起吞掉——
+         * 那时 children 保持 null，界面永远停在「加载中…」，没有重试也没有错误提示。
+         * 现在标记出来，至少让用户能看到发生了什么并能重试。 */
+        if (!cancelled) {
+          setChildren([]);
+          setLoadErr(e instanceof Error ? e.message : String(e));
+        }
+      });
     return () => {
       cancelled = true;
     };
@@ -174,14 +196,6 @@ export function BookmarkList({ className, compact = false }: { className?: strin
   useEffect(() => {
     if (anchorIndex !== null && items && anchorIndex >= items.length) setAnchorIndex(null);
   }, [items, anchorIndex]);
-
-  // 键盘导航时把高亮行滚入可视区（长列表 ↑↓ 不丢视线）
-  useEffect(() => {
-    if (activeIndex < 0) return;
-    listRef.current
-      ?.querySelector<HTMLElement>(`[data-index="${activeIndex}"]`)
-      ?.scrollIntoView({ block: 'nearest' });
-  }, [activeIndex]);
 
   /** 点击列表任意非控件区域时聚焦容器，让 ↑↓/Enter/Delete 立即可用 */
   const focusList = (e: MouseEvent) => {
@@ -295,7 +309,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
         if (e.ctrlKey || e.metaKey) {
           const targets =
             selectedIds.length > 0
-              ? items.filter((n) => selectedIds.includes(n.id) && n.url)
+              ? items.filter((n) => selectedSet.has(n.id) && n.url)
               : (() => {
                   const n = items[activeIndex >= 0 ? activeIndex : 0];
                   return n?.url ? [n] : [];
@@ -344,8 +358,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
     );
   };
 
-  const organizeSelected = () => {
-    if (selectedNodes.length === 0) return;
+  const runOrganizeSelected = () => {
     const shown = selectedNodes.slice(0, 30);
     const omitted = selectedNodes.length - shown.length;
     const list = shown
@@ -357,6 +370,22 @@ export function BookmarkList({ className, compact = false }: { className?: strin
       }：\n${list}\n创建合适的分类并归类移动（若不需要新建文件夹可直接移动），完成后简要汇报。`,
     );
     clearSelection();
+  };
+
+  const organizeSelected = () => {
+    if (selectedNodes.length === 0) return;
+    // 与树里右键「让 MarkAI 整理」保持一致：一次塞几百条要跑很久，先说明代价。
+    // 用站内确认框而不是 `window.confirm`：后者在深色下是刺眼白框，也没法在 e2e 里断言。
+    if (selectedNodes.length > 100) {
+      useUIStore.getState().requestConfirm({
+        title: '选中的书签比较多',
+        body: `选中了 ${selectedNodes.length} 个书签，整理会逐条浏览、耗时较长。`,
+        confirmText: '继续整理',
+        onConfirm: runOrganizeSelected,
+      });
+      return;
+    }
+    runOrganizeSelected();
   };
 
   const openSelected = () => {
@@ -624,7 +653,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
   );
 
   return (
-    <div className={cn('flex h-full min-h-0 min-w-0 flex-col bg-background', className)}>
+    <div className={cn('animate-fade-in flex h-full min-h-0 min-w-0 flex-col bg-background', className)}>
       {/* 工具栏：面包屑 + 排序 + 搜索 */}
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
         {browsing ? (
@@ -833,7 +862,26 @@ export function BookmarkList({ className, compact = false }: { className?: strin
         onDrop={handleListDrop}
         className="min-h-0 flex-1 overflow-y-auto p-2 outline-none"
       >
-        {loading ? (
+        {loadErr ? (
+          <div className="flex flex-col items-center gap-1 px-2 py-4 text-center">
+            <p className="text-xs text-destructive">这个文件夹没能加载</p>
+            <p className="line-clamp-2 text-2xs text-muted-foreground/70">{loadErr}</p>
+            <Button
+              size="sm"
+              variant="outline"
+              className="mt-1"
+              onClick={() => {
+                // 触发一次重拉：先清空再写回同一个 id，让上面的 effect 重新执行
+                const id = selectedFolderId;
+                setLoadErr(null);
+                setChildren(null);
+                if (id) useBookmarkStore.getState().selectFolder(id);
+              }}
+            >
+              重试
+            </Button>
+          </div>
+        ) : loading ? (
           <p className="px-2 py-4 text-center text-xs text-muted-foreground">加载中…</p>
         ) : items && items.length > 0 ? (
           items.map((node, i) => (
@@ -842,7 +890,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
               node={node}
               index={i}
               active={i === activeIndex}
-              selected={selectedIds.includes(node.id)}
+              selected={selectedSet.has(node.id)}
               dropTarget={dropTarget}
               query={query}
               searching={!browsing}
@@ -866,7 +914,9 @@ export function BookmarkList({ className, compact = false }: { className?: strin
               <Search className="h-5 w-5 text-muted-foreground/40" />
             )}
             <p className="text-xs text-muted-foreground">
-              {!selectedFolderId ? '在左侧选择一个文件夹查看书签' : browsing ? '此文件夹为空' : '没有匹配的书签'}
+              {/* 三种空状态统一成「一句状态 + 一个动作」：之前第一句是祈使句（「在左侧选择…」），
+                  另外两句是状态描述，读起来像两套东西。 */}
+              {!selectedFolderId ? '还没有选择文件夹' : browsing ? '此文件夹为空' : '没有匹配的书签'}
             </p>
             {!selectedFolderId && roots[0] && (
               <Button
@@ -878,6 +928,32 @@ export function BookmarkList({ className, compact = false }: { className?: strin
                 <Folder className="h-3 w-3" />
                 查看书签栏
               </Button>
+            )}
+            {/* 搜索无结果：给一个出口。只写「没有匹配的书签」会让人以为是库坏了 */}
+            {!browsing && query && (
+              <div className="mt-1 flex flex-col items-center gap-1">
+                <Button size="sm" variant="outline" onClick={() => onQueryChange('')}>
+                  <X className="h-3 w-3" />
+                  清空搜索
+                </Button>
+                <p className="text-2xs text-muted-foreground/70">只搜标题与网址；换个词或清空后再看</p>
+              </div>
+            )}
+            {/* 空文件夹里最可能想做的一件事就是往里放东西；只写「此文件夹为空」等于把人晾在这儿。
+                不放「收藏当前页」是因为它依赖顶栏那份实现（跨组件传函数不值得），
+                改用一句快捷键提示，同样能让人动起来。 */}
+            {browsing && selectedFolderId && (
+              <div className="mt-1 flex flex-col items-center gap-1">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => useUIStore.getState().openDialog({ kind: 'create-bookmark', parentId: selectedFolderId })}
+                >
+                  <BookmarkPlus className="h-3 w-3" />
+                  新建书签
+                </Button>
+                <p className="text-2xs text-muted-foreground/70">或按 Ctrl+D 把当前页面收藏进来</p>
+              </div>
             )}
             <p className="mt-2 text-2xs text-muted-foreground/70">
               / 搜索 · Enter 打开 · Ctrl+C 复制 · Delete 删除 · F2 重命名 · Ctrl+A 全选
@@ -1015,8 +1091,20 @@ const BookmarkRow = memo(function BookmarkRow({
   const isDropTarget = dropTarget?.index === index;
   // 计数器防抖：子元素间移动时 dragleave 误触发，用进出深度判断真正离开
   const dragDepth = useRef(0);
-  // 双击防抖：单击已打开书签，350ms 内的第二次点击忽略（重命名走标题双击）
-  const lastClickAt = useRef(0);
+  /**
+   * 单击打开 vs 双击重命名：书签走「延迟打开」，双击时把那次打开**取消掉**。
+   *
+   * 旧实现是「350ms 内忽略第二次 click」——第一次 click 已经执行了打开，
+   * 所以双击标题改名时必然多留一个标签页（注释写的是"避免开两个"，实际只是从 2 降到 1）。
+   * 文件夹不进这条路径：展开/选中必须即时。
+   */
+  const shiftOpen = useRef(false);
+  const openLater = useMemo(
+    () => createDelayedOpen(() => onOpen(index, shiftOpen.current)),
+    [onOpen, index],
+  );
+  // 卸载时清掉待执行的打开，避免组件已消失还去开标签页
+  useEffect(() => () => openLater.dispose(), [openLater]);
   return (
     <div
       data-index={index}
@@ -1049,12 +1137,17 @@ const BookmarkRow = memo(function BookmarkRow({
           onToggleClick(index);
           return;
         }
-        // 双击防抖：与树一致（350ms），避免双击标题时先开两个标签页再弹重命名框
-        const now = Date.now();
-        if (now - lastClickAt.current < 350) return;
-        lastClickAt.current = now;
-        onOpen(index, e.shiftKey);
+        // 文件夹：展开/选中即时响应（双击文件夹没有第二语义，不需要反悔窗口）
+        if (isFolder) {
+          onOpen(index, e.shiftKey);
+          return;
+        }
+        // 书签：延迟打开。双击（标题重命名）会在冒泡阶段取消这里
+        shiftOpen.current = e.shiftKey;
+        openLater.schedule();
       }}
+      // 兜底：双击落在行内空白（非标题）时，那次延迟打开也应当作废
+      onDoubleClick={() => openLater.cancel()}
       onAuxClick={(e) => {
         // 中键：在新标签页打开（阻止 Windows 自动滚动；复选框等控件内不触发）
         if (e.button === 1 && !(e.target as HTMLElement).closest('button')) {
@@ -1086,6 +1179,7 @@ const BookmarkRow = memo(function BookmarkRow({
         <Favicon url={node.url} size={16} />
       )}
       <div className="min-w-0 flex-1">
+        {/* 这里刻意不用 text-md：列表行固定 40px 高，18px 行高才排得下两行而不撑开行距 */}
         <p className="truncate text-[13px] leading-[18px] text-foreground" onDoubleClick={() => onRename(node.id)}>
           {highlightText(node.title || '(未命名)', query)}
         </p>

@@ -1,8 +1,8 @@
-import type { InputHTMLAttributes } from 'react';
+import type { ComponentProps } from 'react';
 import { cn } from '@/lib/utils';
 
 /** 输入框：6px 圆角，1px 边框，无阴影；焦点用 2px 软环（比 1px 实环更贴近原生观感） */
-export function Input({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
+export function Input({ className, ...props }: ComponentProps<'input'>) {
   return (
     <input
       className={cn(

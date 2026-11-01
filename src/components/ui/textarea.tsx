@@ -9,7 +9,7 @@ export function Textarea({ className, ...props }: ComponentProps<'textarea'>) {
   return (
     <textarea
       className={cn(
-        'w-full resize-none rounded-sm border border-input bg-card px-2.5 py-2 text-[13px] leading-5 text-foreground transition-colors',
+        'w-full resize-none rounded-sm border border-input bg-card px-2.5 py-2 text-md text-foreground transition-colors',
         'placeholder:text-muted-foreground/60',
         'focus-visible:border-ring focus-visible:ring-2 focus-visible:ring-ring/20 focus-visible:outline-none',
         className,

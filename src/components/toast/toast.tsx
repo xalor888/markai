@@ -11,7 +11,9 @@ export function ToastViewport() {
     <div
       role="status"
       aria-live="polite"
-      className="pointer-events-none fixed top-3 right-3 z-[100] flex w-72 flex-col gap-2"
+      /* 底部居中：原来在右上角，正好压住 Agent 面板的标题与头部按钮（截图里能看到）。
+         底部是唯一没有常驻操作区的位置，也不挡顶栏与输入框。 */
+      className="pointer-events-none fixed bottom-4 left-1/2 z-[100] flex w-72 max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col gap-2"
     >
       {toasts.map((t) => (
         <div

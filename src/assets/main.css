@@ -55,6 +55,10 @@
   --text-2xs--line-height: 1rem;
   --text-xs: 0.75rem;
   --text-xs--line-height: 1.0625rem;
+  /* 13px：聊天气泡正文与输入框用它——12px 偏小、14px 偏大。
+     以前是散落在各处的 `text-[13px]` 编外值，收进 token 后至少是「显式规范」而不是随手写的。 */
+  --text-md: 0.8125rem;
+  --text-md--line-height: 1.25rem;
   --text-sm: 0.875rem;
   --text-sm--line-height: 1.375rem;
 
@@ -76,8 +80,13 @@
   --color-border: #262d38;
   --color-input: #38414f;
   --color-ring: #818cf8;
-  --color-accent: #6366f1;
-  --color-accent-foreground: #ffffff;
+  /*
+   * 深色下 accent 提亮到 #818cf8：原来的 #6366f1 作为**文字色**在 #0e1116 上只有约 4.0:1，
+   * 低于 WCAG AA 对正文的要求（实测 e2e 里的对比度检查抓出来的）。
+   * 提亮后 accent 块上的文字必须改用深色，否则白字在亮 Indigo 上同样不达标。
+   */
+  --color-accent: #818cf8;
+  --color-accent-foreground: #10131a;
   --color-accent-muted: #232a4d;
   --color-destructive: #f97066;
   --color-success: #5fd08a;

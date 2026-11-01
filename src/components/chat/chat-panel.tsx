@@ -13,6 +13,7 @@ import {
   ScanSearch,
   Search,
   Send,
+  Wand2,
   Square,
   Trash2,
   TrendingUp,
@@ -29,6 +30,7 @@ import { formatRelativeTime, formatIsoDate } from '@/lib/format';
 import { describeUndoHistory, summarizeOps, undoReadiness } from '@/lib/undo/journal';
 import { resolveConfig, PROVIDERS } from '@/lib/providers';
 import { cn } from '@/lib/utils';
+import { pushToast } from '@/lib/toast';
 import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
@@ -467,7 +469,14 @@ export function ChatPanel({
                       {i === 0 ? '最新' : `−${i}`}
                     </span>
                     <span className="min-w-0 flex-1">
-                      <span className="block truncate text-xs text-foreground">{row.summary}</span>
+                      <span className="flex items-center gap-1.5">
+                        <span className="truncate text-xs text-foreground">{row.summary}</span>
+                        {row.source === 'auto' && (
+                          <span className="shrink-0 rounded-xs bg-accent-muted px-1 py-px text-2xs text-accent">
+                            自动整理
+                          </span>
+                        )}
+                      </span>
                       <span className="block truncate text-2xs text-muted-foreground">
                         {row.undoable ? `还原 ${row.count} 项` : (row.reason ?? '无法撤销')}
                         {' · '}
@@ -477,6 +486,38 @@ export function ChatPanel({
                     <Undo2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" />
                   </button>
                 ))
+              )}
+              {undoHistory.length > 1 && undoHistory[0]?.undoable && !streaming && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setUndoHistoryOpen(false);
+                    void (async () => {
+                      let steps = 0;
+                      // 从最新往旧逐步退回：一次点击退完，避免用户连点 N 次
+                      while (steps < 20 && (await undoLast(undefined, { silent: true }))) steps++;
+                      const left = useAIStore.getState().undoPoints.length;
+                      if (steps > 0) {
+                        // 退不完时必须说清为什么 —— 否则「撤销全部」看起来像没生效
+                        pushToast(`已撤销 ${steps} 步`, {
+                          ...(left > 0
+                            ? {
+                                description: `还有 ${left} 步当前无法撤销（含删除的操作不支持回退），可单独查看原因。`,
+                              }
+                            : {}),
+                          variant: left > 0 ? 'default' : 'success',
+                        });
+                      } else {
+                        pushToast('没有可撤销的步骤');
+                      }
+                    })();
+                  }}
+                  className="mt-1 flex w-full items-center justify-center gap-1.5 rounded-sm border border-border px-2 py-1.5 text-2xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  title="从最新一步开始连续回退，直到没有可撤销的步骤"
+                >
+                  <Undo2 className="h-3 w-3" />
+                  撤销全部 {undoHistory.length} 步
+                </button>
               )}
             </div>
             {undoNotice && (
@@ -653,7 +694,7 @@ export function ChatPanel({
                       setEditingSession(c.id);
                       setEditTitle(c.title);
                     }}
-                    className="shrink-0 rounded-sm p-1 text-muted-foreground/60 opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100"
+                    className="shrink-0 rounded-sm p-1 text-muted-foreground/60 opacity-0 transition-opacity hover:bg-muted hover:text-foreground group-hover:opacity-100 focus-visible:opacity-100"
                     title="重命名会话"
                     aria-label="重命名会话"
                   >
@@ -682,7 +723,7 @@ export function ChatPanel({
                           setConfirmDeleteSession((cur) => (cur === c.id ? null : cur));
                         }, 5000);
                       }}
-                      className="shrink-0 rounded-sm p-1 text-muted-foreground/60 opacity-0 transition-opacity hover:bg-muted hover:text-destructive group-hover:opacity-100"
+                      className="shrink-0 rounded-sm p-1 text-muted-foreground/60 opacity-0 transition-opacity hover:bg-muted hover:text-destructive group-hover:opacity-100 focus-visible:opacity-100"
                       title="删除会话"
                       aria-label="删除会话"
                     >
@@ -712,7 +753,12 @@ export function ChatPanel({
         )}
         <div ref={scrollRef} onScroll={handleScroll} className="h-full overflow-y-auto px-3 py-3.5">
           {messages.length === 0 ? (
-            <EmptyState chips={chips} onChip={(p) => void send(p)} configured={chatConfigured} />
+            <EmptyState
+              chips={chips}
+              onChip={(p) => void send(p)}
+              configured={chatConfigured}
+              autoOrganize={config.autoOrganizeNew ?? true}
+            />
           ) : (
             <div className="space-y-3.5">
               {messages.map((m, i) => (
@@ -881,7 +927,7 @@ export function ChatPanel({
         open={confirmClear}
         onOpenChange={setConfirmClear}
         title="清空对话"
-        description="将删除全部聊天记录（不影响书签与待删除清单）。"
+        description="将删除全部聊天记录，此操作不可恢复（不影响书签与待删除清单）。"
         footer={
           <>
             <Button variant="ghost" size="sm" onClick={() => setConfirmClear(false)} autoFocus>
@@ -909,10 +955,13 @@ function EmptyState({
   chips,
   onChip,
   configured,
+  autoOrganize,
 }: {
   chips: QuickChip[];
   onChip: (prompt: string) => void;
   configured: boolean;
+  /** 自动整理是否开启：关掉时不该在这里承诺「我会自动归类」 */
+  autoOrganize: boolean;
 }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-5 px-5 py-6 text-center">
@@ -948,6 +997,16 @@ function EmptyState({
           </Button>
         ))}
       </div>
+      {/* 能力告知：自动整理发生在后台，新人不会自己发现它，更不会去翻 README */}
+      {autoOrganize && (
+        <p className="flex max-w-[248px] items-start gap-1.5 text-left text-2xs leading-4 text-muted-foreground/70">
+          <Wand2 className="mt-px h-3 w-3 shrink-0 text-accent/70" aria-hidden="true" />
+          <span>
+            收藏任意网页后我会自动归类。想知道动了哪些、或撤销某一步，点顶栏
+            <span className="text-muted-foreground">「整理」</span>。
+          </span>
+        </p>
+      )}
     </div>
   );
 }

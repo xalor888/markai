@@ -50,3 +50,14 @@ preview-*.png
 # falsify 的中断自保备份（内含某源文件的完整原文，只在运行期间存在；
 # 万一被强杀残留，也不该被误提交）
 .falsify-pending.json
+
+# 宣传片的**后续探索目录**（promo-direction / promo-fold / promo-gate / promo-v2，
+# 合计约 47MB 的过程素材：成片 mp4、comp.html、抽帧、参考图、测量脚本）。
+# 只有 assets/promo.gif 是要进库的成品；这些是制作现场，不该进版本库。
+promo-direction/
+promo-fold/
+promo-gate/
+promo-v2/
+
+# 内部任务/计划文件（含目标声明与验收标准），属于本地状态
+.pi/

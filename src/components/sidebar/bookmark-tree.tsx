@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type DragEvent, type KeyboardEvent, type ReactNode, type SetStateAction } from 'react';
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Dispatch, type DragEvent, type KeyboardEvent, type ReactNode, type SetStateAction } from 'react';
 import {
   AppWindow,
   BookMarked,
@@ -6,6 +6,7 @@ import {
   ChevronRight,
   ChevronsDownUp,
   ChevronsUpDown,
+  PanelLeftClose,
   Copy,
   ExternalLink,
   Folder,
@@ -29,6 +30,7 @@ import { useUIStore } from '@/stores/uiStore';
 import { useAIStore } from '@/stores/aiStore';
 import { copyText } from '@/lib/clipboard';
 import { isSelfOrDescendant, resolveDropIndex } from '@/lib/bookmark-dnd';
+import { createDelayedOpen } from '@/lib/bookmarks/delayed-open';
 import { pushToast } from '@/lib/toast';
 import { openUrl, openUrls } from '@/lib/open-url';
 import { moveManyWithToast } from '@/lib/bookmarks/bulk';
@@ -48,7 +50,19 @@ interface VisibleNode {
  * 书签树（左栏）：展开/折叠、选中、右键菜单。
  * 原生交互：↑↓ 移动、←→ 折叠/展开、Enter 打开/选中，整树键盘可达。
  */
-export function BookmarkTree({ className }: { className?: string }) {
+/** 递归统计文件夹内的书签数（含子文件夹）——用于在大文件夹上提示整理代价 */
+function countFolderContents(node?: BNode | null): number {
+  if (!node || !node.children) return 0;
+  let total = 0;
+  for (const child of node.children) {
+    if (child.url) total += 1;
+    else total += countFolderContents(child);
+  }
+  return total;
+}
+
+
+export function BookmarkTree({ className, collapsible = false }: { className?: string; collapsible?: boolean }) {
   const roots = useBookmarkStore((s) => s.roots);
   const expandedIds = useBookmarkStore((s) => s.expandedIds);
   const selectedFolderId = useBookmarkStore((s) => s.selectedFolderId);
@@ -225,6 +239,18 @@ export function BookmarkTree({ className }: { className?: string }) {
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
         <BookMarked className="h-3.5 w-3.5 text-accent/70" />
         <span className="text-2xs font-semibold tracking-wide text-muted-foreground">书签</span>
+        {/* 紧凑模式：把树收成图标条，给中栏让出宽度（侧边栏只有四百来像素） */}
+        {collapsible && (
+          <button
+            type="button"
+            onClick={() => useUIStore.getState().setTreeCollapsed(true)}
+            className="rounded-sm p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            title="收起书签树（给右侧让出宽度）"
+            aria-label="收起书签树"
+          >
+            <PanelLeftClose className="h-3 w-3" />
+          </button>
+        )}
         {/* 过滤模式下展开/折叠无可见反馈，隐藏避免困惑 */}
         {!filter && (
           <>
@@ -333,8 +359,20 @@ export function BookmarkTree({ className }: { className?: string }) {
                   重试
                 </button>
               </>
+            ) : filter ? (
+              /* 与中栏列表保持一致：搜索/过滤无结果时给一个出口，而不是只留一句话 */
+              <div className="flex flex-col items-center gap-1">
+                <p className="text-2xs text-muted-foreground">没有匹配的书签</p>
+                <button
+                  type="button"
+                  onClick={() => setFilter('')}
+                  className="rounded-sm border border-border bg-card px-2 py-1 text-2xs text-foreground transition-colors hover:bg-muted"
+                >
+                  清空过滤
+                </button>
+              </div>
             ) : (
-              <p className="text-2xs text-muted-foreground">{filter ? '没有匹配的书签' : '书签栏为空'}</p>
+              <p className="text-2xs text-muted-foreground">书签栏为空</p>
             )}
           </div>
         )}
@@ -372,9 +410,20 @@ const TreeRow = memo(function TreeRow({
   const [dragOver, setDragOver] = useState(false);
   // 计数器防抖：子元素间移动时 dragleave 会误触发，用进出深度判断真正离开
   const dragDepth = useRef(0);
-  // 双击防抖：单击已打开书签，350ms 内的第二次点击忽略，避免双击开两个标签页
-  const lastClickAt = useRef(0);
   const isDropTarget = dropTarget?.nodeId === node.id;
+
+  /**
+   * 单击打开 vs 双击重命名：书签走「延迟打开」，双击时取消。
+   * 旧实现只忽略第二次 click —— 第一次已经打开了，于是双击改名必然多开一个标签页。
+   * 文件夹不进这条路径（展开/选中要即时）。
+   */
+  const openLater = useMemo(
+    () => createDelayedOpen(() => {
+      if (node.url) void openUrl(node.url);
+    }),
+    [node.url],
+  );
+  useEffect(() => () => openLater.dispose(), [openLater]);
 
   // 拖拽取消（Esc/拖出窗口）时清理本行高亮与深度计数
   useEffect(() => {
@@ -387,15 +436,14 @@ const TreeRow = memo(function TreeRow({
   }, []);
 
   const handleClick = () => {
-    const now = Date.now();
-    if (now - lastClickAt.current < 350) return;
-    lastClickAt.current = now;
     if (isFolder) {
+      // 文件夹：展开/选中即时响应
       toggleExpand(node.id);
       selectFolder(node.id);
-    } else if (node.url) {
-      void openUrl(node.url);
+      return;
     }
+    // 书签：延迟打开，给双击（标题重命名）一个反悔窗口
+    if (node.url) openLater.schedule();
   };
 
   /** 计算相对行的放置方向（上半/下半） */
@@ -559,6 +607,7 @@ const TreeRow = memo(function TreeRow({
       }}
       onDrop={handleDrop}
       onClick={handleClick}
+      onDoubleClick={() => openLater.cancel()}
       onAuxClick={(e) => {
         // 中键：书签在新标签页打开（阻止 Windows 自动滚动）
         if (e.button === 1) {
@@ -606,6 +655,16 @@ const TreeRow = memo(function TreeRow({
       >
         {highlightTitle(node.title || '(未命名)', filter)}
       </span>
+      {/* 文件夹旁标出直接子项数：省得逐层点进去才知道规模。
+          只数直接子项（O(1)），不做递归——递归会让整棵树在每次渲染时变慢。 */}
+      {isFolder && (node.children?.length ?? 0) > 0 && (
+        <span
+          className="ml-auto shrink-0 pl-1 text-2xs tabular-nums text-muted-foreground/60"
+          aria-label={`${node.children!.length} 项`}
+        >
+          {node.children!.length}
+        </span>
+      )}
     </div>
   );
 });
@@ -643,6 +702,18 @@ type MenuItem = {
 };
 type MenuRow = MenuItem | 'sep';
 
+/**
+ * 一次"打开全部"最多开多少个标签页。
+ *
+ * 之前这个 25 硬编码在 6 处（3 个 tabGroups/tabs 分支 + 3 处提示文案），
+ * 改一处忘一处就会出现"实际开了 25 个、提示写 30 个"这种自相矛盾的说明。
+ */
+const MAX_OPEN_AT_ONCE = 25;
+
+/** 超出上限时的统一提示（与 MAX_OPEN_AT_ONCE 绑在一起，不写死数字） */
+const tooManyToast = (total: number) =>
+  pushToast(`书签过多，仅打开前 ${MAX_OPEN_AT_ONCE} 个（共 ${total} 个）`);
+
 /** 统一右键菜单（书签树与书签列表共用，按节点类型渲染原生风格菜单项） */
 export function ContextMenuOverlay() {
   const menu = useBookmarkStore((s) => s.contextMenu);
@@ -666,6 +737,28 @@ export function ContextMenuOverlay() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [menu, setContextMenu]);
+
+  /**
+   * 实测定位：菜单宽高按**真实 DOM** 量，而不是按常量估算。
+   *
+   * 旧实现按 `w-52`→196px、行高 28px 手算边界，实际是 208px 宽、每行约 33px
+   * （`py-2` + `text-xs` 行高），于是 12 项的菜单会从视口底部溢出约 50px。
+   * 现在先渲染、在 layout effect 里量完再落位——layout effect 在绘制前执行，
+   * 所以不会看到跳动。
+   */
+  const menuRef = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; top: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!menu) return;
+    const el = menuRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    // 8px 安全边；窗口比菜单还窄时退到 8（宁可贴边，也不要负坐标）
+    setPos({
+      left: Math.max(8, Math.min(menu.x, Math.max(8, window.innerWidth - rect.width - 8))),
+      top: Math.max(8, Math.min(menu.y, Math.max(8, window.innerHeight - rect.height - 8))),
+    });
+  }, [menu]);
 
   if (!menu) return null;
 
@@ -698,8 +791,8 @@ export function ContextMenuOverlay() {
         pushToast('所选内容没有可打开的网址');
         return;
       }
-      const list = urls.slice(0, 25);
-      if (urls.length > 25) pushToast(`书签过多，仅打开前 25 个（共 ${urls.length} 个）`);
+      const list = urls.slice(0, MAX_OPEN_AT_ONCE);
+      if (urls.length > MAX_OPEN_AT_ONCE) tooManyToast(urls.length);
       void openUrls(list);
       return;
     }
@@ -718,12 +811,12 @@ export function ContextMenuOverlay() {
           urls.push(n.url);
         }
       }
-      const list = urls.slice(0, 25);
+      const list = urls.slice(0, MAX_OPEN_AT_ONCE);
       if (urls.length === 0) {
         pushToast('所选内容没有可打开的网址');
         return;
       }
-      if (urls.length > 25) pushToast(`书签过多，仅打开前 25 个（共 ${urls.length} 个）`);
+      if (urls.length > MAX_OPEN_AT_ONCE) tooManyToast(urls.length);
       void openUrls(list, { active: false });
       return;
     }
@@ -742,12 +835,12 @@ export function ContextMenuOverlay() {
           urls.push(n.url);
         }
       }
-      const list = urls.slice(0, 25);
+      const list = urls.slice(0, MAX_OPEN_AT_ONCE);
       if (list.length === 0) {
         pushToast('所选内容没有可打开的网址');
         return;
       }
-      if (urls.length > 25) pushToast(`书签过多，仅打开前 25 个（共 ${urls.length} 个）`);
+      if (urls.length > MAX_OPEN_AT_ONCE) tooManyToast(urls.length);
       try {
         const win = await chrome.windows.create({ url: list[0], focused: true });
         if (win?.id !== undefined) {
@@ -780,12 +873,12 @@ export function ContextMenuOverlay() {
     } else if (node) {
       collect(node);
     }
-    const list = urls.slice(0, 25);
+    const list = urls.slice(0, MAX_OPEN_AT_ONCE);
     if (list.length === 0) {
       pushToast('所选内容没有可打开的网址');
       return;
     }
-    if (urls.length > 25) pushToast(`书签过多，仅打开前 25 个（共 ${urls.length} 个）`);
+    if (urls.length > MAX_OPEN_AT_ONCE) tooManyToast(urls.length);
     try {
       const tabs = await Promise.all(list.map((url) => chrome.tabs.create({ url, active: false })));
       const tabIds = tabs.map((t) => t.id).filter((id): id is number => id !== undefined);
@@ -874,7 +967,7 @@ export function ContextMenuOverlay() {
       return;
     }
     const openCount = Math.min(urls.length, 25);
-    if (urls.length > 25) pushToast(`书签过多，仅打开前 25 个（共 ${urls.length} 个）`);
+    if (urls.length > MAX_OPEN_AT_ONCE) tooManyToast(urls.length);
     void openUrls(urls.slice(0, openCount));
   };
 
@@ -896,8 +989,8 @@ export function ContextMenuOverlay() {
       pushToast('此文件夹没有书签');
       return;
     }
-    const list = urls.slice(0, 25);
-    if (urls.length > 25) pushToast(`书签过多，仅打开前 25 个（共 ${urls.length} 个）`);
+    const list = urls.slice(0, MAX_OPEN_AT_ONCE);
+    if (urls.length > MAX_OPEN_AT_ONCE) tooManyToast(urls.length);
     try {
       const win = await chrome.windows.create({ url: list[0], focused: true });
       if (win?.id !== undefined) {
@@ -926,8 +1019,8 @@ export function ContextMenuOverlay() {
       pushToast('此文件夹没有书签');
       return;
     }
-    const list = urls.slice(0, 25);
-    if (urls.length > 25) pushToast(`书签过多，仅打开前 25 个（共 ${urls.length} 个）`);
+    const list = urls.slice(0, MAX_OPEN_AT_ONCE);
+    if (urls.length > MAX_OPEN_AT_ONCE) tooManyToast(urls.length);
     try {
       // 并行创建标签页后统一分组
       const tabs = await Promise.all(list.map((url) => chrome.tabs.create({ url, active: false })));
@@ -1019,7 +1112,27 @@ export function ContextMenuOverlay() {
         { icon: ChevronsDownUp, label: '折叠其他', onClick: () => { close(); useBookmarkStore.getState().collapseOthers(node?.id ?? ''); } },
         ...moveRows,
         'sep',
-        { icon: Sparkles, label: '让 MarkAI 整理', onClick: () => sendChat(`请整理书签文件夹「${node?.title || '(未命名)'}」：浏览其全部书签，创建合适的子分类并归类移动。`, node?.id) },
+        {
+          icon: Sparkles,
+          label: '让 MarkAI 整理',
+          onClick: () => {
+            // 大文件夹先说明代价：Agent 要逐条浏览，几百条会跑很久也烧额度。
+            // 不说清楚的话，用户点完以为卡住了。
+            const n = countFolderContents(node);
+            const run = () =>
+              sendChat(`请整理书签文件夹「${node?.title || '(未命名)'}」：浏览其全部书签，创建合适的子分类并归类移动。`, node?.id);
+            if (n > 100) {
+              useUIStore.getState().requestConfirm({
+                title: '这个文件夹比较大',
+                body: `「${node?.title || '(未命名)'}」里有 ${n} 条书签，整理会逐条浏览、耗时较长。`,
+                confirmText: '继续整理',
+                onConfirm: run,
+              });
+              return;
+            }
+            run();
+          },
+        },
         { icon: ScanSearch, label: '让 MarkAI 分析', onClick: () => sendChat(`请分析书签文件夹「${node?.title || '(未命名)'}」：检查内容是否过时，给出整理或清理建议。`) },
         { icon: Pencil, label: '重命名', disabled: isRootNode, onClick: () => { close(); openDialog({ kind: 'rename', bookmarkId: node?.id ?? '' }); } },
         { icon: Trash2, label: multiSelected ? `删除所选（${selectedIds.length}）` : '删除', danger: true, disabled: isRootNode, onClick: deleteAction },
@@ -1041,12 +1154,8 @@ export function ContextMenuOverlay() {
         { icon: Trash2, label: multiSelected ? `删除所选（${selectedIds.length}）` : '删除', danger: true, onClick: deleteAction },
       ];
 
-  // 边缘钳制（含超窄窗口下限），避免菜单溢出屏幕
-  // 行高约 28px（py-1.5 + text-xs），分隔线额外约 8px（my-1）
-  const rowCount = rows.filter((r) => r !== 'sep').length;
-  const sepCount = rows.filter((r) => r === 'sep').length;
-  const left = Math.max(8, Math.min(menu.x, window.innerWidth - 196));
-  const top = Math.max(8, Math.min(menu.y, window.innerHeight - rowCount * 28 - sepCount * 8 - 16));
+  // 位置：layout effect 实测完之前先用光标位置（同一次绘制内就会被修正）
+  const { left, top } = pos ?? { left: menu.x, top: menu.y };
 
   return (
     <>
@@ -1090,6 +1199,7 @@ export function ContextMenuOverlay() {
             close();
           }
         }}
+        ref={menuRef}
         className="animate-fade-in fixed z-50 max-h-[calc(100vh-16px)] w-52 overflow-y-auto rounded-md border border-border bg-card py-1.5 shadow-lg outline-none"
         style={{ left, top }}
       >

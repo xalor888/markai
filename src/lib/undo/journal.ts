@@ -98,6 +98,12 @@ export interface UndoHistoryRow {
   /** 不可撤销（如旧版本写下的无快照删除）时为 false，并给出原因 */
   undoable: boolean;
   reason?: string;
+  /**
+   * 这一步是谁做的：Agent 轮次，还是「新书签自动整理」。
+   * 两者都会进撤销栈，但用户看到「移动 1 项」时无从判断是自己让 AI 做的，
+   * 还是收藏网页时后台自动做的——那会直接影响他敢不敢点撤销。
+   */
+  source: 'agent' | 'auto';
 }
 
 /**
@@ -121,6 +127,7 @@ export function describeUndoHistory(points: UndoPoint[]): UndoHistoryRow[] {
       count: ready.count,
       createdAt: p.createdAt,
       undoable,
+      source: p.runId.startsWith('auto-organize:') ? 'auto' : 'agent',
       ...(reason ? { reason } : {}),
     };
   });

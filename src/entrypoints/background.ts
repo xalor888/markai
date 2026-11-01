@@ -18,10 +18,32 @@ import {
 } from '@/lib/ai/context-menu';
 import { ACTION_MENUS, registerContextMenus } from '@/lib/ai/context-menus';
 import { executeDeletions as runDeletions } from '@/lib/ai/deletion-executor';
+import {
+  AI_COOLDOWN_MS,
+  autoOrganizeBookmark,
+  collectLooseBookmarks,
+  moveBookmarkInto,
+  nextAiStreakState,
+  type OrganizeContext,
+} from '@/lib/ai/auto-organize';
+import {
+  appendOrganizeLog,
+  clearOrganizeLog,
+  decorateOrganizeDetail,
+  type OrganizeLogEntry,
+  isRetryableFailure,
+  makeOrganizeLogEntry,
+  pickRetryableEntries,
+  readOrganizeLog,
+  summarizeOrganizeLog,
+  updateOrganizeLogEntry,
+} from '@/lib/ai/organize-log';
+import { registrableDomain } from '@/lib/bookmarks/domain';
+import { addOptOutDomain, clearOptOutDomains, readOptOutDomains, removeOptOutDomain } from '@/lib/ai/organize-optout';
 import { normalizeBaseUrl, resolveConfig } from '@/lib/providers';
 import { CONFIG_STORAGE_KEY } from '@/stores/configStore';
 import { applyUndo } from '@/lib/undo/apply';
-import { readUndoState } from '@/lib/undo/recorder';
+import { readUndoPoints, readUndoState } from '@/lib/undo/recorder';
 import type {
   AIConfig,
   ChatInbound,
@@ -45,7 +67,18 @@ export default defineBackground(() => {
   // 书签维度的「整理此文件夹 / 分析此书签」在 MarkAI 自己的书签树右键里
   // （src/components/sidebar/bookmark-tree.tsx）；这里只注册扩展图标上的入口。
   // 只在安装/更新时注册（onInstalled），避免 SW 重启后重复 id 报错；成败逐项如实上报。
-  chrome.runtime.onInstalled.addListener(async () => {
+  chrome.runtime.onInstalled.addListener(async (details) => {
+    /* 首次安装**不**自动打开设置页。
+     *
+     * 曾实现过 `openOptionsPage()`：以为「装完直接落到配置页」能降低流失。实测发现代价更大——
+     * Chrome 扩展的多个页面（options / sidepanel / page / popup）共享**同一个渲染进程**，
+     * 设置页那套 900 行表单的初始化会和工作区抢主线程，
+     * 真实现象是：安装后同时开着侧边栏时，时间线在 1200 条书签下从 19ms 变成 20 秒不响应。
+     * （e2e 里稳定复现；关掉这一行立刻恢复 19ms。）
+     *
+     * 「不知道去哪配置」这件事已经由三个可见入口覆盖：popup 的「AI 服务尚未配置 → 去配置」、
+     * 聊天欢迎卡片的提示、设置页顶部的「三步开始用」。宁可少开一个页面，不要让它卡。
+     */
     const { ok, failed } = await registerContextMenus(
       {
         removeAll: () => chrome.contextMenus.removeAll(),
@@ -80,6 +113,17 @@ export default defineBackground(() => {
         await toolbarError('MarkAI：侧边栏未能自动打开，请点扩展图标手动打开');
       }
     }
+  });
+
+  // ── 1.5 新书签自动整理 ──
+  // 用户/浏览器收藏一个页面后，自动识别并归类（无需手动点「整理」）。
+  // 关键约束：
+  //  - Agent 轮次进行中不插手（模型自己会整理，两个流程同时动手会互相搬来搬去）；
+  //  - 1.2s 去抖：Chrome 收藏是「先建再改标题」两步，太早读到的是 URL 兜底标题；
+  //  - 批量导入/同步风暴（8 秒内 >5 条）跳过并冷却 60s，避免几百次模型调用与文件夹爆炸。
+  chrome.bookmarks.onCreated.addListener((id, node) => {
+    if (!node.url) return; // 文件夹不处理
+    scheduleAutoOrganize(id);
   });
 
   // ── 2. 一次性消息 ──
@@ -216,6 +260,34 @@ function toClickInfo(
 /** 最近消费的种子内容（SW 生命周期内防多窗口重复消费同一种子） */
 let lastConsumedSeed = '';
 
+/**
+ * 重试一条失败记录（单条与批量共用）。
+ *
+ * 以**网址**为准而不是书签 id：用户可能在两次整理之间重建过这条书签，id 会变，网址还是同一个页面。
+ * 且显式 `ignoreOptOut`——用户点了「重试」就是明确要求，免打扰名单只该挡后台的自动行为。
+ */
+async function retryOrganizeEntry(entry: OrganizeLogEntry): Promise<{ ok: boolean; detail: string }> {
+  if (!entry.url) return { ok: false, detail: '这条记录没有可重试的网址' };
+  const found = await chrome.bookmarks.search(entry.url).catch(() => [] as chrome.bookmarks.BookmarkTreeNode[]);
+  const node = found.find((n) => n.url === entry.url);
+  if (!node) return { ok: false, detail: '这条书签已不在收藏夹里，无需重试' };
+  const res = await autoOrganizeBookmark(node.id, { ignoreOptOut: true });
+  const succeeded = res.ok && res.action !== 'skipped';
+  // 就地更新这一条，**不追加新记录**：
+  // 追加会让同一个书签在列表里同时存在一条红（旧的失败）和一条绿（新的成功），
+  // 用户会以为「重试没生效」，而那条红的还会一直挂着可重试按钮。
+  await updateOrganizeLogEntry(entry.id, {
+    action: res.action,
+    detail: succeeded ? `重试成功：${res.detail}` : res.detail,
+    ...(res.target ? { target: res.target } : {}),
+    ...(res.runId ? { runId: res.runId } : {}),
+    ...(succeeded
+      ? { needsAttention: false, retryable: false }
+      : { needsAttention: true, retryable: isRetryableFailure(res.detail) }),
+  });
+  return { ok: succeeded, detail: res.detail };
+}
+
 async function handleOneShot(msg: OneShotInbound): Promise<OneShotOutbound> {
   switch (msg.type) {
     case 'ai:test': {
@@ -324,11 +396,514 @@ async function handleOneShot(msg: OneShotInbound): Promise<OneShotOutbound> {
       return { type: 'undo:apply:result', result };
     }
 
+    case 'organize:list': {
+      const entries = await readOrganizeLog();
+      return { type: 'organize:list:result', entries, stats: summarizeOrganizeLog(entries) };
+    }
+
+    case 'organize:clear': {
+      await clearOrganizeLog();
+      return { type: 'organize:clear:result', ok: true };
+    }
+
+    case 'organize:retry': {
+      const entries = await readOrganizeLog();
+      const entry = entries.find((e) => e.id === msg.id);
+      if (!entry) return { type: 'organize:retry:result', ok: false, detail: '这条记录已不存在' };
+      const r = await retryOrganizeEntry(entry);
+      return { type: 'organize:retry:result', ok: r.ok, detail: r.detail };
+    }
+
+    case 'organize:retry:all': {
+      // 一次网络抖动可能留下十几条失败：逐条点重试是体力活。
+      // 串行执行——每条都要开自己的撤销事务，并发会互相打断。
+      const entries = await readOrganizeLog();
+      const targets = pickRetryableEntries(entries);
+      if (targets.length === 0) {
+        return { type: 'organize:retry:all:result', attempted: 0, succeeded: 0, failed: 0, detail: '没有可重试的失败记录' };
+      }
+      let succeeded = 0;
+      let failed = 0;
+      for (const entry of targets) {
+        const r = await retryOrganizeEntry(entry);
+        if (r.ok) succeeded++;
+        else failed++;
+      }
+      return {
+        type: 'organize:retry:all:result',
+        attempted: targets.length,
+        succeeded,
+        failed,
+        detail: `重试 ${targets.length} 条：成功 ${succeeded}${failed > 0 ? `，仍失败 ${failed}` : ''}`,
+      };
+    }
+
+    case 'organize:sweep': {
+      return await startOrganizeSweep();
+    }
+
+    case 'organize:optout:list': {
+      const list = await readOptOutDomains();
+      return { type: 'organize:optout:list:result', domains: list };
+    }
+
+    case 'organize:optout:clear': {
+      await clearOptOutDomains();
+      return { type: 'organize:optout:clear:result', ok: true };
+    }
+
+    case 'organize:optout:remove': {
+      await removeOptOutDomain(msg.domain);
+      return { type: 'organize:optout:remove:result', ok: true };
+    }
+
+    case 'organize:sweep:status': {
+      return {
+        type: 'organize:sweep:status:result',
+        running: sweepRunning,
+        ...(sweepSnapshot ? sweepSnapshot : {}),
+      };
+    }
+    case 'organize:sweep:cancel': {
+      if (!sweepRunning) return { type: 'organize:sweep:cancel:result', ok: false, detail: '当前没有进行中的补整理' };
+      sweepRunning = false;
+      return { type: 'organize:sweep:cancel:result', ok: true, detail: '已停止补整理' };
+    }
+
+    case 'organize:undo': {
+      // 用户对某次自动整理不满意 → 一步撤回，不必去撤销历史里翻英文 runId。
+      const entries = await readOrganizeLog();
+      const entry = entries.find((e) => e.id === msg.id);
+      if (!entry) return { type: 'organize:undo:result', ok: false, detail: '这条记录已不存在' };
+      if (entry.undoneAt) return { type: 'organize:undo:result', ok: false, detail: '这次整理已经撤销过了' };
+      if (!entry.runId) return { type: 'organize:undo:result', ok: false, detail: '这条记录没有可撤销的改动' };
+      const points = await readUndoPoints();
+      const point = points.find((p) => p.runId === entry.runId);
+      if (!point) {
+        return {
+          type: 'organize:undo:result',
+          ok: false,
+          detail: '对应的撤销点已不在保留范围内（最多保留最近 10 步），可在「撤销历史」里查看',
+        };
+      }
+      const result = await applyUndo(point.id);
+      if (result.ok) {
+        // 标记原记录：否则用户会对着同一条反复点，每次只得到「已不存在」
+        await updateOrganizeLogEntry(entry.id, { undoneAt: Date.now() });
+        // 撤销 = 用户否定了这个站点的归类方式 → 该站点不再自动整理（可在面板里恢复）
+        if (entry.domain) await addOptOutDomain(entry.domain);
+      }
+      return {
+        type: 'organize:undo:result',
+        ok: result.ok,
+        detail: result.ok
+          ? `已撤销「${entry.title}」的整理，书签回到原处`
+          : result.reason || '撤销没有完成',
+      };
+    }
+
     case 'task:status': {
       // popup 主动查询：SW 活着才有准确状态；SW 已回收则任务必然中断（sendMessage 会失败，popup 按未处理中处理）
       return { type: 'task:status:result', running: agentTaskRunning };
     }
   }
+}
+
+/**
+ * 「AI 分类连续失败」的计数与冷却窗口（SW 内存态，重启即重置）。
+ * 用户配错 Key 时，不该让每一次收藏都白等 12 秒——见 nextAiStreakState 的注释。
+ */
+let aiStreak: { streak: number; cooldownUntil: number; justCooled: boolean } = {
+  streak: 0,
+  cooldownUntil: 0,
+  justCooled: false,
+};
+
+/** 首次自动整理是否已提示过（跨 SW 重启有效：存在 storage 里） */
+const ORGANIZE_HINTED_KEY = 'markai.organize.hinted';
+
+/**
+ * 给成功的那条结果补上「首次引导」与「重复收藏」提示。
+ * 只有成功时才调用——第一次就失败的话，不该把引导名额用掉。
+ */
+async function decorateSuccessDetail(detail: string, url: string): Promise<string> {
+  let firstTime = false;
+  try {
+    const data = await chrome.storage.local.get(ORGANIZE_HINTED_KEY);
+    if (!data[ORGANIZE_HINTED_KEY]) {
+      firstTime = true;
+      await chrome.storage.local.set({ [ORGANIZE_HINTED_KEY]: true });
+    }
+  } catch {
+    // 读不到标记时就不提引导，宁可不提示也不要重复提示
+  }
+  let duplicateCount = 1;
+  if (url) {
+    try {
+      const found = await chrome.bookmarks.search(url);
+      // search 是子串匹配，必须精确比对 URL 再计数
+      duplicateCount = found.filter((n) => n.url === url).length;
+    } catch {
+      duplicateCount = 1;
+    }
+  }
+  return decorateOrganizeDetail(detail, { firstTime, duplicateCount });
+}
+
+/** ── 新书签自动整理的调度状态（SW 内存态，重启即重置） ── */
+const autoPending = new Set<string>();
+let autoTimer: ReturnType<typeof setTimeout> | null = null;
+let autoCooldownUntil = 0;
+let autoBurstNotified = false;
+const autoRecentCreates: number[] = [];
+/** 批量风暴窗口与阈值：正常收藏（几秒内连点几次）不该被误判；导入/同步通常是几十上百条 */
+const AUTO_BURST_WINDOW_MS = 10_000;
+const AUTO_BURST_THRESHOLD = 15;
+
+/**
+ * ── 补整理状态 ──
+ *
+ * 声明在 `flushAutoOrganize` 之前：自动整理要让路给补整理（见那里的注释），
+ * 把状态放后面会让「这个变量哪来的」变成一个必须往下翻才能回答的问题。
+ */
+let sweepRunning = false;
+/**
+ * 当前补整理的进度快照。
+ *
+ * 面板里的 `sweeping` 是组件 state，关掉对话框就没了——用户点完「开始」去干别的，
+ * 再打开会看不到进度，甚至以为没在跑又点一次（然后被告知「正在进行中，请稍候」）。
+ * 存在这里，面板打开时能把它读回来。
+ */
+let sweepSnapshot: { done: number; total: number; moved: number; failed: number } | null = null;
+
+/** 调度一次自动整理（去抖 + 批量导入保护） */
+function scheduleAutoOrganize(id: string): void {
+  const now = Date.now();
+  while (autoRecentCreates.length > 0 && now - autoRecentCreates[0]! > AUTO_BURST_WINDOW_MS) {
+    autoRecentCreates.shift();
+  }
+  autoRecentCreates.push(now);
+  if (autoRecentCreates.length > AUTO_BURST_THRESHOLD) {
+    // 批量导入 / 跨设备同步：逐条分类只会制造噪音与成本
+    autoCooldownUntil = now + 60_000;
+    autoPending.clear();
+    if (!autoBurstNotified) {
+      autoBurstNotified = true;
+      notifyAutoOrganized(false, '检测到批量新增书签（可能是导入或同步），本轮跳过自动整理。', true);
+      // 风暴也要留痕：用户事后能在「整理记录」里看到跳过原因，并从这里补整理
+      void appendOrganizeLog(
+        makeOrganizeLogEntry({
+          title: `批量新增 ${autoRecentCreates.length} 条`,
+          url: '',
+          domain: '',
+          action: 'skipped',
+          detail: '检测到批量新增书签（可能是导入或同步），本轮跳过自动整理；可在「整理记录」里补整理。',
+          needsAttention: true,
+        }),
+      );
+      setTimeout(() => {
+        autoBurstNotified = false;
+      }, 60_000);
+    }
+    return;
+  }
+  if (now < autoCooldownUntil) return;
+  if (agentTaskRunning) return; // Agent 正在整理，别抢方向盘
+  autoPending.add(id);
+  /*
+   * 短窗口去抖：单条收藏 150ms 后就开始整理（原来固定等 1.2 秒，收藏完干等像「没反应」）；
+   * 150ms 内继续来的收藏会把这个窗口往后推并合并成一次 flush，
+   * 所以批量导入仍会自然累积、进而触发上面的风暴保护，不会变成逐条跑。
+   * 试过「第一条直接同步触发」——太激进：造数据/导入的第一条会被单独提前整理，打乱批量语义。
+   */
+  const isFirstInBatch = autoPending.size === 1 && !autoTimer;
+  if (autoTimer) clearTimeout(autoTimer);
+  autoTimer = setTimeout(() => {
+    autoTimer = null;
+    void flushAutoOrganize();
+  }, isFirstInBatch ? 150 : 1_200);
+}
+
+/**
+ * 让被让路的自动整理重新排队。
+ *
+ * `flushAutoOrganize` 在补整理或 Agent 任务期间会把 id 原样放回 `autoPending` 并直接返回
+ * （刻意不重排定时器，避免几百条轮询起一堆 timer）。那么「什么时候再试」就必须由
+ * **结束方**负责——否则那几条书签会永远躺在集合里，而没有任何地方记录过这次没整理。
+ *
+ * `clearTimeout` 保证同一时刻只有一个等待中的定时器：多条结束路径先后触发不会叠加。
+ */
+function wakeAutoOrganize(delayMs = 150): void {
+  if (autoPending.size === 0 || agentTaskRunning) return;
+  if (autoTimer) clearTimeout(autoTimer);
+  autoTimer = setTimeout(() => {
+    autoTimer = null;
+    void flushAutoOrganize();
+  }, delayMs);
+}
+
+/** 串行执行队列：一次只整理一条，避免并发分类把同一条书签搬两次 */
+async function flushAutoOrganize(): Promise<void> {
+  const ids = [...autoPending];
+  autoPending.clear();
+  if (ids.length === 0) return;
+  /*
+   * Agent 任务正在跑：**让路**，但要把 id 放回集合。
+   * 原先这里直接 `return`，那几条待整理的书签就被静默丢掉了——
+   * 用户下次收藏同一站点前，它们会一直躺在根目录，而没有任何地方记录过"这次没整理"。
+   * 唤醒由 `clearBadge`（任务结束/取消/失败三条路径都经过它）负责。
+   */
+  if (agentTaskRunning) {
+    for (const id of ids) autoPending.add(id);
+    return;
+  }
+  /*
+   * 补整理正在跑：同样让路。
+   *
+   * 两条路径都会 `beginUndoTransaction`。而 `beginUndoTransaction` 发现已有活动事务时
+   * 会先把上一轮**强行收尾**——于是补整理正在记的 A 事务被自动整理收掉，
+   * 补整理后半段的移动被记进自动整理的 B 点里，用户点「撤销 B」会连带退掉补整理的书签。
+   * 撤销点串味比「晚一点再整理」糟得多，所以这里原样放回待处理集合，等补整理结束再跑。
+   */
+  if (sweepRunning) {
+    for (const id of ids) autoPending.add(id);
+    return;
+  }
+  for (const id of ids) {
+    // 先取元信息：日志要回答「哪一条、哪个站点、去了哪里」。
+    // 移动后 id 仍可查询，但标题/URL 属于书签本身，前后都一致。
+    const nodes = await chrome.bookmarks.get(id).catch(() => [] as chrome.bookmarks.BookmarkTreeNode[]);
+    const node = nodes[0];
+    // 冷却期内不再问模型：归类照常做（本地规则 + 域名兜底），只是省掉那次注定超时的等待
+    const inCooldown = Date.now() < aiStreak.cooldownUntil;
+    const res = await autoOrganizeBookmark(id, inCooldown ? { skipAi: true } : {});
+    aiStreak = nextAiStreakState({ state: aiStreak, failed: res.aiFailed === true, now: Date.now() });
+    if (aiStreak.justCooled) {
+      notifyAutoOrganized(true, `AI 分类连续失败，已暂停 ${Math.round(AI_COOLDOWN_MS / 60_000)} 分钟（期间按本地规则归类）。可在设置页检查服务商配置。`, false, 'ai-cooldown');
+    }
+    // 静默场景：未开启 / 已在正确位置 / 用户给这个站点设了免打扰。
+    // 免打扰是用户自己关的，每次收藏都弹一条「自动整理未完成」的红警告纯属噪音——
+    // 但**要留痕**（用户回头可能想问「为什么这条没整理」），所以写日志、不弹 toast。
+    const optedOut = res.action === 'skipped' && res.detail.includes('撤销过');
+    const silentSkip =
+      res.action === 'skipped' &&
+      (res.detail === '未开启自动整理' || res.detail.includes('已在') || optedOut);
+    if (silentSkip) {
+      if (optedOut && node) {
+        void appendOrganizeLog(
+          makeOrganizeLogEntry({
+            title: node.title || node.url || '(无标题)',
+            url: node.url ?? '',
+            domain: node.url ? (registrableDomain(node.url) ?? '') : '',
+            action: 'skipped',
+            detail: res.detail,
+          }),
+        );
+        // 静默是为了不吵；但第一次遇到「怎么没整理」时，用户需要一个解释。
+        // 只提示一次（全局），之后靠整理记录里的留痕。
+        try {
+          const key = 'markai.organize.optoutHinted';
+          const data = await chrome.storage.local.get(key);
+          if (!data[key]) {
+            await chrome.storage.local.set({ [key]: true });
+            notifyAutoOrganized(true, res.detail, false, 'optout');
+          }
+        } catch {
+          // 读不到标记就不提示，宁可不提示也不要次次提示
+        }
+      }
+      continue;
+    }
+    /** toast 用的文案（可能被补上引导/重复提示；失败时保持原样） */
+    let notifyDetail = res.detail;
+    // 「真的把它归位了」才算成功：skipped（非网页 / 书签已不存在 / 无法识别域名）
+    // 既不是成功也不是失败，不该占用「首次引导」名额，也不该弹报警
+    const succeeded = res.ok && res.action !== 'skipped';
+    if (node) {
+      const failed = res.action === 'failed';
+      // 成功的那条补「首次引导 / 重复收藏」提示（失败与跳过都不占用首次提示名额）
+      const detail = succeeded ? await decorateSuccessDetail(res.detail, node.url ?? '') : res.detail;
+      notifyDetail = detail;
+      void appendOrganizeLog(
+        makeOrganizeLogEntry({
+          title: node.title || node.url || '(无标题)',
+          url: node.url ?? '',
+          domain: node.url ? (registrableDomain(node.url) ?? '') : '',
+          action: res.action,
+          detail,
+          ...(res.via ? { via: res.via } : {}),
+          ...(res.target ? { target: res.target } : {}),
+          // 记下撤销点：用户不满意时能在同一条记录上「一步撤回」
+          ...(res.runId ? { runId: res.runId } : {}),
+          // 失败必须能回看：toast 会消失，日志不会
+          ...(failed ? { needsAttention: true, retryable: isRetryableFailure(res.detail) } : {}),
+        }),
+      );
+    }
+    // 跳过不弹 toast：收藏一个 chrome:// 或 mailto: 书签时弹红色「自动整理未完成」，
+    // 是在为一个用户没要求的动作报警。该留的痕已经写进日志了。
+    if (succeeded || res.action === 'failed') {
+      notifyAutoOrganized(succeeded, notifyDetail, false);
+    }
+  }
+}
+
+/** ── 补整理：把散落在根目录的已有书签也走一遍同一套决策 ── */
+
+async function startOrganizeSweep(): Promise<OneShotOutbound> {
+  // 占用必须在**任何 await 之前**：原先先 `await getTree()` 再置位，
+  // 两次快速点击（或重试按钮）都能穿过这道检查，于是两个 sweep 并发跑同一批书签，
+  // 彼此抢撤销事务、同一条书签被搬两次。这里改成「先占位，失败再释放」。
+  if (sweepRunning) {
+    return { type: 'organize:sweep:result', started: false, count: 0, detail: '补整理正在进行中，请稍候' };
+  }
+  sweepRunning = true;
+  let all: ReturnType<typeof collectLooseBookmarks> = [];
+  try {
+    const tree = await chrome.bookmarks.getTree().catch(() => [] as chrome.bookmarks.BookmarkTreeNode[]);
+    // 先数出**总数**（不设上限）：UI 的进度与「还剩多少」都要靠它。
+    // 原先只数上限内的一批（200），用户点了补整理、处理 200 条就停了，
+    // 剩下几百条静静躺在根目录且没有任何提示——压测时才暴露出来。
+    all = collectLooseBookmarks(tree, 100_000);
+  } catch {
+    sweepRunning = false;
+    return { type: 'organize:sweep:result', started: false, count: 0, detail: '读取书签失败，请稍后再试' };
+  }
+  if (all.length === 0) {
+    sweepRunning = false;
+    return { type: 'organize:sweep:result', started: false, count: 0, detail: '没有需要补整理的散落书签' };
+  }
+  sweepSnapshot = { done: 0, total: all.length, moved: 0, failed: 0 };
+  // 立即返回、后台分批跑：几千条时不能让消息通道挂住
+  void runOrganizeSweep(all.length);
+  return {
+    type: 'organize:sweep:result',
+    started: true,
+    count: all.length,
+    detail: `开始补整理 ${all.length} 条散落书签`,
+  };
+}
+
+async function runOrganizeSweep(totalHint: number): Promise<void> {
+  let done = 0;
+  let moved = 0;
+  let failed = 0;
+  let cancelled = false;
+  /**
+   * 域名 → 已确定的落点文件夹。
+   * 补整理几百条时书签高度集中在少数站点：第一条问过模型之后，后面同域名的直接用同一结论，
+   * 既省调用也省用户等待（每条都重新收集候选 + 问模型，几百条会跑到天荒地老）。
+   */
+  const domainFolder = new Map<string, string>();
+  /** 已经让模型失败的域名：后续同域条目跳过 AI，免得每一条都各等一次 12 秒超时 */
+  const aiDeadDomains = new Set<string>();
+  /** 本轮已经处理过的书签：整理失败的书签会留在原位，不记下来就会在下一批被反复捞起 */
+  const processed = new Set<string>();
+  /**
+   * 父目录顺序缓存：批量移动时避免每条都 `getChildren` 整个根目录（1 万条时是 1 万项）。
+   * 这是 1 万条补整理从 402 秒降到几十秒的关键——干净环境实测的 O(n²) 就在这里。
+   */
+  const orderCache = new Map<string, string[]>();
+  /*
+   * 已知风险（第 35 轮回退了「整批合并一个撤销点」）：
+   * 合并后一个点里会同时有「新建站点文件夹」和「若干条移入」的 op。撤销这个点时，
+   * 撤销「新建文件夹」是**递归删除**，会连带删掉同批里已经移进去的内容，
+   * 于是后面的 move 回放找不到目标、整批只还原了一部分（实测 124 条只 restored 5）。
+   * 逐条点虽然会撞上限（只能退最近 10 步），但**每步都是可靠的**——
+   * 可靠性优先，所以退回「一条一个撤销点」，并用「撤销全部 N 步」缓解连点疲劳。
+   */
+
+  /*
+   * 注：曾试过「按根目录复用候选文件夹上下文」来省掉每条一次的 getTree()（1 万条时 223ms/次）。
+   * 实现在 `auto-organize.ts` 的 OrganizeContext 里保留着，但**没有**接进这条路径：
+   * 实测在 600/3000 两档都没有带来可复现的收益（差异落在运行间波动内），
+   * 而它会让「新建文件夹是否漏进缓存」成为一类新的正确性风险。宁可少一层抽象。 */
+  const total = totalHint;
+  try {
+    // 分批重新扫描：处理会把书签移走，所以每批都要以**当前树**为准。
+    // 一批处理不完就再来一批，直到根目录里没有可收的书签。
+    outer: while (true) {
+      const tree = await chrome.bookmarks.getTree().catch(() => [] as chrome.bookmarks.BookmarkTreeNode[]);
+      // 排除放在**收集阶段**：先截断成 200 再 filter 的话，一旦前 200 条都处理过
+      // （失败的书签会留在原位、skipped 的也留在原位），batch 会空掉、break 带走剩下全部书签，
+      // 而用户只会看到「补整理完成」，不会知道后面几百条根本没被看过。
+      const batch = collectLooseBookmarks(tree, 200, processed);
+      if (batch.length === 0) break;
+      for (const t of batch) {
+      // 用户随时可以喊停：几百条逐条判定会跑几分钟，取消必须真的停在下一条之前
+      if (!sweepRunning) {
+        cancelled = true;
+        break outer;
+      }
+      processed.add(t.id);
+      const domain = registrableDomain(t.url) ?? '';
+      const cachedFolderId = domain ? domainFolder.get(domain) : undefined;
+      let res;
+      if (cachedFolderId) {
+        res = await moveBookmarkInto(t.id, cachedFolderId, `与同站点的其它书签放在一起`, { orderCache });
+        // 缓存的文件夹可能已被撤销/删掉：清掉缓存，让后面同域名的重新走完整决策
+        if (!res.ok && domain) domainFolder.delete(domain);
+      } else {
+        // ignoreOptOut：补整理是用户主动点的，免打扰名单只该挡后台的自动行为
+        res = await autoOrganizeBookmark(t.id, {
+          skipAi: !!domain && aiDeadDomains.has(domain),
+          ignoreOptOut: true,
+        });
+        if (domain) {
+          if (res.action === 'failed') aiDeadDomains.add(domain);
+          if (res.ok && res.action !== 'skipped') {
+            const node = (await chrome.bookmarks.get(t.id).catch(() => [] as chrome.bookmarks.BookmarkTreeNode[]))[0];
+            if (node?.parentId) domainFolder.set(domain, node.parentId);
+          }
+        }
+      }
+      done++;
+      if (res.ok && res.action !== 'skipped') moved++;
+      if (res.action === 'failed') failed++;
+      sweepSnapshot = { done, total, moved, failed };
+      // 进度逐条广播：补整理可能持续几分钟，用户需要看见它在动
+      void chrome.runtime
+        .sendMessage({
+          type: 'markai:sweep-progress',
+          done,
+          total,
+          moved,
+          failed,
+          current: t.title,
+        })
+        .catch(() => {});
+      }
+    }
+  } finally {
+    sweepRunning = false;
+    sweepSnapshot = null;
+    // 补整理期间被让路的自动整理在这里被唤醒（结束责任在结束方）
+    wakeAutoOrganize();
+  }
+  void chrome.runtime
+    .sendMessage({ type: 'markai:sweep-done', done, total, moved, failed, cancelled })
+    .catch(() => {});
+  void appendOrganizeLog(
+    makeOrganizeLogEntry({
+      title: `补整理 ${done} 条散落书签`,
+      url: '',
+      domain: '',
+      action: failed > 0 ? 'failed' : moved > 0 ? 'moved' : 'skipped',
+      detail: cancelled
+        ? `补整理已取消：已处理 ${done}/${total} 条，归入 ${moved} 条。`
+        : `补整理完成：成功归入 ${moved} 条${failed > 0 ? `，失败 ${failed} 条（可在记录里逐条重试）` : ''}。`,
+      ...(failed > 0 ? { needsAttention: true, retryable: true } : {}),
+    }),
+  );
+}
+
+/** 通知已打开的界面弹 toast；没有界面在听时静默（自动动作不需要打扰） */
+function notifyAutoOrganized(ok: boolean, detail: string, burst: boolean, kind?: 'optout' | 'ai-cooldown'): void {
+  chrome.runtime
+    .sendMessage({ type: 'markai:auto-organized', ok, detail, burst, ...(kind ? { kind } : {}) })
+    .catch(() => {
+      // 没有接收方（侧边栏/完整页都没开）：自动整理照常完成，不需要报错
+    });
 }
 
 /** ── 删除执行：实现在 src/lib/ai/deletion-executor.ts（可单测，且会记入操作日志） ── */
@@ -361,6 +936,9 @@ async function handleChatSend(
     if (token !== badgeToken) return;
     agentTaskRunning = false;
     void (error ? setTaskBadge('!', '#dc2626') : chrome.action.setBadgeText({ text: '' })).catch(() => {});
+    // Agent 任务期间被让路的自动整理在这里补一次唤醒。
+    // 正常结束 / 取消 / 失败三条路径都会经过 clearBadge，所以这里放一次就够。
+    wakeAutoOrganize();
   };
 
   // 读取配置（与 options 页共用 key，未填项回落到预设默认值）

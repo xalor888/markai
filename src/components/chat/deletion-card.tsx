@@ -1,4 +1,4 @@
-import { LocateFixed, Trash2 } from 'lucide-react';
+import { Loader2, LocateFixed, Trash2 } from 'lucide-react';
 import { memo, useEffect, useRef, useState } from 'react';
 import { useAIStore } from '@/stores/aiStore';
 import { useBookmarkStore } from '@/stores/bookmarkStore';
@@ -6,6 +6,7 @@ import type { DeletionProposal } from '@/lib/ai/types';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
+import { createBusyGuard, runExclusive } from '@/lib/chat/busy-guard';
 
 /**
  * 删除提议卡片（Agent 唯一删除入口）：
@@ -16,6 +17,15 @@ export const DeletionCard = memo(function DeletionCard({ proposals }: { proposal
   const confirmDeletions = useAIStore((s) => s.confirmDeletions);
   const resolveDeletions = useAIStore((s) => s.resolveDeletions);
   const [checked, setChecked] = useState<Set<string>>(new Set());
+  // 逐条删除的进行中状态：只锁住被点的那一行，其他行仍可继续操作。
+  // 用 Set 而不是单个 id，才能支撑「连续点击多行删除」都不互相卡住。
+  //
+  // T10：守卫必须放 ref 里。registry 是**同步可变**的，begin() 先占用再返回，
+  // 与 React 何时重渲染无关；下面这份 state 只用于渲染（快照）。
+  // 原先直接 `if (busyIds.has(id)) return` 读的是本次渲染的旧快照 —— 同一 tick
+  // 连点同一行 5 次会全部放行，发 5 次 confirmDeletions（靠 store 兜底才没删两次）。
+  const busyGuard = useRef(createBusyGuard());
+  const [busyIds, setBusyIds] = useState<Set<string>>(() => new Set());
   // 记录已见过的提议 id，仅对"新增"提议默认勾选，不覆盖用户手动取消的选择
   const seenIds = useRef(new Set<string>());
 
@@ -41,6 +51,16 @@ export const DeletionCard = memo(function DeletionCard({ proposals }: { proposal
       else next.add(id);
       return next;
     });
+  };
+
+  /**
+   * 逐条删除：点击一行即确认删除这一条（用户显式点击 = 确认动作）。
+   * 必须先落 busy、再 await，最后在 finally 里解锁——任何失败路径都不会让按钮永久卡死，
+   * 所以同一行可以反复点、不同行可以连续点。
+   */
+  const removeOne = (id: string) => {
+    // 失败提示由 store 统一 toast；这里只保证按钮一定解锁（不被 rejection 打断）
+    runExclusive(busyGuard.current, id, () => confirmDeletions([id]), setBusyIds);
   };
 
   const pendingIds = pending.map((p) => p.id);
@@ -105,6 +125,33 @@ export const DeletionCard = memo(function DeletionCard({ proposals }: { proposal
               </div>
               <p className="mt-0.5 text-2xs leading-4 text-muted-foreground">{p.reason}</p>
             </div>
+            {p.status === 'pending' ? (
+              <button
+                type="button"
+                onClick={(e) => {
+                  // 阻止冒泡：卡片/消息层未来若加点击处理，也不会把这次点击吃掉
+                  e.preventDefault();
+                  e.stopPropagation();
+                  removeOne(p.id);
+                }}
+                disabled={busyIds.has(p.id)}
+                className="flex shrink-0 items-center gap-1 rounded-sm px-1.5 py-0.5 text-2xs font-medium text-destructive transition-colors hover:bg-destructive/10 disabled:cursor-not-allowed disabled:opacity-50"
+                title="立即删除这一项（无需再勾选）"
+                aria-label={`删除 ${p.title}`}
+              >
+                {busyIds.has(p.id) ? (
+                  <>
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    删除中
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="h-3 w-3" />
+                    删除
+                  </>
+                )}
+              </button>
+            ) : null}
             {p.status === 'executed' && <Badge variant="success">已删除</Badge>}
             {p.status === 'confirmed' && <Badge>执行中</Badge>}
             {p.status === 'declined' && <Badge variant="outline">已放弃</Badge>}

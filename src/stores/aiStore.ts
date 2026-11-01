@@ -126,7 +126,8 @@ interface AIState {
   /** 内部：发送计划决定 */
   _decidePlan: (approved: boolean) => void;
   /** 操作日志：撤销最近（或指定）的写操作轮次，并把书签树刷新回 UI */
-  undoLast: (id?: string) => Promise<void>;
+  /** 撤销一步；返回是否真的撤销成功（批量回退据此决定要不要继续） */
+  undoLast: (id?: string, opts?: { silent?: boolean }) => Promise<boolean>;
   /** 持久化；force=true 时跳过远端合并（清空等用户明确意图的操作） */
   _persist: (force?: boolean) => Promise<void>;
 }
@@ -155,6 +156,7 @@ let truncateWarned = false;
  * 否则会留下一个「点了会撤错对象」的陈旧入口。
  */
 export function initCrossWindowSync(): () => void {
+
   const onChanged = (
     changes: { [key: string]: chrome.storage.StorageChange },
     area: chrome.storage.AreaName,
@@ -711,7 +713,15 @@ export const useAIStore = create<AIState>((set, get) => ({
         // "删除全部"提议携带 all 授权标志，background 据此校验（纵深防御）
         ...(p.all ? { all: true } : {}),
       }));
-    if (items.length === 0) return;
+    if (items.length === 0) {
+      // 没有可执行的项（已被其他窗口处理 / 状态已变化）：必须给出可见反馈。
+      // 原先这里静默 return，界面表现为「点了删除什么都没发生」。
+      pushToast('没有可执行的删除项', {
+        description: '这些提议已被处理或状态已变化，请刷新后查看最新清单。',
+        variant: 'default',
+      });
+      return;
+    }
 
     // 先标记为已确认（执行结果到达后再更新为 executed）；批量一次落盘
     get().resolveDeletions(items.map((it) => [it.proposalId, 'confirmed']));
@@ -787,14 +797,14 @@ export const useAIStore = create<AIState>((set, get) => ({
     }
   },
 
-  async undoLast(id?: string) {
+  async undoLast(id?: string, opts: { silent?: boolean } = {}): Promise<boolean> {
     // 明确针对「界面上正在展示的那个撤销点」：不传 id 时取 store 里的第一个，
     // 并把它显式发给 background。绝不能只发「撤销最新的那个」——别的窗口中途完成
     // 一轮后，latest 已经变成另一个操作，用户点的和实际撤的就会不是一回事。
     const shown = id ?? get().undoPoints[0]?.id;
     if (!shown) {
-      pushToast('没有可撤销的操作');
-      return;
+      if (!opts.silent) pushToast('没有可撤销的操作');
+      return false;
     }
     try {
       const res = (await chrome.runtime.sendMessage({
@@ -802,8 +812,8 @@ export const useAIStore = create<AIState>((set, get) => ({
         id: shown,
       })) as OneShotOutbound | undefined;
       if (res?.type !== 'undo:apply:result') {
-        pushToast('撤销未返回结果，请重试', { variant: 'destructive' });
-        return;
+        if (!opts.silent) pushToast('撤销未返回结果，请重试', { variant: 'destructive' });
+        return false;
       }
       const r = res.result;
       // 顺序很重要：**先判 !ok**。消费写失败返回的是
@@ -811,36 +821,45 @@ export const useAIStore = create<AIState>((set, get) => ({
       // 若按 failures 分支判断就会掉进成功提示，把"记录没更新、别再点"说成"已撤销"。
       if (!r.ok) {
         if (r.failures.length > 0) {
-          pushToast(`已还原 ${r.restored} 项，${r.failures.length} 项失败`, {
+          if (!opts.silent) pushToast(`已还原 ${r.restored} 项，${r.failures.length} 项失败`, {
             description: r.failures.map((f) => `${f.title}：${f.error}`).join('；'),
             variant: 'destructive',
           });
         } else if (r.restored === 0) {
           // 零还原的明确拒绝（含删除的轮次、已撤销过、非最新点、文件夹冲突等）
-          pushToast('无法撤销', { description: r.reason ?? '没有可撤销的操作', variant: 'destructive' });
+          if (!opts.silent) pushToast('无法撤销', { description: r.reason ?? '没有可撤销的操作', variant: 'destructive' });
         } else {
           // 已还原一部分、但记录没能更新（消费写失败）：必须说清现状并警告不要重复点击
-          pushToast('撤销未完成', {
-            description: `已还原 ${r.restored} 项，但${r.reason ?? '本地记录未更新'}`,
-            variant: 'destructive',
-          });
+          if (!opts.silent) {
+            pushToast('撤销未完成', {
+              description: `已还原 ${r.restored} 项，但${r.reason ?? '本地记录未更新'}`,
+              variant: 'destructive',
+            });
+          }
         }
       } else if (r.failures.length > 0) {
         // ok 但仍有条目失败：如实上报明细
-        pushToast(`已还原 ${r.restored} 项，${r.failures.length} 项失败`, {
-          description: r.failures.map((f) => `${f.title}：${f.error}`).join('；'),
-          variant: 'destructive',
-        });
+        if (!opts.silent) {
+          pushToast(`已还原 ${r.restored} 项，${r.failures.length} 项失败`, {
+            description: r.failures.map((f) => `${f.title}：${f.error}`).join('；'),
+            variant: 'destructive',
+          });
+        }
       } else {
-        pushToast(`已撤销本次操作（还原 ${r.restored} 项）`, { variant: 'success' });
+        if (!opts.silent) pushToast(`已撤销本次操作（还原 ${r.restored} 项）`, { variant: 'success' });
       }
       await get().refreshUndo();
       void useBookmarkStore.getState().loadTree();
+      // 只有「确实还原了东西 + 记录消费成功」才算成功，批量循环据此继续
+      return r.ok && r.restored > 0;
     } catch (e) {
-      pushToast('撤销失败', {
-        description: e instanceof Error ? e.message : String(e),
-        variant: 'destructive',
-      });
+      if (!opts.silent) {
+        pushToast('撤销失败', {
+          description: e instanceof Error ? e.message : String(e),
+          variant: 'destructive',
+        });
+      }
+      return false;
     }
   },
 

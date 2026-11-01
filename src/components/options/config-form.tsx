@@ -39,23 +39,31 @@ function Section({
   badge,
   children,
   className,
+  anchor,
 }: {
   icon: React.ComponentType<{ className?: string }>;
   title: string;
   badge?: React.ReactNode;
   children: React.ReactNode;
   className?: string;
+  /** 左侧导航跳转用的锚点 id */
+  anchor?: string;
 }) {
+  /*
+   * 分节不再是一张张带边框的卡片：
+   * 六个圆角框叠在一起，边界比内容还抢眼，页面看起来像"六个抽屉"。
+   * 改成一个节标题 + 一条分隔线，靠留白分组——这也是原生设置页的做法。
+   */
   return (
-    <section className={cn('rounded-lg border border-border bg-card p-4', className)}>
-      <div className="mb-3.5 flex items-center justify-between">
+    <section id={anchor} className={cn('scroll-mt-20 border-t border-border pt-4 first:border-t-0 first:pt-0', className)}>
+      <div className="mb-1 flex items-center justify-between">
         <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
           <Icon className="h-4 w-4 shrink-0 text-accent" />
           {title}
         </h2>
         {badge}
       </div>
-      {children}
+      <div className="divide-y divide-border/60">{children}</div>
     </section>
   );
 }
@@ -75,14 +83,30 @@ function Field({
   /** 标签行右侧的操作（如「获取模型列表」） */
   action?: React.ReactNode;
 }) {
+  /*
+   * 左右两栏：标签在左（固定 148px），控件在右。
+   *
+   * 重写前是「标签 / 控件 / 说明」三段竖排，每个字段占掉约 100px 高度——
+   * 整页 2300px，找一项要滚半天。两栏之后同样的信息量高度砍掉近一半，
+   * 而且标签天然对齐，扫视时一列词就能定位到要改的那项。
+   *
+   * 窄屏（<640px）自动退回单列，避免标签被挤成两行。
+   */
   return (
-    <div className="space-y-1.5">
-      <div className="flex items-center justify-between gap-2">
-        <Label htmlFor={htmlFor}>{label}</Label>
-        {action}
+    <div className="grid grid-cols-1 gap-x-5 py-2 sm:grid-cols-[148px_minmax(0,1fr)]">
+      <div className="flex items-center justify-between gap-2 sm:block sm:pt-2">
+        <Label htmlFor={htmlFor} className="text-xs font-medium">
+          {label}
+        </Label>
+        {action && <div className="sm:hidden">{action}</div>}
       </div>
-      {children}
-      {hint && <p className="text-2xs leading-4 text-muted-foreground">{hint}</p>}
+      <div className="min-w-0">
+        <div className="flex items-start gap-2">
+          <div className="min-w-0 flex-1">{children}</div>
+          {action && <div className="hidden shrink-0 pt-1 sm:block">{action}</div>}
+        </div>
+        {hint && <p className="mt-1 text-2xs leading-4 text-muted-foreground">{hint}</p>}
+      </div>
     </div>
   );
 }
@@ -385,7 +409,7 @@ export function ConfigForm() {
       )}
 
       {/* ── AI 服务 ── */}
-      <Section icon={Plug} title="AI 服务">
+      <Section icon={Plug} title="AI 服务" anchor="ai">
         <div className="space-y-3.5">
           <Field
             label="服务商"
@@ -573,7 +597,7 @@ export function ConfigForm() {
       </Section>
 
       {/* ── 上下文与预算 ── */}
-      <Section icon={SlidersHorizontal} title="上下文与预算">
+      <Section icon={SlidersHorizontal} title="上下文与预算" anchor="context">
         <div className="space-y-3.5">
           <Field
             label="模型上下文长度"
@@ -662,7 +686,7 @@ export function ConfigForm() {
       </Section>
 
       {/* ── Agent 行为 ── */}
-      <Section icon={Zap} title="Agent 行为">
+      <Section icon={Zap} title="Agent 行为" anchor="agent">
         <div className="space-y-3.5">
           <Field
             label="删除确认"
@@ -712,7 +736,7 @@ export function ConfigForm() {
               <span className="block text-xs font-medium text-foreground">新书签自动整理</span>
               <span className="mt-0.5 block text-2xs leading-4 text-muted-foreground">
                 {config.autoOrganizeNew ?? true
-                  ? '收藏新页面后自动识别并归类：先认你已有的分类，认不出时才问 AI 或按域名归入「自动整理」。每一步都能在「整理记录」里看见并撤销。'
+                  ? '收藏新页面后自动识别并归类：先认你已有的分类，认不出就问你（或留在原地，绝不替你新建按域名的文件夹）。每一步都能在「整理记录」里看见并撤销。'
                   : '关闭：新书签保持在你放的位置，需要手动整理（可随时在「整理记录」里补整理）'}
               </span>
             </span>
@@ -752,6 +776,7 @@ export function ConfigForm() {
       <Section
         icon={Brain}
         title="长期记忆"
+        anchor="memory"
         badge={<Badge variant="outline">{memories.filter((m) => m.enabled).length} 条生效</Badge>}
       >
         <p className="mb-3 text-2xs leading-4 text-muted-foreground">
@@ -844,7 +869,7 @@ export function ConfigForm() {
       </Section>
 
       {/* ── 外观 ── */}
-      <Section icon={Palette} title="外观">
+      <Section icon={Palette} title="外观" anchor="appearance">
         <div className="grid grid-cols-3 gap-1.5">
           {(
             [
@@ -872,7 +897,7 @@ export function ConfigForm() {
       </Section>
 
       {/* ── 数据管理 ── */}
-      <Section icon={Database} title="数据管理">
+      <Section icon={Database} title="数据管理" anchor="data">
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
             <p className="text-xs text-foreground">对话记录与待删除清单</p>

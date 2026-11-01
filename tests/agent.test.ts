@@ -7623,6 +7623,10 @@ async function okA(name: string, fn: () => Promise<void> | void) {
         if (pre === 'border' && (BORDER_DIR.test(seg[0]!) || seg.some((s) => /^\d+$/.test(s)))) continue;
         // border 的线型（border-dashed / border-solid）不是颜色
         if (pre === 'border' && seg.some((s) => BORDER_STYLE.has(s))) continue;
+        // divide-x / divide-y 是「画不画分隔线」的布局工具，不带颜色；
+        // divide-<color> 才需要颜色 token（本守卫只该检查后者）
+        if (pre === 'divide' && seg.some((s) => s === 'x' || s === 'y' || /^\d+$/.test(s))) continue;
+        if (pre === 'divide' && seg.some((s) => s === 'dashed' || s === 'dotted' || s === 'solid' || s === 'none' || s === 'double')) continue;
         // ring 的宽度与 ring-inset 不是颜色
         if (pre === 'ring' && (/^\d/.test(name!) || seg.includes('inset'))) continue;
         if (BUILTIN.has(name!)) continue;

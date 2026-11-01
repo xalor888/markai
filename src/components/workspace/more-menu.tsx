@@ -1,4 +1,4 @@
-import { Check, Keyboard, LayoutPanelLeft, Maximize, MessageSquare, Moon, MoreHorizontal, Settings, Sun, Trash2, Wand2, Monitor, BookmarkPlus } from 'lucide-react';
+import { BookmarkPlus, Check, Keyboard, LayoutPanelLeft, Maximize, MessageSquare, Monitor, Moon, MoreHorizontal, Settings, Sparkles, Sun, Trash2, Wand2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useThemeStore, type Theme } from '@/stores/themeStore';
 import { cn } from '@/lib/utils';
@@ -45,6 +45,34 @@ export function MoreMenu({
   const wrapRef = useRef<HTMLDivElement>(null);
   const theme = useThemeStore((s) => s.theme);
   const setTheme = useThemeStore((s) => s.setTheme);
+
+  /*
+   * 自动整理（新书签收藏后自动归类）的状态。
+   *
+   * 它一直在后台跑，但界面上没有任何地方显示"它在工作 / 被关掉了"——
+   * 于是用户只能靠猜（"我是不是把自动整理弄没了？"）。这里给它一个可见开关。
+   */
+  const [autoOrganize, setAutoOrganize] = useState(true);
+  useEffect(() => {
+    if (!open) return;
+    void chrome.storage.local
+      .get('markai.config')
+      .then((d) => {
+        const cfg = d['markai.config'] as { autoOrganizeNew?: boolean } | undefined;
+        setAutoOrganize(cfg?.autoOrganizeNew ?? true);
+      })
+      .catch(() => {});
+  }, [open]);
+
+  const toggleAutoOrganize = async () => {
+    const d = await chrome.storage.local.get('markai.config').catch(() => ({}) as Record<string, unknown>);
+    const cfg = (d['markai.config'] ?? {}) as Record<string, unknown>;
+    const next = !(cfg.autoOrganizeNew ?? true);
+    await chrome.storage.local
+      .set({ 'markai.config': { ...cfg, autoOrganizeNew: next } })
+      .catch(() => {});
+    setAutoOrganize(next);
+  };
 
   // 点击外部 / Esc 关闭（与仓库里其它浮层一致）
   useEffect(() => {
@@ -134,6 +162,25 @@ export function MoreMenu({
           {item(BookmarkPlus, '收藏当前页面', onSaveCurrentTab)}
           {item(Trash2, '待删除清单', onDeletions, { badge: pendingCount, danger: pendingCount > 0 })}
           {item(Wand2, '整理记录', onOrganize, { active: organizeAlert })}
+          {/* 自动整理的状态与开关：它一直在跑，得让人看得见 */}
+          <button
+            type="button"
+            role="menuitem"
+            data-testid="auto-organize-toggle"
+            onClick={() => void toggleAutoOrganize()}
+            className="flex w-full items-center gap-2.5 px-3 py-1.5 text-left text-xs text-foreground transition-colors hover:bg-muted"
+          >
+            <Sparkles className="h-3.5 w-3.5 shrink-0" />
+            <span className="min-w-0 flex-1 truncate">收藏后自动整理</span>
+            <span
+              className={cn(
+                'shrink-0 rounded-full px-1.5 py-0.5 text-2xs font-medium',
+                autoOrganize ? 'bg-accent/15 text-accent' : 'bg-muted text-muted-foreground',
+              )}
+            >
+              {autoOrganize ? '已开启' : '已关闭'}
+            </span>
+          </button>
           <div className="my-1 h-px bg-border" />
           {item(MessageSquare, chatOpen ? '收起 Agent 面板' : '展开 Agent 面板', onToggleChat, { active: chatOpen })}
           {mode === 'full'

@@ -1,4 +1,4 @@
-import { ArrowDownUp, BookmarkPlus, Copy, ExternalLink, Folder, FolderInput, FolderOpen, FolderPlus, Link2, Search, Sparkles, Trash2, X } from 'lucide-react';
+import { Clock, ArrowDownUp, BookmarkPlus, Copy, ExternalLink, Folder, FolderInput, FolderOpen, FolderPlus, Link2, Search, Sparkles, Trash2, X } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
 import { useAIStore } from '@/stores/aiStore';
 import { useBookmarkStore, copyNodeDeep, findNode, buildFolderChildCounts, resolveTitlePath, type TreeContextMenu } from '@/stores/bookmarkStore';
@@ -751,6 +751,23 @@ export function BookmarkList({ className, compact = false }: { className?: strin
               {!compact && '打开全部'}
             </Button>
           )}
+          {/*
+           * 时间线：一个**带文字**的明确入口。
+           * 排序下拉里虽然也有「按收藏时间」，但那是一个下拉选项，
+           * 用户找不到"我怎么去时间线"这个动作——这里给它一个按钮，
+           * 进去之后同一个位置变成「返回文件夹」，随时能回来。
+           */}
+          <Button
+            size={compact ? 'icon' : 'sm'}
+            variant={sortBy === 'time' ? 'default' : 'outline'}
+            onClick={() => setSortBy(sortBy === 'time' ? 'manual' : 'time')}
+            title={sortBy === 'time' ? '返回文件夹列表' : '时间线：按收藏时间看全部书签'}
+            data-testid="timeline-toggle"
+            className="h-7 shrink-0"
+          >
+            <Clock className="h-3 w-3" />
+            {!compact && (sortBy === 'time' ? '返回文件夹' : '时间线')}
+          </Button>
           {/*
            * 排序：**紧凑布局也要有**。
            * 重做前这里写着 `!compact`，于是侧边栏（最常用的形态）根本没有排序下拉——

@@ -457,6 +457,56 @@ async function run() {
     check('列表接受键盘事件（↓ 导航不报错）', kb.ok === true, JSON.stringify(kb));
   }
 
+  /* ══════════ 9.4 空文件夹的空状态 ══════════ */
+  console.log('\n[9.4] 空文件夹空状态');
+  {
+    /*
+     * 回归：空文件夹里「新建书签」曾经出现 **两次**。
+     * 原因是有两段独立的 `browsing && selectedFolderId` 块各自渲染了按钮，
+     * 一段只有「新建书签」+ 空行提示，另一段有「新建书签 + 新建文件夹」。
+     * 用户看到的是重复按钮和一行奇怪的空白。
+     */
+    const emptyFolderId = await ev(`(async () => {
+      const bar = (await chrome.bookmarks.getTree())[0].children.find((c) => c.id === '1');
+      const f = await chrome.bookmarks.create({ parentId: bar.id, title: 'E2E-空文件夹' });
+      return f.id;
+    })()`);
+
+    // 等树的去抖刷新，再展开并点进去
+    await waitFor(async () => {
+      await ev(`document.querySelector('button[aria-label="全部展开"]')?.click()`);
+      await sleep(300);
+      return ev(`document.body.innerText.includes('E2E-空文件夹')`);
+    }, 6000);
+    await ev(`(() => {
+      const n = [...document.querySelectorAll('[data-testid="tree-node"]')]
+        .find((x) => (x.textContent || '').includes('E2E-空文件夹'));
+      n?.click();
+      return true;
+    })()`);
+    await sleep(600);
+
+    const empty = await ev(`(() => {
+      const labels = [...document.querySelectorAll('button')]
+        .map((b) => (b.textContent || '').trim())
+        .filter((t) => t === '新建书签' || t === '新建文件夹');
+      return {
+        labels,
+        newBookmark: labels.filter((t) => t === '新建书签').length,
+        newFolder: labels.filter((t) => t === '新建文件夹').length,
+        hasHint: document.body.innerText.includes('Ctrl+D'),
+      };
+    })()`);
+    check(
+      '空文件夹里动作按钮不重复（新建书签 / 新建文件夹 各一个）',
+      empty.newBookmark === 1 && empty.newFolder === 1,
+      JSON.stringify(empty),
+    );
+    check('空文件夹里给了下一步（含 Ctrl+D 提示）', empty.hasHint === true, JSON.stringify(empty));
+
+    await ev(`chrome.bookmarks.removeTree(${JSON.stringify(emptyFolderId)}).catch(() => {})`);
+  }
+
   /* ══════════ 9.5 无障碍：可点元素必须有可访问名称 ══════════ */
   console.log('\n[9.5] 无障碍守卫');
   {

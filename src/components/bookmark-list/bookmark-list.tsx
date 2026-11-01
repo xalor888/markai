@@ -991,30 +991,19 @@ export function BookmarkList({ className, compact = false }: { className?: strin
                 <p className="text-2xs text-muted-foreground/70">只搜标题与网址；换个词或清空后再看</p>
               </div>
             )}
-            {/* 空文件夹里最可能想做的一件事就是往里放东西；只写「此文件夹为空」等于把人晾在这儿。
-                不放「收藏当前页」是因为它依赖顶栏那份实现（跨组件传函数不值得），
-                改用一句快捷键提示，同样能让人动起来。 */}
-            {browsing && selectedFolderId && (
-              <div className="mt-1 flex flex-col items-center gap-1">
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => useUIStore.getState().openDialog({ kind: 'create-bookmark', parentId: selectedFolderId })}
-                >
-                  <BookmarkPlus className="h-3 w-3" />
-                  新建书签
-                </Button>
-                <p className="text-2xs text-muted-foreground/70">或按 Ctrl+D 把当前页面收藏进来</p>
-              </div>
-            )}
             <p className="mt-2 text-2xs text-muted-foreground/70">
               / 搜索 · Enter 打开 · Ctrl+C 复制 · Delete 删除 · F2 重命名 · Ctrl+A 全选
             </p>
+            {/*
+             * 空文件夹的动作区：**只留一处**。
+             *
+             * 早先这里有两段独立的 `browsing && selectedFolderId` 块，各自渲染了自己的按钮，
+             * 于是空文件夹里出现两个「新建书签」（实测 DOM 里确实是 2 个），
+             * 一个还带着「或按 Ctrl+D」的空行——看着像渲染出错。
+             * 现在合成一处：两个按钮 + 一行提示。
+             */}
             {browsing && selectedFolderId && (
               <>
-                <p className="text-2xs leading-4 text-muted-foreground/70">
-                  右键文件夹可在树中新建子文件夹，或让 MarkAI 帮你整理。
-                </p>
                 <div className="mt-2.5 flex items-center gap-2">
                   <Button size="sm" variant="outline" onClick={() => openDialog({ kind: 'create-bookmark', parentId: selectedFolderId })}>
                     <BookmarkPlus className="h-3 w-3" />
@@ -1025,6 +1014,9 @@ export function BookmarkList({ className, compact = false }: { className?: strin
                     新建文件夹
                   </Button>
                 </div>
+                <p className="mt-1 text-2xs leading-4 text-muted-foreground/70">
+                  或按 Ctrl+D 把当前页面收藏进来；右键文件夹可在树中新建子文件夹，或让 MarkAI 帮你整理。
+                </p>
               </>
             )}
           </div>

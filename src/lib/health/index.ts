@@ -61,10 +61,31 @@ export function analyzeBookmarks(roots: BNode[], allNodes?: BNode[]): NonNullabl
    */
   let orphaned = 0;
   if (allNodes) {
-    const ids = new Set(allNodes.map((n) => n.id));
+    /*
+     * 先收集**整棵树**里的所有 id 作为"父级可以是什么"的判据。
+     *
+     * 为什么不能只用 search({}) 的结果去判断：
+     * 实测 `chrome.bookmarks.search({})` **不返回根文件夹**（书签栏 / 其他书签 / 移动设备），
+     * 于是任何直接挂在书签栏下的书签或文件夹，父级都不在结果集里 →
+     * 被误判成"孤儿"。健康检查会因此对普通用户报
+     * 「N 个书签找不到父文件夹，它们不会出现在任何树里」——完全是假警报。
+     *
+     * 正确判据：父级在**树**里存在即正常；不在树里，才是真的孤儿。
+     */
+    const treeIds = new Set<string>();
+    const collect = (nodes: BNode[]) => {
+      for (const n of nodes) {
+        treeIds.add(n.id);
+        if (n.children) collect(n.children);
+      }
+    };
+    for (const root of roots) {
+      treeIds.add(root.id);
+      collect(root.children ?? []);
+    }
     for (const n of allNodes) {
-      // 三个根节点的 parentId 是 "0"，它不在列表里，属于正常
-      if (n.parentId && n.parentId !== '0' && !ids.has(n.parentId)) orphaned++;
+      // 根节点的 parentId 是 "0"（虚拟根），属于正常
+      if (n.parentId && n.parentId !== '0' && !treeIds.has(n.parentId)) orphaned++;
     }
   }
 

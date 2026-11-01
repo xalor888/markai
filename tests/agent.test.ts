@@ -10829,6 +10829,57 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T109: 孤儿检测不能误报（search 不返回根文件夹） ══════════ */
+  console.log('\n[T109] 健康检查的孤儿判据');
+  {
+    /*
+     * 实测：`chrome.bookmarks.search({})` **不返回根文件夹**（书签栏 / 其他书签 / 移动设备）。
+     * 原先的判据是"父级不在 search 结果里 = 孤儿"，
+     * 于是任何直接挂在书签栏下的书签/文件夹都被误判 ——
+     * 健康检查会对普通用户报「N 个书签找不到父文件夹，它们不会出现在任何树里」，
+     * 完全是假警报，而且很吓人。
+     */
+    const bar = {
+      id: '1',
+      title: '书签栏',
+      children: [
+        { id: 'a', title: 'A', url: 'https://a.example', parentId: '1' },
+        {
+          id: 'f',
+          title: 'F',
+          parentId: '1',
+          children: [{ id: 'b', title: 'B', url: 'https://b.example', parentId: 'f' }],
+        },
+      ],
+    } as unknown as chrome.bookmarks.BookmarkTreeNode;
+    const tree = [{ id: '0', title: '', children: [bar] }] as unknown as chrome.bookmarks.BookmarkTreeNode[];
+
+    ok('直接挂在书签栏下的书签与文件夹不算孤儿（此前会误报）', () => {
+      // search({}) 的真实返回：只有用户内容，没有根文件夹
+      const fromSearch = [
+        { id: 'a', title: 'A', url: 'https://a.example', parentId: '1' },
+        { id: 'f', title: 'F', parentId: '1' },
+        { id: 'b', title: 'B', url: 'https://b.example', parentId: 'f' },
+      ] as unknown as chrome.bookmarks.BookmarkTreeNode[];
+      const stats = analyzeBookmarks(tree, fromSearch);
+      assert.equal(stats.orphaned, 0, `不该报孤儿，实际 ${stats.orphaned}`);
+    });
+
+    ok('真正的孤儿（父级根本不存在）仍然能检出来', () => {
+      const fromSearch = [
+        { id: 'a', title: 'A', url: 'https://a.example', parentId: '1' },
+        { id: 'ghost', title: 'G', url: 'https://g.example', parentId: '不存在的父级' },
+      ] as unknown as chrome.bookmarks.BookmarkTreeNode[];
+      const stats = analyzeBookmarks(tree, fromSearch);
+      assert.equal(stats.orphaned, 1, `应报 1 个真孤儿，实际 ${stats.orphaned}`);
+    });
+
+    ok('没传全量列表时不猜孤儿（宁可不说，也不要编一个数字）', () => {
+      const stats = analyzeBookmarks(tree);
+      assert.equal(stats.orphaned, 0);
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

@@ -457,6 +457,43 @@ async function run() {
     check('列表接受键盘事件（↓ 导航不报错）', kb.ok === true, JSON.stringify(kb));
   }
 
+  /* ══════════ 9.5 无障碍：可点元素必须有可访问名称 ══════════ */
+  console.log('\n[9.5] 无障碍守卫');
+  {
+    /*
+     * 纯图标按钮如果没有 aria-label / title，屏幕阅读器只会念一个"按钮"。
+     * 这条守卫扫当前页面上所有 button，把没名字的列出来——
+     * 它防的是"以后再加一个图标按钮时忘了写标签"这类回归。
+     */
+    const a11y = await ev(`(() => {
+      const bad = [];
+      for (const b of document.querySelectorAll('button')) {
+        const name = (b.getAttribute('aria-label') || b.getAttribute('title') || b.textContent || '').trim();
+        if (!name) {
+          bad.push(b.outerHTML.slice(0, 120));
+        }
+      }
+      return { total: document.querySelectorAll('button').length, bad };
+    })()`);
+    check(
+      '页面上每个按钮都有可访问名称（文字 / aria-label / title）',
+      a11y.total > 0 && a11y.bad.length === 0,
+      `共 ${a11y.total} 个按钮，无名称 ${a11y.bad.length} 个${a11y.bad.length ? '：' + a11y.bad.slice(0, 3).join(' | ') : ''}`,
+    );
+
+    // 焦点环：键盘 Tab 到的元素必须能看出焦点在哪（不能只靠 hover）
+    const focusRing = await ev(`(() => {
+      const first = document.querySelector('[data-testid="search"]');
+      if (!first) return { ok: false, reason: 'no-search' };
+      first.focus();
+      const cs = getComputedStyle(first);
+      // 聚焦后 outline 或 box-shadow 至少有一个不是 none
+      const hasRing = (cs.outlineStyle !== 'none' && cs.outlineWidth !== '0px') || cs.boxShadow !== 'none';
+      return { ok: hasRing, outline: cs.outlineStyle, shadow: cs.boxShadow.slice(0, 40) };
+    })()`);
+    check('键盘聚焦时焦点可见（outline 或 ring，不依赖 hover）', focusRing.ok, JSON.stringify(focusRing));
+  }
+
   /* ══════════ 10. 健康检查（自诊断） ══════════ */
   console.log('\n[10] 健康检查');
   {

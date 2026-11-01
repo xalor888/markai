@@ -323,7 +323,12 @@ export function Workspace({
             placeholder="搜索书签与文件夹…"
             aria-label="搜索书签与文件夹"
             spellCheck={false}
-            className="h-7 w-full rounded-sm border border-transparent bg-muted/60 pr-2 pl-8 text-xs text-foreground outline-none placeholder:text-muted-foreground focus:border-ring focus:bg-card [&::-webkit-search-cancel-button]:hidden"
+            /*
+             * `outline-none` + 只改边框颜色，等于**聚焦了看不出来**——
+             * 实测 getComputedStyle 里 outline 与 box-shadow 都是 none，只有 1px 边框变色。
+             * 项目里其它控件（排序下拉、树过滤）都用 `ring-1`，这里补齐，保持一致。
+             */
+            className="h-7 w-full rounded-sm border border-transparent bg-muted/60 pr-2 pl-8 text-xs text-foreground outline-none placeholder:text-muted-foreground focus:border-ring focus:bg-card focus-visible:ring-1 focus-visible:ring-ring [&::-webkit-search-cancel-button]:hidden"
           />
         </div>
         {/* 其余入口全收进「更多」：有待删/整理异常时触发按钮上带红点，收起来不等于藏起来 */}

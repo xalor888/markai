@@ -1,4 +1,4 @@
-import { Clock, ArrowDownUp, BookmarkPlus, Copy, ExternalLink, Folder, FolderInput, FolderOpen, FolderPlus, Link2, Search, Sparkles, Trash2, X } from 'lucide-react';
+import { ChevronDown, Clock, ArrowDownUp, BookmarkPlus, Copy, ExternalLink, Folder, FolderInput, FolderOpen, FolderPlus, Link2, Search, Sparkles, Trash2, X } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
 import { useAIStore } from '@/stores/aiStore';
 import { useBookmarkStore, copyNodeDeep, findNode, buildFolderChildCounts, resolveTitlePath, type TreeContextMenu } from '@/stores/bookmarkStore';
@@ -33,7 +33,7 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
    * 它不再是顶栏的一个独立视图按钮——切视图会丢上下文，而且用户得先想起来去点它。
    * 现在只是排序里的一项，选中即生效。
    */
-  { value: 'time', label: '按收藏时间（全部书签）' },
+  { value: 'time', label: '收藏时间' },
 ];
 
 /**
@@ -773,8 +773,13 @@ export function BookmarkList({ className, compact = false }: { className?: strin
            * 重做前这里写着 `!compact`，于是侧边栏（最常用的形态）根本没有排序下拉——
            * 而「按收藏时间」正是时间线的入口，等于窄屏下完全进不去时间线。
            */}
+          {/*
+           * 宽度按"最长的选项"来定，不是拍一个数：
+           * 12px 字号下 5 个汉字 = 60px，加上左侧排序图标(pl-6=24)与右侧箭头(pr-6=24)，
+           * 112px 刚好放得下「按添加时间」而不被截成「按添加…」。
+           */}
           {(
-            <div className={cn('relative', compact && 'w-[84px]')} title="排序">
+            <div className={cn('relative shrink-0', compact ? 'w-28' : 'w-[132px]')} title="排序">
               <ArrowDownUp className="pointer-events-none absolute top-1/2 left-1.5 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
               <select
                 data-testid="sort"
@@ -785,7 +790,12 @@ export function BookmarkList({ className, compact = false }: { className?: strin
                   setAnchorIndex(null);
                   setActiveIndex(-1); // 排序后行序变化，保留高亮会指向另一个书签（Enter/Delete 错对象）
                 }}
-                className="h-7 w-[104px] appearance-none rounded-sm border border-input bg-card pl-6 pr-4 text-xs text-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+                /*
+                 * `w-full` 而不是写死宽度：早先外层是 84px、select 写死 104px，
+                 * 溢出 20px 被视口裁掉，侧边栏里连下拉的打勾都点不到。
+                 * `pr-6` 给右侧的 chevron 留位置。
+                 */
+                className="h-7 w-full appearance-none truncate rounded-sm border border-input bg-card pl-6 pr-6 text-xs text-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
               >
                 {SORT_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
@@ -793,6 +803,11 @@ export function BookmarkList({ className, compact = false }: { className?: strin
                   </option>
                 ))}
               </select>
+              {/* appearance-none 会把原生箭头一起去掉：不画一个，用户看不出这是下拉 */}
+              <ChevronDown
+                className="pointer-events-none absolute top-1/2 right-1.5 h-3 w-3 -translate-y-1/2 text-muted-foreground"
+                aria-hidden="true"
+              />
             </div>
           )}
         </div>

@@ -46,6 +46,15 @@ function launchChrome() {
       `--remote-debugging-port=${CDP_PORT}`,
       '--window-size=1440,960',
       '--force-device-scale-factor=2',
+      /*
+       * 默认 headless。
+       *
+       * 早先这里没有这个参数：每跑一次就在前台弹一个 1440×960 的窗口抢焦点，
+       * 而且屏幕锁了/睡了时 Chrome 根本起不来（表现为 `fetch failed`，
+       * 完全指不到真正原因）。headless 两种问题一起解决。
+       * 需要肉眼看的时候：`MARKAI_VISUAL_HEADED=1 node scripts/visual-audit.mjs`。
+       */
+      ...(process.env.MARKAI_VISUAL_HEADED === '1' ? [] : ['--headless=new']),
       'about:blank',
     ],
     { stdio: 'ignore', detached: false },

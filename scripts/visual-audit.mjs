@@ -193,6 +193,42 @@ async function main() {
       return { ev, waitReady, shot, sessionId, targetId };
     }
 
+    /*
+     * 通过「更多」菜单打开面板。
+     *
+     * 0.2.35 把顶栏那一排按钮收进了 `⋯` 菜单，脚本却还在点
+     * `button[title^="整理记录"]` —— 点不到，于是**拍了一张基础页当成功**。
+     * 07/10/12/14 四张"整理记录"截图全是假的，我据此做的视觉评审也就不作数。
+     *
+     * 所以这里做两件事：
+     *  1. 走真实入口（更多菜单）；
+     *  2. **打不开就抛错**——宁可脚本红，也不要一张看起来正常、内容却不对的图。
+     */
+    const openMenuItem = async (label) => {
+      await page.ev(`(() => {
+        if (!document.querySelector('[data-testid="more-menu"]')) {
+          document.querySelector('[data-testid="more-trigger"]')?.click();
+        }
+        return true;
+      })()`);
+      await sleep(250);
+      const clicked = await page.ev(`(() => {
+        const items = [...document.querySelectorAll('[role="menuitem"]')];
+        const hit = items.find((b) => (b.textContent || '').includes(${JSON.stringify(label)}));
+        if (!hit) return false;
+        hit.click();
+        return true;
+      })()`);
+      await sleep(700);
+      return clicked;
+    };
+
+    /** 截图前确认面板真的在：不在就抛，不产出假图 */
+    const requireOpen = async (testId) => {
+      const ok = await page.waitReady(`!!document.querySelector('[data-testid="${testId}"]')`, 30);
+      if (!ok) throw new Error(`面板 ${testId} 没有打开，拒绝产出错误截图`);
+    };
+
     /* ── 主页面（完整页）── */
     const page = await openPage(`chrome-extension://${EXT_ID}/page.html`, { width: 1440, height: 900 });
     const ready = await page.waitReady(`!!document.querySelector('header') && !!document.querySelector('input#markai-search')`);
@@ -214,7 +250,14 @@ async function main() {
         const log = [
           mk(1, 'Radix UI Primitives', 'radix-ui.com', 'moved', '设计资料 / 动效与交互', '已归入「动效与交互」', now - 30_000, 'local'),
           mk(2, 'Tailwind CSS v4 文档', 'tailwindcss.com', 'moved', '设计资料', '已归入「设计资料」（已有「设计资料」分类，站点属于设计）', now - 120_000, 'model'),
-          mk(3, 'GitHub · deepseek-ai/dsh', 'github.com', 'created', '自动整理 / github.com', '已新建分类并归入「github.com」', now - 600_000, 'fallback'),
+          /*
+           * 0.2.35 起不再按域名建文件夹（「自动整理/<域名>」整层已删）。
+           * 这行种子原先还写着「自动整理 / github.com」——截图里等于展示了一个
+           * 已经不存在的功能，看截图的人（包括我）会以为它还在。
+           * 改成当前真实会出现的两种落点：进已有分类 / 认不出而留在原地。
+           */
+          mk(3, 'GitHub · deepseek-ai/dsh', 'github.com', 'moved', '开发', '已归入「开发」（已有「开发」分类，站点属于开发）', now - 600_000, 'fallback'),
+          mk(6, '某个小众站点', 'obscure-site.example', 'skipped', null, '没有匹配到你已有的分类，保持原位（不会为你新建按域名的文件夹）', now - 900_000, 'fallback'),
           mk(4, 'Hacker News', 'news.ycombinator.com', 'failed', null, '自动整理失败：The operation was aborted due to timeout', now - 3_600_000),
           // 第二条可重试失败：让「重试全部」按钮出现（只有 1 条时不该占地方）
           mk(5, 'Lobsters', 'lobste.rs', 'failed', null, '自动整理失败：HTTP 503', now - 7_200_000),
@@ -248,8 +291,8 @@ async function main() {
 
     // 1.5) 整理记录对话框：用户要看「它到底动了什么」
     if (want('organize-log')) {
-      await page.ev(`document.querySelector('button[title^="整理记录"]')?.click()`).catch(() => {});
-      await sleep(700);
+      await openMenuItem('整理记录');
+      await requireOpen('organize-log');
       await page.shot('07-organize-log');
       await page.ev(`(() => { const d = document.querySelector('[role="dialog"]'); const b = d && [...d.querySelectorAll('button')].find(x => x.getAttribute('aria-label') === '关闭'); b && b.click(); })()`).catch(() => {});
       await sleep(300);
@@ -257,8 +300,8 @@ async function main() {
 
     // 1.55) 整理记录 · 只看失败（种子数据里有 1 条 timeout 失败）
     if (want('organize-log-failed')) {
-      await page.ev(`document.querySelector('button[title^="整理记录"]')?.click()`).catch(() => {});
-      await sleep(700);
+      await openMenuItem('整理记录');
+      await requireOpen('organize-log');
       await page.ev(`(() => {
         const d = document.querySelector('[role="dialog"]');
         if (!d) return false;
@@ -295,8 +338,8 @@ async function main() {
       await cdp.send('Page.reload', {}, page.sessionId);
       await page.waitReady(`!!document.querySelector('header')`, 100);
       await sleep(700);
-      await page.ev(`document.querySelector('button[title^="整理记录"]')?.click()`).catch(() => {});
-      await sleep(700);
+      await openMenuItem('整理记录');
+      await requireOpen('organize-log');
       await page.shot('10-dark-organize-log');
       await page.ev(`(() => { const d = document.querySelector('[role="dialog"]'); const b = d && [...d.querySelectorAll('button')].find(x => x.getAttribute('aria-label') === '关闭'); b && b.click(); })()`).catch(() => {});
       await sleep(300);
@@ -327,13 +370,33 @@ async function main() {
       await sp.shot('04-sidepanel');
       // 窄屏里的对话框：520px 的设计宽 < 430px 视口 → 依赖 max-w 收缩，必须亲眼看
       if (want('sidepanel-dialog')) {
-        await sp.ev(`document.querySelector('button[title^="整理记录"]')?.click()`).catch(() => {});
-        await sleep(800);
+        // 同上：走「更多」菜单，打不开就抛错，不产假图
+        await sp.ev(`(() => {
+          if (!document.querySelector('[data-testid="more-menu"]')) {
+            document.querySelector('[data-testid="more-trigger"]')?.click();
+          }
+          return true;
+        })()`);
+        await sleep(250);
+        await sp.ev(`(() => {
+          const hit = [...document.querySelectorAll('[role="menuitem"]')]
+            .find((b) => (b.textContent || '').includes('整理记录'));
+          if (!hit) return false;
+          hit.click();
+          return true;
+        })()`);
+        await sleep(700);
+        if (!(await sp.waitReady(`!!document.querySelector('[data-testid="organize-log"]')`, 30))) {
+          throw new Error('侧边栏里整理记录没打开，拒绝产出错误截图');
+        }
         await sp.shot('12-sidepanel-organize-log');
         await sp.ev(`(() => { const d = document.querySelector('[role="dialog"]'); const b = d && [...d.querySelectorAll('button')].find(x => x.getAttribute('aria-label') === '关闭'); b && b.click(); })()`).catch(() => {});
         await sleep(300);
         await sp.ev(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }))`).catch(() => {});
         await sleep(500);
+        if (!(await sp.waitReady(`!!document.querySelector('[role="dialog"]')`, 20))) {
+          throw new Error('侧边栏里快捷键面板没打开，拒绝产出错误截图');
+        }
         await sp.shot('13-sidepanel-shortcuts');
       }
     }

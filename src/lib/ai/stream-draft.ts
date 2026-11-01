@@ -32,20 +32,50 @@ const FLUSH_MS = 300;
 
 let buffer: StreamDraft | null = null;
 let timer: ReturnType<typeof setTimeout> | null = null;
-let writing = false;
+/** 正在进行的那次写入（用来串行化，避免并发写互相覆盖） */
+let inflight: Promise<void> | null = null;
 
+/**
+ * 把内存里的草稿写下去。
+ *
+ * 早先遇到"正在写"就直接 return（latest-wins）。看起来省事，实际有洞：
+ * 那次被放弃的写入**不会再排期**，要等下一个增量才补上；
+ * 而收尾时 `finalizeDraft` 是**从 storage 读**的，
+ * 于是最后不到 300ms 的字会永远留在内存里，跟着 clearDraft 一起蒸发。
+ * 现在改成"等上一次写完再写"，保证调用返回时 storage 一定是最新的。
+ */
 async function writeNow(): Promise<void> {
   if (!buffer) return;
-  if (writing) return; // 上一次还没写完：latest-wins，直接放弃这次（下次会带全量）
-  writing = true;
-  const snapshot: StreamDraft = { ...buffer };
-  try {
-    await chrome.storage.local.set({ [STREAM_DRAFT_KEY]: snapshot });
-  } catch {
-    // 写不进去（配额/权限）时不阻塞生成：草稿只是兜底，不是主路径
-  } finally {
-    writing = false;
+  if (inflight) {
+    await inflight.catch(() => {});
+    if (!buffer) return;
   }
+  const snapshot: StreamDraft = { ...buffer };
+  const run = chrome.storage.local
+    .set({ [STREAM_DRAFT_KEY]: snapshot })
+    .then(
+      () => undefined,
+      // 写不进去（配额/权限）时不阻塞生成：草稿只是兜底，不是主路径
+      () => undefined,
+    );
+  inflight = run;
+  try {
+    await run;
+  } finally {
+    if (inflight === run) inflight = null;
+  }
+}
+
+/**
+ * 收尾前强制把内存内容写下去（不经节流）。
+ * `finalizeDraft` 必须先调它，否则读到的是旧值。
+ */
+export async function flushDraftNow(): Promise<void> {
+  if (timer) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  await writeNow();
 }
 
 /** 收到一段增量：累积并节流落盘 */
@@ -96,7 +126,6 @@ export function resetDraftForTest(): void {
     timer = null;
   }
   buffer = null;
-  writing = false;
 }
 
 /**
@@ -125,6 +154,9 @@ export function mergeDraft(existing: string, draft: StreamDraft | null, messageI
  * @param aiStorageKey 会话存储的 key（由调用方传入，避免这里反向依赖 store）
  */
 export async function finalizeDraft(aiStorageKey: string): Promise<boolean> {
+  // 先把内存里还没落盘的那一段写下去，再从 storage 读——
+  // 否则最后不到 300ms 的文本会丢（它只在 buffer 里，没进 storage）
+  await flushDraftNow();
   const draft = await readDraft();
   if (!draft) return false;
 

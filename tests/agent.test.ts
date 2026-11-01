@@ -36,6 +36,7 @@ import {
   appendDraft,
   clearDraft,
   finalizeDraft,
+  flushDraftNow,
   mergeDraft,
   readDraft,
   resetDraftForTest,
@@ -10666,6 +10667,75 @@ async function okA(name: string, fn: () => Promise<void> | void) {
         (chrome.bookmarks as { getTree: typeof original }).getTree = original;
         getTreeDelayMs = 0;
       }
+    });
+  }
+
+  /* ══════════ T107: 收尾不丢最后一段（草稿必须强制 flush） ══════════ */
+  console.log('\n[T107] 收尾时最后 300ms 的文本不能丢');
+  {
+    /*
+     * 缺陷（我自己引入的）：草稿是 300ms 节流落盘，而 finalizeDraft 从 **storage** 读。
+     * 一轮生成结束时，最后不到 300ms 的字还在内存 buffer 里没写下去，
+     * finalize 读到的就是旧值 → 那一段跟着 clearDraft 一起蒸发。
+     *
+     * 复现方式：先让一段被 flush（等过节流），再追加一段但不等节流，
+     * 立刻 finalize，检查两段都在。
+     */
+    await okA('finalizeDraft 会先把内存里的草稿写下去，再读', async () => {
+      resetDraftForTest();
+      storageMap.delete(STREAM_DRAFT_KEY);
+      const convId = 't107-conv';
+
+      storageMap.set(AI_STORAGE_KEY, {
+        conversations: [
+          {
+            id: convId,
+            title: 'T107',
+            createdAt: 1,
+            updatedAt: 1,
+            messages: [
+              { id: 'm-tail', role: 'assistant', createdAt: 1, streaming: true, blocks: [{ kind: 'text', text: '' }] },
+            ],
+          },
+        ],
+        activeId: convId,
+      });
+
+      // 第一段：等节流真的写下去
+      appendDraft('m-tail', '前半段');
+      await new Promise((r) => setTimeout(r, 420));
+
+      // 第二段：刚追加，还没到节流窗口
+      appendDraft('m-tail', '·尾巴');
+
+      // 立刻收尾 —— 此时 storage 里只有「前半段」
+      await finalizeDraft(AI_STORAGE_KEY);
+
+      const saved = storageMap.get(AI_STORAGE_KEY) as {
+        conversations: { messages: { blocks: { text: string }[]; streaming?: boolean }[] }[];
+      };
+      const text = saved.conversations[0]!.messages[0]!.blocks[0]!.text;
+      assert.equal(text, '前半段·尾巴', `收尾丢了最后一段，实际「${text}」`);
+      assert.equal(saved.conversations[0]!.messages[0]!.streaming, false);
+      assert.equal(storageMap.get(STREAM_DRAFT_KEY), undefined, '草稿应被清掉');
+
+      storageMap.delete(AI_STORAGE_KEY);
+      resetDraftForTest();
+    });
+
+    await okA('连续写入不会互相覆盖（串行化后最后写入的一定是最新内容）', async () => {
+      resetDraftForTest();
+      storageMap.delete(STREAM_DRAFT_KEY);
+      appendDraft('m2', '一');
+      // 不等节流，连续追加多次，模拟高频增量
+      for (let i = 0; i < 20; i++) appendDraft('m2', String(i % 10));
+      await new Promise((r) => setTimeout(r, 500));
+      const draft = await readDraft();
+      assert.ok(draft, '应有草稿');
+      assert.equal(draft!.text.length, 21, `应累积全部 21 个字符，实际 ${draft!.text.length}`);
+      assert.ok(draft!.text.startsWith('一'), draft!.text);
+      resetDraftForTest();
+      storageMap.delete(STREAM_DRAFT_KEY);
     });
   }
 

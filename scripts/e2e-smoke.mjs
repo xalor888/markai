@@ -210,6 +210,38 @@ async function run() {
     return false;
   };
 
+  /**
+   * 通过「更多」菜单打开面板。
+   *
+   * 0.2.35 把顶栏那排按钮收进了 `⋯` 菜单，所以任何"点某个顶栏按钮"的老写法都会落空。
+   * 这个 helper 放在 run() 作用域里，后面的段落都能用；菜单已开时不会再点一次（否则会关掉）。
+   */
+  const openMenuItem = async (label) => {
+    await ev(`(() => {
+      if (!document.querySelector('[data-testid="more-menu"]')) {
+        document.querySelector('[data-testid="more-trigger"]')?.click();
+      }
+      return true;
+    })()`);
+    await sleep(300);
+    const clicked = await ev(`(() => {
+      const hit = [...document.querySelectorAll('[role="menuitem"]')]
+        .find((b) => (b.textContent || '').includes(${JSON.stringify(label)}));
+      if (!hit) return false;
+      hit.click();
+      return true;
+    })()`);
+    await sleep(500);
+    return clicked;
+  };
+
+  /** 截图/断言前确认面板真的开了：没开就抛错，别让后续断言在错误的页面上跑 */
+  const requireOpen = async (testId) => {
+    const ok = await waitFor(async () => await ev(`!!document.querySelector('[data-testid="${testId}"]')`), 4000);
+    if (!ok) throw new Error(`面板 ${testId} 没有打开`);
+    return true;
+  };
+
   /** 页面现场：失败时用来说明"到底停在哪一步" */
   const snapshot = () =>
     ev(`(() => ({
@@ -572,6 +604,88 @@ async function run() {
     );
     await ev(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
     await sleep(200);
+  }
+
+  /* ══════════ 9.49 整理 → 撤销（最关键的安全路径） ══════════ */
+  console.log('\n[9.49] 整理后一步撤销');
+  {
+    /*
+     * 这是用户被坑过的那条路：自动整理把书签搬走，撤销必须能一步还原。
+     * 之前 e2e 里**完全没有**撤销的覆盖（只有单测）。
+     *
+     * 不需要 AI：本地规则（文件夹名 == 站点品牌 = 100 分）就能触发整理，
+     * 走的仍是真实的 beginUndoTransaction → jMove → endUndoTransaction 链路。
+     */
+    const seed = await ev(`(async () => {
+      // 清掉 AI 配置：强制走本地规则分支，不发任何网络请求
+      const cfg = (await chrome.storage.local.get('markai.config'))['markai.config'] || {};
+      await chrome.storage.local.set({ 'markai.config': {
+        ...cfg, providerId: 'deepseek', baseUrl: '', apiKey: '', model: '',
+        autoOrganizeNew: true, autoOrganizeAi: false,
+      } });
+      await new Promise((r) => setTimeout(r, 200));
+
+      const bar = (await chrome.bookmarks.getTree())[0].children.find((c) => c.id === '1');
+      const folder = await chrome.bookmarks.create({ parentId: bar.id, title: 'GitHub' });
+      // 等 UI 看到这个文件夹（自动整理要读整棵树来找候选分类）
+      await new Promise((r) => setTimeout(r, 900));
+      const bm = await chrome.bookmarks.create({
+        parentId: bar.id, title: 'E2E 撤销靶', url: 'https://github.com/e2e/undo-target',
+      });
+      return { folderId: folder.id, bookmarkId: bm.id, barId: bar.id };
+    })()`);
+
+    // 等自动整理把它搬进 GitHub
+    const moved = await waitFor(async () => {
+      const parent = await ev(`(async () => {
+        const n = (await chrome.bookmarks.get(${JSON.stringify(seed.bookmarkId)}))[0];
+        return n?.parentId || null;
+      })()`);
+      return parent === seed.folderId;
+    }, 15000);
+    check('本地规则把书签整理进了同名文件夹（无需 AI）', moved === true, JSON.stringify({ moved }));
+
+    // 打开整理记录，点这条的撤销
+    await openMenuItem('整理记录');
+    await requireOpen('organize-log');
+    const undone = await ev(`(async () => {
+      const dlg = document.querySelector('[data-testid="organize-log"]');
+      if (!dlg) return { ok: false, reason: 'no-dialog' };
+      // 找到含"E2E 撤销靶"的那一行里的撤销按钮
+      // 行是 role="listitem" 的 div（不是 li），按这个找
+      const row = [...dlg.querySelectorAll('[role="listitem"]')]
+        .find((el) => (el.textContent || '').includes('E2E 撤销靶'));
+      if (!row) return { ok: false, reason: 'no-row', text: dlg.innerText.slice(0, 120) };
+      // 撤销是纯图标按钮：靠 aria-label / title 找，不能按文字找
+      const btn = [...row.querySelectorAll('button')].find((b) =>
+        ((b.getAttribute('aria-label') || '') + (b.getAttribute('title') || '')).includes('撤销'),
+      );
+      if (!btn) return { ok: false, reason: 'no-undo-button', row: row.textContent.slice(0, 80) };
+      btn.click();
+      await new Promise((r) => setTimeout(r, 1500));
+      return { ok: true };
+    })()`);
+    check('整理记录里那条有可点的「撤销」', undone.ok === true, JSON.stringify(undone));
+
+    const restored = await waitFor(async () => {
+      const parent = await ev(`(async () => {
+        const n = (await chrome.bookmarks.get(${JSON.stringify(seed.bookmarkId)}))[0];
+        return n?.parentId || null;
+      })()`);
+      return parent === seed.barId;
+    }, 8000);
+    check('点撤销后书签真的回到原处', restored === true, JSON.stringify({ restored, seed }));
+
+    // 关掉对话框并清理
+    await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    await sleep(300);
+    await ev(`(async () => {
+      await chrome.bookmarks.remove(${JSON.stringify(seed.bookmarkId)}).catch(() => {});
+      await chrome.bookmarks.removeTree(${JSON.stringify(seed.folderId)}).catch(() => {});
+      const cfg2 = (await chrome.storage.local.get('markai.config'))['markai.config'] || {};
+      await chrome.storage.local.set({ 'markai.config': { ...cfg2, autoOrganizeNew: true, autoOrganizeAi: true } });
+      return true;
+    })()`);
   }
 
   /* ══════════ 9.48 加载失败时中栏要说话 ══════════ */

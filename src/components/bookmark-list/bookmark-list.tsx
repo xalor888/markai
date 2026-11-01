@@ -1,4 +1,4 @@
-import { ChevronDown, Clock, ArrowDownUp, BookmarkPlus, Copy, ExternalLink, Folder, FolderInput, FolderOpen, FolderPlus, Link2, Search, Sparkles, Trash2, X } from 'lucide-react';
+import { AlertCircle, RefreshCw, Loader2, ChevronDown, Clock, ArrowDownUp, BookmarkPlus, Copy, ExternalLink, Folder, FolderInput, FolderOpen, FolderPlus, Link2, Search, Sparkles, Trash2, X } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
 import { useAIStore } from '@/stores/aiStore';
 import { useBookmarkStore, copyNodeDeep, findNode, buildFolderChildCounts, resolveTitlePath, type TreeContextMenu } from '@/stores/bookmarkStore';
@@ -43,6 +43,15 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
  */
 export function BookmarkList({ className, compact = false }: { className?: string; compact?: boolean }) {
   const roots = useBookmarkStore((s) => s.roots);
+  /*
+   * 加载失败也要在中栏说一声。
+   *
+   * 早先只有书签树里显示「书签加载失败 + 重试」，而**侧边栏的树默认是收起的**
+   * （0.2.35 起的紧凑布局），于是加载失败时用户看到的是一个空列表，
+   * 既不知道出了错，也没有重试入口——表现就是"书签全没了"。
+   */
+  const loadError = useBookmarkStore((s) => s.loadError);
+  const treeLoading = useBookmarkStore((s) => s.loading);
   const selectedFolderId = useBookmarkStore((s) => s.selectedFolderId);
   const selectedIds = useBookmarkStore((s) => s.selectedBookmarkIds);
   /**
@@ -896,6 +905,34 @@ export function BookmarkList({ className, compact = false }: { className?: strin
         </div>
       )}
 
+      {/*
+       * 加载失败的横幅。
+       *
+       * 为什么放横幅、不只在空态里写：失败时 `roots` 保留上次的值，
+       * 列表其实**还有旧数据**，走不到空态分支——于是错误被"有内容"盖住了。
+       * 横幅能同时做到两件事：明确告诉你出错了，并且不把可能还有用的旧数据拿走。
+       */}
+      {loadError && (
+        <div
+          data-testid="list-load-error"
+          className="flex shrink-0 items-center gap-2 border-b border-destructive/30 bg-destructive/5 px-3 py-1.5"
+        >
+          <AlertCircle className="h-3.5 w-3.5 shrink-0 text-destructive" />
+          <p className="min-w-0 flex-1 truncate text-2xs text-destructive" title={loadError}>
+            书签加载失败：{loadError}
+          </p>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-6 shrink-0 gap-1 px-1.5 text-2xs"
+            onClick={() => void useBookmarkStore.getState().loadTree()}
+            data-testid="list-retry"
+          >
+            <RefreshCw className="h-3 w-3" />
+            重试
+          </Button>
+        </div>
+      )}
       {sortBy === 'time' ? (
         <TimelinePanel className="min-w-0 flex-1" />
       ) : (
@@ -960,7 +997,31 @@ export function BookmarkList({ className, compact = false }: { className?: strin
           ))
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-5 text-center">
-            {browsing ? (
+            {loadError ? (
+              /* 加载失败优先于"空文件夹"：把"出错"说成"没有内容"是最误导人的一种空态 */
+              <>
+                <AlertCircle className="h-5 w-5 text-destructive/60" />
+                <p className="text-xs text-destructive">书签加载失败</p>
+                <p className="max-w-[280px] line-clamp-3 text-2xs leading-4 text-muted-foreground/70">
+                  {loadError}
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="mt-1"
+                  onClick={() => void useBookmarkStore.getState().loadTree()}
+                  data-testid="list-retry"
+                >
+                  <RefreshCw className="h-3 w-3" />
+                  重试
+                </Button>
+              </>
+            ) : treeLoading ? (
+              <>
+                <Loader2 className="h-5 w-5 animate-spin text-muted-foreground/40" />
+                <p className="text-xs text-muted-foreground">正在加载书签…</p>
+              </>
+            ) : browsing ? (
               <FolderOpen className="h-5 w-5 text-muted-foreground/40" />
             ) : (
               <Search className="h-5 w-5 text-muted-foreground/40" />

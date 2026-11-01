@@ -574,6 +574,55 @@ async function run() {
     await sleep(200);
   }
 
+  /* ══════════ 9.48 加载失败时中栏要说话 ══════════ */
+  console.log('\n[9.48] 加载失败的空态');
+  {
+    /*
+     * 回归：早先只有书签树里显示「加载失败 + 重试」，而侧边栏的树默认收起，
+     * 于是加载失败时用户看到的是一个**空列表**——不知道出错，也没有重试入口，
+     * 表现就是"书签全没了"。
+     *
+     * 这里直接把 getTree 打成抛错，确认中栏给出错误 + 重试，并且重试真的能恢复。
+     */
+    await ev(`(() => {
+      window.__origGetTree = chrome.bookmarks.getTree;
+      chrome.bookmarks.getTree = async () => { throw new Error('模拟：书签服务不可用'); };
+      return true;
+    })()`);
+
+    /*
+     * 触发一次刷新。页面里现成的入口是窗口 focus / visibilitychange
+     * （page/main.tsx 的 onActivate 会调 loadTree）。
+     * 早先我在这里写了个不存在的"刷新书签"按钮 + 一段没用的动态 import，
+     * 结果根本没触发加载，测试自然看不到错误态——触发方式必须走真实路径。
+     */
+    await ev(`window.dispatchEvent(new Event('focus'))`);
+    await waitFor(async () => await ev(`document.body.innerText.includes('书签加载失败')`), 4000);
+
+    const failed = await ev(`(() => {
+      const t = document.body.innerText;
+      return {
+        saysFailed: t.includes('书签加载失败'),
+        hasDetail: t.includes('书签服务不可用'),
+        hasRetry: !!document.querySelector('[data-testid="list-retry"]'),
+      };
+    })()`);
+    check(
+      'getTree 失败时中栏显示「加载失败」+ 原因 + 重试按钮',
+      failed.saysFailed && failed.hasDetail && failed.hasRetry,
+      JSON.stringify(failed),
+    );
+
+    // 恢复 API 后点重试，必须真的恢复
+    await ev(`(() => { chrome.bookmarks.getTree = window.__origGetTree; return true; })()`);
+    await ev(`document.querySelector('[data-testid="list-retry"]')?.click()`);
+    const recovered = await waitFor(
+      async () => await ev(`!document.body.innerText.includes('书签加载失败')`),
+      5000,
+    );
+    check('点重试后恢复正常（错误提示消失）', recovered === true, JSON.stringify({ recovered }));
+  }
+
   /* ══════════ 9.5 无障碍：可点元素必须有可访问名称 ══════════ */
   console.log('\n[9.5] 无障碍守卫');
   {

@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useAIStore } from '@/stores/aiStore';
 import { resolveTitlePath, useBookmarkStore } from '@/stores/bookmarkStore';
 import { pushToast } from '@/lib/toast';
+import { flushStreamPersist } from '@/stores/aiStore';
 import { openUrl } from '@/lib/open-url';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
@@ -166,6 +167,26 @@ export function Workspace({
     };
     chrome.runtime.onMessage.addListener(onMessage);
     return () => chrome.runtime.onMessage.removeListener(onMessage);
+  }, []);
+
+  /*
+   * 页面要离开时，把正在流式生成的内容强制落一次盘。
+   *
+   * 侧边栏一关、页面一切走，这个文档就销毁了；节流落盘最多有个 800ms 的窗口，
+   * 这里补一次「临走前的最后一笔」，把丢失量压到最小。
+   * `pagehide` 比 `beforeunload` 可靠：它在 bfcache / 移动端也会触发。
+   */
+  useEffect(() => {
+    const flush = () => flushStreamPersist();
+    window.addEventListener('pagehide', flush);
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
   }, []);
 
   /*

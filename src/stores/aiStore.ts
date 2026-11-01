@@ -139,6 +139,35 @@ interface AIState {
 let pendingText: { messageId: string; text: string } | null = null;
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
+/**
+ * 流式过程中的节流落盘。
+ *
+ * 缺陷（用户实测）：生成到一半关掉侧边栏/切走页面，回来只看到
+ * 「模型未返回任何内容」——因为增量只更新了内存里的 store，
+ * `_persist()` 只在「发送时」和「结束时」各调一次。中途退出等于整段回复消失。
+ *
+ * 现在每 800ms 把当前内容落一次盘：退出时最多丢最近 800ms 的字，
+ * 而不是整段。`pagehide` 里再强制落一次，把窗口压到最小。
+ */
+let persistTimer: ReturnType<typeof setTimeout> | null = null;
+const STREAM_PERSIST_MS = 800;
+function scheduleStreamPersist(): void {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    void useAIStore.getState()._persist();
+  }, STREAM_PERSIST_MS);
+}
+
+/** 立即落盘（页面要卸载时用）：清掉待触发的定时器，直接写一次 */
+export function flushStreamPersist(): void {
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  void useAIStore.getState()._persist(true);
+}
+
 /** 跨窗口同步标记：本窗口写入 storage 时置位，onChanged 据此跳过自身 */
 const crossWindowWrite = { current: false };
 let crossSyncTimer: ReturnType<typeof setTimeout> | null = null;
@@ -303,9 +332,21 @@ export const useAIStore = create<AIState>((set, get) => ({
         conversations = [conv];
         activeId = conv.id;
       }
-      const active = conversations.find((c) => c.id === activeId) ?? conversations[0]!;
+      /*
+       * 恢复时清理「僵尸生成中」。
+       *
+       * 落盘里还挂着 streaming 的消息，说明上次是被强杀的（关侧边栏 / 进程回收），
+       * 不会再有 chat:done 到达。把它标成 interrupted 而不是保持 streaming：
+       *  - 保持 streaming 会让界面永远转圈、输入框一直锁着；
+       *  - 直接当"空回复"又会让人以为模型没说话（正是用户报的那个问题）。
+       * 真实含义是"生成被打断了"，已收到的部分原样保留。
+       */
+      const revive = (msgs: ChatMessage[]): ChatMessage[] =>
+        msgs.map((m) => (m.streaming ? { ...m, streaming: false, interrupted: true } : m));
+      const revivedConversations = conversations.map((c) => ({ ...c, messages: revive(c.messages ?? []) }));
+      const active = revivedConversations.find((c) => c.id === activeId) ?? revivedConversations[0]!;
       set({
-        conversations,
+        conversations: revivedConversations,
         activeId: active.id,
         messages: active.messages ?? [],
         // 墓碑并入内存：后续持久化保持一致（删除意图不丢失）
@@ -342,7 +383,15 @@ export const useAIStore = create<AIState>((set, get) => ({
       // 记录上下文文件夹，消息内展示 Agent 视野
       ...(opts?.folderId ? { contextFolderId: opts.folderId } : {}),
     };
-    const assistantMsg: ChatMessage = { id: uid(), role: 'assistant', blocks: [], createdAt: Date.now() };
+    // streaming 标记会随落盘一起写下去：进程被杀后重开时，
+    // 它让我们能区分「还在生成」和「模型真的什么都没返回」
+    const assistantMsg: ChatMessage = {
+      id: uid(),
+      role: 'assistant',
+      blocks: [],
+      createdAt: Date.now(),
+      streaming: true,
+    };
     // 重试（replaceLastUser）时历史需排除被重试的那条 user 消息——它作为 text 单独发送，
     // 否则模型会收到连续两条相同的 user 消息（retryLast 已把它 slice 成 messages 的最后一条）。
     const source = get().messages;
@@ -533,6 +582,8 @@ export const useAIStore = create<AIState>((set, get) => ({
             pendingText = null;
             if (!p) return;
             updateActiveMessages(set, (msgs) => appendDelta(msgs, p.messageId, p.text));
+            // 落盘：退出/切走时已生成的内容不能蒸发
+            scheduleStreamPersist();
           }, 16);
         }
         break;
@@ -618,6 +669,10 @@ export const useAIStore = create<AIState>((set, get) => ({
         flushDeltaNow(set);
         // 状态机保护：旧请求的收尾事件不得复位当前请求的流式状态（快速连发时防错乱）
         if (evt.messageId !== get().streamingMessageId) break;
+        // 生成结束：清掉 streaming 标记（否则下次打开会被误判成"被打断"）
+        updateActiveMessages(set, (msgs) =>
+          msgs.map((m) => (m.id === evt.messageId ? { ...m, streaming: false } : m)),
+        );
         if (evt.type === 'chat:cancelled') {
           // 明确提示已停止（若消息已有内容则追加小字标记）
           updateActiveMessages(set, (msgs) =>
@@ -638,6 +693,9 @@ export const useAIStore = create<AIState>((set, get) => ({
 
       case 'chat:error': {
         flushDeltaNow(set);
+        updateActiveMessages(set, (msgs) =>
+          msgs.map((m) => (m.id === evt.messageId ? { ...m, streaming: false } : m)),
+        );
         // 同样校验 messageId：旧请求的错误不打断当前流
         if (evt.messageId !== get().streamingMessageId) break;
         updateActiveMessages(set, (msgs) =>

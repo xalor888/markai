@@ -43,6 +43,16 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   blocks: ChatBlock[];
   createdAt: number;
+  /**
+   * 这条回复还在生成中。
+   *
+   * 落盘时也带着它——于是"页面被关掉/进程被杀"留下的半截消息可以被识别出来：
+   * 重新打开时凡是还挂着 streaming 的，都是**被打断**，而不是"模型什么都没返回"。
+   * 这两种情况对用户的含义完全不同：前者该保留已生成的部分，后者才该重试。
+   */
+  streaming?: boolean;
+  /** 被打断过（重新打开时由残留的 streaming 推断出来） */
+  interrupted?: boolean;
   /** 用户消息发送时附带的上下文文件夹（消息内展示 Agent 视野） */
   contextFolderId?: string;
 }

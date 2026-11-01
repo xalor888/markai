@@ -31,6 +31,7 @@ import { createDelayedOpen } from '../src/lib/bookmarks/delayed-open';
 import { buildRequestHeaders, getStableSessionId, parseCustomHeaders } from '../src/lib/ai/request-headers';
 import { groupCommands, SCORE, scoreItem, searchCommands, type CommandItem } from '../src/lib/command/search';
 import { analyzeBookmarks, runHealthCheck } from '../src/lib/health';
+import { AI_STORAGE_KEY, flushStreamPersist, useAIStore } from '../src/stores/aiStore';
 import { diagnose, formatDiagnosticReport, MAX_LOG_ENTRIES, MAX_UNDO_POINTS } from '../src/lib/health/diagnostics';
 import { runFix, runFixes, CRASH_KEY } from '../src/lib/health/fixes';
 import type { HealthSnapshot } from '../src/lib/health/types';
@@ -10316,6 +10317,86 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.ok(report.issues.some((i) => i.id === 'config.incomplete' || i.id === 'ai.last-error'), JSON.stringify(report.issues));
       storageMap.delete('markai.config');
     });
+  }
+
+  /* ══════════ T103: 退出不丢内容（流式落盘 / 中断判定） ══════════ */
+  console.log('\n[T103] 流式落盘与「被打断」判定');
+  {
+    /*
+     * 用户实测的缺陷：生成到一半关掉侧边栏，回来只看到「模型未返回任何内容」。
+     * 根因是增量只更新内存 store，`_persist()` 只在发送时和结束时各调一次。
+     *
+     * 这里钉住三件事：
+     *  1. flushStreamPersist() 会把正在生成的内容写进 storage（退出前那一笔不能丢）；
+     *  2. 恢复时残留的 streaming 被判定为 interrupted，而不是继续转圈或当成空回复；
+     *  3. 判定之后 blocks 里的内容一字不少。
+     */
+    const convId = 't103-conv';
+    const streamingMsg = {
+      id: 'm-streaming',
+      role: 'assistant' as const,
+      createdAt: Date.now(),
+      streaming: true,
+      blocks: [{ kind: 'text' as const, text: '已经写了一半的回复' }],
+    };
+
+    useAIStore.setState({
+      conversations: [{ id: convId, title: 'T103', createdAt: Date.now(), updatedAt: Date.now() } as never],
+      activeId: convId,
+      messages: [streamingMsg as never],
+    });
+
+    await okA('flushStreamPersist：退出时确实触发了一次落盘（不再只等 chat:done）', async () => {
+      const original = useAIStore.getState()._persist;
+      let calls = 0;
+      useAIStore.setState({
+        _persist: async () => {
+          calls++;
+        },
+      });
+      try {
+        flushStreamPersist();
+        await new Promise((r) => setTimeout(r, 30));
+        assert.equal(calls, 1, `应触发 1 次落盘，实际 ${calls}`);
+      } finally {
+        useAIStore.setState({ _persist: original });
+      }
+    });
+
+    await okA('恢复：残留的 streaming 被判定为「被打断」，内容原样保留', async () => {
+      // 模拟"进程被杀后重开"：storage 里还是 streaming 状态（真实结构：消息挂在会话下）
+      storageMap.set(AI_STORAGE_KEY, {
+        conversations: [
+          {
+            id: convId,
+            title: 'T103',
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            messages: [streamingMsg],
+          },
+        ],
+        activeId: convId,
+      });
+      useAIStore.setState({ conversations: [], activeId: null, messages: [] });
+      await useAIStore.getState().load();
+      const msgs = useAIStore.getState().messages as { id: string; streaming?: boolean; interrupted?: boolean; blocks: { text: string }[] }[];
+      const revived = msgs.find((m) => m.id === 'm-streaming');
+      assert.ok(revived, `恢复后应找得到这条消息，实际 ${JSON.stringify(msgs.map((m) => m.id))}`);
+      assert.equal(revived!.streaming, false, '不能一直挂着"生成中"（会永远转圈）');
+      assert.equal(revived!.interrupted, true, '必须标成被打断，而不是正常空回复');
+      assert.equal(revived!.blocks[0]!.text, '已经写了一半的回复', '已收到的部分不能被清空');
+    });
+
+    ok('文案：被打断 ≠ 未返回内容（两种含义不能混着说）', () => {
+      const src = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/components/chat/message-view.tsx'), 'utf8');
+      assert.ok(src.includes('生成被打断'), '空内容时必须区分"被打断"');
+      assert.ok(src.includes('interrupted'), '文案应由 message.interrupted 驱动');
+      assert.ok(src.includes('以上是已收到的部分'), '有部分内容时也要说明这是半截');
+    });
+
+    // 清理
+    storageMap.delete(AI_STORAGE_KEY);
+    useAIStore.setState({ conversations: [], activeId: null, messages: [] });
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

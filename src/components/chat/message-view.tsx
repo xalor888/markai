@@ -224,8 +224,25 @@ export const MessageView = memo(function MessageView({
   return (
     <div className="group" title={formatRelativeTime(message.createdAt)}>
       <div className="space-y-1.5">
+        {/*
+         * 三种"没有内容"必须分开说，它们的含义完全不同：
+         *  - 生成中被强制打断（关侧边栏 / 进程被回收）：不是模型的错，重试即可，已收到的部分也保留着；
+         *  - 真正的空回复：模型确实什么都没说，重试有意义；
+         *  - 其它（已被过滤/被清空）：不吓唬用户。
+         * 早先一律写成"Agent 未返回内容"，把第一种伪装成第二种，
+         * 于是用户会以为"一退出就废了"——虽然内容确实丢了，但说法也是错的。
+         */}
         {message.blocks.length === 0 && !streaming && (
-          <p className="text-md text-muted-foreground">（Agent 未返回内容，可点击 ↻ 重新生成）</p>
+          <p className="text-md text-muted-foreground">
+            {message.interrupted
+              ? '（生成被打断了，还没收到内容。可点击 ↻ 重新生成）'
+              : '（Agent 未返回内容，可点击 ↻ 重新生成）'}
+          </p>
+        )}
+        {message.interrupted && message.blocks.length > 0 && (
+          <p className="text-2xs text-muted-foreground/80">
+            （生成被打断，以上是已收到的部分；可点击 ↻ 重新生成完整回复）
+          </p>
         )}
         {message.blocks.map((block, i) => {
           const isLast = i === message.blocks.length - 1;

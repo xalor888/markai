@@ -13,6 +13,7 @@ import { pushToast } from '@/lib/toast';
 import { openUrl } from '@/lib/open-url';
 import { appVersion } from '@/lib/version';
 import { Badge } from '@/components/ui/badge';
+import { HealthPanel } from '@/components/health/health-panel';
 import { Button } from '@/components/ui/button';
 import { BrandMark } from '@/components/theme/theme-provider';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -407,6 +408,15 @@ export function ConfigForm() {
           </ol>
         </div>
       )}
+
+      {/* ── 健康检查 ──
+          放第一位：用户会打开设置页，多半就是"感觉哪里不对"。
+          先让他看到明确结论，再往下才是逐项配置。 */}
+      <Section icon={ShieldCheck} title="健康检查" anchor="health">
+        <div className="py-2">
+          <HealthPanel />
+        </div>
+      </Section>
 
       {/* ── AI 服务 ── */}
       <Section icon={Plug} title="AI 服务" anchor="ai">

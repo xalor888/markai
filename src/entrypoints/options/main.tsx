@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
-import { Brain, Database, Palette, Plug, SlidersHorizontal, Zap } from 'lucide-react';
+import { Brain, Database, Palette, Plug, ShieldCheck, SlidersHorizontal, Zap } from 'lucide-react';
 import { ErrorBoundary } from '@/components/common/error-boundary';
 import '@/assets/main.css';
 import { ThemeProvider } from '@/components/theme/theme-provider';
@@ -15,6 +15,7 @@ if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
 
 /** 左侧导航条目：与 ConfigForm 里各 Section 的 anchor 一一对应 */
 const NAV = [
+  { id: 'health', label: '健康检查', icon: ShieldCheck },
   { id: 'ai', label: 'AI 服务', icon: Plug },
   { id: 'context', label: '上下文与预算', icon: SlidersHorizontal },
   { id: 'agent', label: 'Agent 行为', icon: Zap },

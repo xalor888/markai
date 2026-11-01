@@ -319,6 +319,11 @@ export function Workspace({
           }}
           onSettings={() => void chrome.runtime.openOptionsPage()}
           onShortcuts={() => setShortcutsOpen(true)}
+          onHealth={() =>
+            void chrome.tabs.create({ url: chrome.runtime.getURL('options.html#health') }).catch(() => {
+              void chrome.runtime.openOptionsPage();
+            })
+          }
           onSwitchContainer={() => {
             if (mode === 'full') void openSidePanel();
             else openFullPage();

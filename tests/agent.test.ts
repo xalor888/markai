@@ -30,6 +30,10 @@ import { registrableDomain } from '../src/lib/bookmarks/domain';
 import { createDelayedOpen } from '../src/lib/bookmarks/delayed-open';
 import { buildRequestHeaders, getStableSessionId, parseCustomHeaders } from '../src/lib/ai/request-headers';
 import { groupCommands, SCORE, scoreItem, searchCommands, type CommandItem } from '../src/lib/command/search';
+import { analyzeBookmarks, runHealthCheck } from '../src/lib/health';
+import { diagnose, formatDiagnosticReport, MAX_LOG_ENTRIES, MAX_UNDO_POINTS } from '../src/lib/health/diagnostics';
+import { runFix, runFixes, CRASH_KEY } from '../src/lib/health/fixes';
+import type { HealthSnapshot } from '../src/lib/health/types';
 import { CHAT_WIDTH_MAX, CHAT_WIDTH_MAX_COMPACT, CHAT_WIDTH_MIN, clampChatWidth } from '../src/lib/chat-width';
 import {
   AI_COOLDOWN_MS,
@@ -428,6 +432,16 @@ const mockBookmarks = {
         if (i >= 0) storageListeners.splice(i, 1);
       },
     },
+  },
+  /*
+   * 权限查询替身：真实 API 返回 { permissions, origins }。
+   * 这是「健康检查」判断"缺不缺权限"的依据，所以要按 manifest 里实际申请的那几项给。
+   */
+  permissions: {
+    getAll: async () => ({
+      permissions: ['bookmarks', 'storage', 'tabs', 'tabGroups', 'contextMenus', 'sidePanel'],
+      origins: ['<all_urls>'],
+    }),
   },
   runtime: {
     connect: () => ({
@@ -10023,6 +10037,284 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.match(ui, /treeCollapsed: true/, 'compact 默认应收起');
       const ws = read('src/components/workspace/workspace.tsx');
       assert.match(ws, /absolute inset-y-0 left-0 z-30 w-52/, '展开态应是浮层');
+    });
+  }
+
+  /* ══════════ T102: 健康检查（自诊断 + 自修复） ══════════ */
+  console.log('\n[T102] 健康检查：诊断引擎与保守修复');
+  {
+    /** 一份"完全健康"的快照：所有检查项都应当安静 */
+    const healthy = (patch: Partial<HealthSnapshot> = {}): HealthSnapshot => ({
+      configError: null,
+      config: {
+        providerId: 'deepseek',
+        baseUrl: 'https://api.deepseek.com',
+        apiKey: 'sk-x',
+        model: 'deepseek-v4-flash',
+        customHeaders: '',
+        autoOrganizeNew: true,
+        autoOrganizeAi: true,
+        contextWindow: 128000,
+      },
+      providerNeedsKey: true,
+      permissions: ['bookmarks', 'storage', 'sidePanel', 'tabs'],
+      undoPoints: [],
+      logEntries: [],
+      bookmarks: { total: 10, folders: 3, emptyFolders: 0, maxDepth: 3, orphaned: 0, duplicateNameGroups: 0 },
+      storageBytes: 1024,
+      lastAiError: null,
+      crashCount: 0,
+      ...patch,
+    });
+
+    ok('健康快照 → 100 分且零问题（诊断本身不制造噪音）', () => {
+      const r = diagnose(healthy());
+      assert.equal(r.issues.length, 0, JSON.stringify(r.issues));
+      assert.equal(r.score, 100);
+    });
+
+    ok('配置缺 Key → 指出缺哪项，并给出可执行的修复动作', () => {
+      const r = diagnose(healthy({ config: { ...healthy().config!, apiKey: '' } }));
+      const issue = r.issues.find((i) => i.id === 'config.incomplete');
+      assert.ok(issue, '应报 config.incomplete');
+      assert.ok(issue!.detail.includes('API Key'), issue!.detail);
+      assert.equal(issue!.fix?.action, 'config.fill-defaults');
+      assert.ok(r.score < 100);
+    });
+
+    ok('本地服务不需要 Key → 不该报「缺 API Key」', () => {
+      const r = diagnose(
+        healthy({
+          config: { ...healthy().config!, providerId: 'ollama', apiKey: '', baseUrl: 'http://localhost:11434/v1' },
+          providerNeedsKey: false,
+        }),
+      );
+      assert.equal(r.issues.some((i) => i.id === 'config.incomplete'), false, JSON.stringify(r.issues));
+    });
+
+    ok('Base URL 不像地址 → 报错并可修正', () => {
+      const r = diagnose(healthy({ config: { ...healthy().config!, baseUrl: 'api.deepseek.com' } }));
+      const issue = r.issues.find((i) => i.id === 'config.invalid-baseurl');
+      assert.ok(issue, '应报非法地址');
+      assert.equal(issue!.fix?.action, 'config.normalize-baseurl');
+    });
+
+    ok('自定义请求头写错 → 指出有几行，可一键删掉写错的行', () => {
+      const r = diagnose(healthy({ config: { ...healthy().config!, customHeaders: 'X-Ok: 1\n没有冒号的一行\n: 值为空' } }));
+      const issue = r.issues.find((i) => i.id === 'config.bad-headers');
+      assert.ok(issue, '应报请求头错误');
+      assert.ok((issue!.count ?? 0) >= 1, `count=${issue!.count}`);
+      assert.equal(issue!.fix?.action, 'config.drop-bad-headers');
+    });
+
+    ok('缺权限 → 严重级，且**不给**自动修复按钮（权限只能用户自己给）', () => {
+      const r = diagnose(healthy({ permissions: ['storage'] }));
+      const issue = r.issues.find((i) => i.id === 'permission.missing');
+      assert.ok(issue);
+      assert.equal(issue!.severity, 'critical');
+      assert.equal(issue!.fix, undefined, '权限问题不能声称可自动修');
+      assert.ok(issue!.manualHint, '必须给手动指引');
+    });
+
+    ok('损坏的撤销点 → 报数量并可清理', () => {
+      const r = diagnose(
+        healthy({
+          undoPoints: [
+            { id: 'a', runId: 'r1', ops: [{ kind: 'move' }] },
+            { id: 'b' }, // 缺 runId / ops
+            { nope: true },
+          ],
+        }),
+      );
+      const issue = r.issues.find((i) => i.id === 'undo.corrupt');
+      assert.ok(issue);
+      assert.equal(issue!.count, 2, `应识别 2 个坏点，实际 ${issue!.count}`);
+      assert.equal(issue!.fix?.action, 'undo.drop-corrupt');
+    });
+
+    ok('撤销点超上限 → 提示会被截断，可裁到上限', () => {
+      const points = Array.from({ length: MAX_UNDO_POINTS + 3 }, (_, i) => ({ id: `p${i}`, runId: `r${i}`, ops: [] }));
+      const r = diagnose(healthy({ undoPoints: points }));
+      const issue = r.issues.find((i) => i.id === 'undo.overflow');
+      assert.ok(issue);
+      assert.equal(issue!.count, 3);
+      assert.equal(issue!.fix?.action, 'undo.trim-overflow');
+    });
+
+    ok('整理记录指向已消失的撤销点 → 标记为不可撤销（而不是显示点了没用的按钮）', () => {
+      const r = diagnose(
+        healthy({
+          undoPoints: [],
+          logEntries: [{ id: 'l1', at: Date.now(), title: 'A', runId: 'gone', action: 'moved' }],
+        }),
+      );
+      const issue = r.issues.find((i) => i.id === 'log.orphan');
+      assert.ok(issue);
+      assert.equal(issue!.fix?.action, 'log.mark-orphan');
+    });
+
+    ok('书签结构异常**只报告、不给自动修复**（自动修书签是不可接受的）', () => {
+      const r = diagnose(
+        healthy({
+          bookmarks: { total: 10, folders: 3, emptyFolders: 0, maxDepth: 3, orphaned: 4, duplicateNameGroups: 2 },
+        }),
+      );
+      for (const id of ['bookmarks.orphaned', 'bookmarks.duplicate-folders']) {
+        const issue = r.issues.find((i) => i.id === id);
+        assert.ok(issue, `应报 ${id}`);
+        assert.equal(issue!.fix, undefined, `${id} 不该有自动修复`);
+        assert.ok(issue!.manualHint, `${id} 必须给手动指引`);
+      }
+    });
+
+    ok('问题按严重度排序（严重的在前面，顺序稳定）', () => {
+      const r = diagnose(healthy({ permissions: [], crashCount: 1, storageBytes: 9 * 1024 * 1024 }));
+      const order = r.issues.map((i) => i.severity);
+      const rank = { critical: 0, high: 1, medium: 2, low: 3 } as Record<string, number>;
+      for (let i = 1; i < order.length; i++) {
+        assert.ok(rank[order[i]!]! >= rank[order[i - 1]!]!, `顺序乱了：${JSON.stringify(order)}`);
+      }
+    });
+
+    ok('分数有下限（问题再多也不出现负数）', () => {
+      const r = diagnose(
+        healthy({
+          configError: 'boom',
+          permissions: [],
+          crashCount: 5,
+          storageBytes: 99 * 1024 * 1024,
+          undoPoints: [{ bad: 1 }, { bad: 2 }],
+          lastAiError: 'x',
+        }),
+      );
+      assert.ok(r.score >= 0 && r.score <= 100, `score=${r.score}`);
+      assert.equal(r.score, 0);
+    });
+
+    ok('诊断报告是可复制的纯文本（贴出来就能定位）', () => {
+      const r = diagnose(healthy({ permissions: [] }));
+      const text = formatDiagnosticReport(r, { version: '0.2.36', browser: 'Chrome/1' });
+      assert.ok(text.includes('MarkAI 诊断报告'));
+      assert.ok(text.includes('0.2.36'));
+      assert.ok(text.includes('permission.missing'), text.slice(0, 200));
+      assert.ok(text.includes('健康分'));
+    });
+
+    /* ── 书签统计（纯函数） ── */
+    ok('书签统计：空文件夹 / 最大深度 / 同父同名 都能算准', () => {
+      const tree = [
+        {
+          id: '0',
+          title: '',
+          children: [
+            {
+              id: '1',
+              title: '书签栏',
+              children: [
+                { id: 'a', title: 'A', url: 'https://a.example' },
+                { id: 'f1', title: '空文件夹', children: [] },
+                { id: 'f2', title: '同名', children: [] },
+                { id: 'f3', title: '同名', children: [] },
+                { id: 'f4', title: '深', children: [{ id: 'f5', title: '更深', children: [{ id: 'b', title: 'B', url: 'https://b.example' }] }] },
+              ],
+            },
+          ],
+        },
+      ] as unknown as chrome.bookmarks.BookmarkTreeNode[];
+      const stats = analyzeBookmarks(tree);
+      assert.equal(stats.total, 2, `书签数 ${stats.total}`);
+      assert.equal(stats.folders, 6, `文件夹数 ${stats.folders}`);
+      // f1/f2/f3 是空的；f4 有 f5、f5 有书签，都不算空
+      assert.equal(stats.emptyFolders, 3, `空文件夹 ${stats.emptyFolders}`);
+      assert.ok(stats.maxDepth >= 4, `最大深度 ${stats.maxDepth}`);
+      assert.equal(stats.duplicateNameGroups, 1, '「同名」出现两次算一组');
+    });
+
+    ok('书签统计：孤儿检测（父节点不存在的书签）', () => {
+      const all = [
+        { id: '1', title: '书签栏', parentId: '0' },
+        { id: 'x', title: 'X', url: 'https://x.example', parentId: 'gone' },
+        { id: 'y', title: 'Y', url: 'https://y.example', parentId: '1' },
+      ] as unknown as chrome.bookmarks.BookmarkTreeNode[];
+      const tree = [{ id: '0', title: '', children: [all[0]!, { ...all[0]!, id: '1', children: [all[2]!] }] }] as unknown as chrome.bookmarks.BookmarkTreeNode[];
+      const stats = analyzeBookmarks(tree, all);
+      assert.equal(stats.orphaned, 1, `孤儿数 ${stats.orphaned}`);
+    });
+
+    /* ── 修复器：幂等 + 只动元数据 ── */
+    await okA('修复：坏请求头被删掉，合法的行原样保留（幂等）', async () => {
+      storageMap.set('markai.config', {
+        providerId: 'deepseek',
+        baseUrl: 'https://api.deepseek.com',
+        model: 'm',
+        customHeaders: 'X-Keep: 1\n这条不对\nX-Also: 2',
+      });
+      const r1 = await runFix('config.drop-bad-headers');
+      assert.equal(r1.ok, true, r1.detail);
+      const after1 = (storageMap.get('markai.config') as { customHeaders: string }).customHeaders;
+      assert.ok(after1.includes('X-Keep: 1'), after1);
+      assert.ok(after1.includes('X-Also: 2'), after1);
+      assert.equal(after1.includes('这条不对'), false, after1);
+
+      const r2 = await runFix('config.drop-bad-headers');
+      assert.equal(r2.ok, true);
+      const after2 = (storageMap.get('markai.config') as { customHeaders: string }).customHeaders;
+      assert.equal(after2, after1, '第二次执行不该再改动（幂等）');
+      storageMap.delete('markai.config');
+    });
+
+    await okA('修复：损坏的撤销点被清理，正常的一条不动', async () => {
+      storageMap.set('markai.undo', {
+        points: [
+          { id: 'ok1', runId: 'r1', ops: [{ kind: 'move', id: 'b', title: 't', fromParentId: '1', fromIndex: 0 }] },
+          { id: 'bad', ops: 'not-an-array' },
+        ],
+        terminalRunIds: [],
+      });
+      const r = await runFix('undo.drop-corrupt');
+      assert.equal(r.ok, true, r.detail);
+      const after = storageMap.get('markai.undo') as { points: { id: string }[] };
+      assert.equal(after.points.length, 1, JSON.stringify(after.points));
+      assert.equal(after.points[0]!.id, 'ok1');
+      storageMap.delete('markai.undo');
+    });
+
+    await okA('修复：孤儿记录被标记为「不可撤销」，并说明原因', async () => {
+      storageMap.set('markai.undo', { points: [], terminalRunIds: [] });
+      storageMap.set('markai.organize.log', [
+        { id: 'l1', at: 1, title: 'A', runId: 'gone', action: 'moved', detail: '' },
+        { id: 'l2', at: 2, title: 'B', action: 'skipped', detail: '' },
+      ]);
+      const r = await runFix('log.mark-orphan');
+      assert.equal(r.ok, true, r.detail);
+      const after = storageMap.get('markai.organize.log') as { id: string; unreversibleAt?: number; unreversibleReason?: string }[];
+      const l1 = after.find((e) => e.id === 'l1')!;
+      assert.ok(typeof l1.unreversibleAt === 'number', '应写入 unreversibleAt');
+      assert.ok(l1.unreversibleReason, '应说明为什么不能撤销');
+      const l2 = after.find((e) => e.id === 'l2')!;
+      assert.equal(l2.unreversibleAt, undefined, '没有 runId 的记录不该被标记');
+      storageMap.delete('markai.undo');
+      storageMap.delete('markai.organize.log');
+    });
+
+    await okA('修复：多个动作去重执行，且一条失败不影响其他', async () => {
+      const calls = await runFixes(['runtime.clear-crash-mark', 'runtime.clear-crash-mark']);
+      assert.equal(calls.length, 1, '同一动作只应执行一次');
+      const store = storageMap.get(CRASH_KEY) as { count: number } | undefined;
+      assert.equal(store?.count, 0, JSON.stringify(store));
+    });
+
+    await okA('修复器：未知动作如实失败，不静默成功', async () => {
+      const r = await runFix('not-a-real-action' as never);
+      assert.equal(r.ok, false);
+      assert.ok(r.detail.includes('未知'), r.detail);
+    });
+
+    await okA('端到端：配置缺 Key 时 runHealthCheck 能报出来', async () => {
+      storageMap.set('markai.config', { providerId: 'deepseek', baseUrl: 'https://api.deepseek.com', model: 'm', apiKey: '' });
+      const report = await runHealthCheck();
+      assert.ok(report.issues.some((i) => i.id === 'config.incomplete' || i.id === 'ai.last-error'), JSON.stringify(report.issues));
+      storageMap.delete('markai.config');
     });
   }
 

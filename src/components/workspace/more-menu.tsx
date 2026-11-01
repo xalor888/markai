@@ -1,4 +1,4 @@
-import { BookmarkPlus, Check, Keyboard, LayoutPanelLeft, Maximize, MessageSquare, Monitor, Moon, MoreHorizontal, Settings, Sparkles, Sun, Trash2, Wand2 } from 'lucide-react';
+import { Activity, BookmarkPlus, Check, Keyboard, LayoutPanelLeft, Maximize, MessageSquare, Monitor, Moon, MoreHorizontal, Settings, Sparkles, Sun, Trash2, Wand2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useThemeStore, type Theme } from '@/stores/themeStore';
 import { cn } from '@/lib/utils';
@@ -24,6 +24,7 @@ export function MoreMenu({
   onOrganize,
   onSettings,
   onShortcuts,
+  onHealth,
   onSwitchContainer,
   onSaveCurrentTab,
 }: {
@@ -37,6 +38,8 @@ export function MoreMenu({
   onOrganize: () => void;
   onSettings: () => void;
   onShortcuts: () => void;
+  /** 打开设置页的「健康检查」分节 */
+  onHealth: () => void;
   /** 在完整页 / 侧边栏之间切换 */
   onSwitchContainer: () => void;
   onSaveCurrentTab: () => void;
@@ -186,6 +189,7 @@ export function MoreMenu({
           {mode === 'full'
             ? item(LayoutPanelLeft, '在侧边栏打开', onSwitchContainer)
             : item(Maximize, '在完整页面打开', onSwitchContainer)}
+          {item(Activity, '健康检查', onHealth)}
           {item(Keyboard, '快捷键与操作', onShortcuts)}
           <div className="my-1 h-px bg-border" />
           <p className="px-3 pt-1 pb-1 text-2xs text-muted-foreground">主题</p>

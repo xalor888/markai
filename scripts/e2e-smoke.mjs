@@ -457,8 +457,46 @@ async function run() {
     check('列表接受键盘事件（↓ 导航不报错）', kb.ok === true, JSON.stringify(kb));
   }
 
-  /* ══════════ 10. 收尾：清理数据 ══════════ */
-  console.log('\n[10] 清理');
+  /* ══════════ 10. 健康检查（自诊断） ══════════ */
+  console.log('\n[10] 健康检查');
+  {
+    // 设置页是独立文档：直接导航过去（e2e 到这一步已经不需要原页面状态）
+    await cdp.send('Page.navigate', { url: `chrome-extension://${EXT_ID}/options.html#health` }, sessionId);
+    await sleep(1200);
+    // 体检是异步的：等分数真的出来再断言，别用猜出来的 sleep 时长
+    await waitFor(async () => (await ev(`/健康分\\s*\\d+/.test(document.body.innerText)`).catch(() => false)) === true, 6000);
+    const health = await ev(`(() => {
+      const text = document.body.innerText;
+      const m = /健康分\\s*(\\d+)/.exec(text);
+      return {
+        hasSection: text.includes('健康检查'),
+        score: m ? Number(m[1]) : null,
+        hasCopyReport: text.includes('复制诊断报告'),
+        hasFixAll: /修复全部（\d+）/.test(text),
+      };
+    })()`);
+    check('设置页打开即给出健康分与结论', health.hasSection && health.score !== null, JSON.stringify(health));
+    check('诊断报告可一键复制（贴出来就能定位问题）', health.hasCopyReport === true, JSON.stringify(health));
+
+    const repaired = await ev(`(async () => {
+      // 点「修复全部」：只应改动 MarkAI 自己的元数据，不碰书签
+      const before = (await chrome.bookmarks.search({})).length;
+      const btn = [...document.querySelectorAll('button')].find(b => /修复全部/.test(b.textContent || ''));
+      if (!btn) return { ok: true, clicked: false, before };
+      btn.click();
+      await new Promise(r => setTimeout(r, 1200));
+      const after = (await chrome.bookmarks.search({})).length;
+      return { ok: true, clicked: true, before, after };
+    })()`);
+    check(
+      '一键修复不改动任何书签（只碰 MarkAI 自己的配置与记录）',
+      repaired.after === repaired.before,
+      JSON.stringify(repaired),
+    );
+  }
+
+  /* ══════════ 11. 收尾：清理数据 ══════════ */
+  console.log('\n[11] 清理');
   {
     const cleaned = await ev(`(async () => {
       const all = await chrome.bookmarks.search({});

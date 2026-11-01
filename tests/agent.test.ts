@@ -32,6 +32,15 @@ import { buildRequestHeaders, getStableSessionId, parseCustomHeaders } from '../
 import { groupCommands, SCORE, scoreItem, searchCommands, type CommandItem } from '../src/lib/command/search';
 import { analyzeBookmarks, runHealthCheck } from '../src/lib/health';
 import { AI_STORAGE_KEY, flushStreamPersist, useAIStore } from '../src/stores/aiStore';
+import {
+  appendDraft,
+  clearDraft,
+  finalizeDraft,
+  mergeDraft,
+  readDraft,
+  resetDraftForTest,
+  STREAM_DRAFT_KEY,
+} from '../src/lib/ai/stream-draft';
 import { diagnose, formatDiagnosticReport, MAX_LOG_ENTRIES, MAX_UNDO_POINTS } from '../src/lib/health/diagnostics';
 import { runFix, runFixes, CRASH_KEY } from '../src/lib/health/fixes';
 import type { HealthSnapshot } from '../src/lib/health/types';
@@ -10397,6 +10406,140 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     // 清理
     storageMap.delete(AI_STORAGE_KEY);
     useAIStore.setState({ conversations: [], activeId: null, messages: [] });
+  }
+
+  /* ══════════ T104: 切标签页不丢内容（后台草稿） ══════════ */
+  console.log('\n[T104] 后台草稿：切到后台的回复不能蒸发');
+  {
+    /*
+     * 用户实测：**只是把标签页放到后台**，回复就没了。
+     *
+     * 链路：页面被节流 → 保活心跳失效 → SW 回收 → port 断开 → UI 的 streaming 置 false
+     *      → 切回来 visibilitychange 触发 load() → 用 storage 里的旧内容覆盖内存里更完整的那份。
+     *
+     * 只要落盘还依赖 UI 的定时器，这个洞就堵不住——坏掉的正是"UI 还活着"这个前提。
+     * 所以改由 background 每个增量都累积成草稿；这里钉住它的三条契约。
+     */
+    resetDraftForTest();
+    storageMap.delete(STREAM_DRAFT_KEY);
+
+    await okA('草稿：增量累积后节流写入 storage', async () => {
+      appendDraft('m1', '第一段');
+      appendDraft('m1', '第二段');
+      // 等一个节流窗口
+      await new Promise((r) => setTimeout(r, 420));
+      const draft = await readDraft();
+      assert.ok(draft, '应写入草稿');
+      assert.equal(draft!.messageId, 'm1');
+      assert.equal(draft!.text, '第一段第二段', `实际 ${draft!.text}`);
+    });
+
+    await okA('草稿：切换到新消息时重新开始累积（不把两轮拼在一起）', async () => {
+      appendDraft('m2', '新一轮');
+      await new Promise((r) => setTimeout(r, 420));
+      const draft = await readDraft();
+      assert.equal(draft!.messageId, 'm2');
+      assert.equal(draft!.text, '新一轮');
+    });
+
+    ok('合并：草稿更长才采用（绝不把眼前的字变少）', () => {
+      const draft = { messageId: 'm1', text: '一二三四五', at: 1 };
+      assert.equal(mergeDraft('一二', draft, 'm1'), '一二三四五', '草稿更完整 → 采用草稿');
+      assert.equal(mergeDraft('一二三四五', draft, 'm1'), '一二三四五', '一样长 → 保持原样');
+      assert.equal(mergeDraft('一二三四五六七', draft, 'm1'), '一二三四五六七', '内存更长 → 不能回退');
+      assert.equal(mergeDraft('一二', draft, 'm-other'), '一二', 'messageId 不匹配 → 不合并');
+      assert.equal(mergeDraft('一二', null, 'm1'), '一二', '没有草稿 → 原样');
+    });
+
+    ok('合并：重试导致的分叉不拼成两段怪回复（取更长的那份）', () => {
+      const draft = { messageId: 'm1', text: '完全不同的另一次回复', at: 1 };
+      const merged = mergeDraft('原来的内容', draft, 'm1');
+      assert.equal(merged, '完全不同的另一次回复', '不是前缀关系时应取更长的，而不是拼接');
+      assert.equal(merged.includes('原来的内容'), false, '不得拼出两段');
+    });
+
+    await okA('一轮结束：草稿被清掉（下次不会误合并）', async () => {
+      appendDraft('m3', '收尾');
+      await new Promise((r) => setTimeout(r, 420));
+      await clearDraft();
+      assert.equal(await readDraft(), null, 'clearDraft 后不应再有草稿');
+    });
+
+    await okA('端到端：load() 用草稿把消息补全（切回标签页的场景）', async () => {
+      const convId = 't104-conv';
+      // storage 里是"port 断得比较早"的旧快照
+      storageMap.set(AI_STORAGE_KEY, {
+        conversations: [
+          {
+            id: convId,
+            title: 'T104',
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            messages: [
+              { id: 'm-draft', role: 'assistant', createdAt: Date.now(), streaming: true, blocks: [{ kind: 'text', text: '前半' }] },
+            ],
+          },
+        ],
+        activeId: convId,
+      });
+      // 后台草稿里已经有更完整的内容（切到后台期间继续收到的部分）
+      storageMap.set(STREAM_DRAFT_KEY, { messageId: 'm-draft', text: '前半以及后台继续收到的后半', at: Date.now() });
+
+      useAIStore.setState({ conversations: [], activeId: null, messages: [] });
+      await useAIStore.getState().load();
+
+      const msgs = useAIStore.getState().messages as { id: string; interrupted?: boolean; blocks: { text: string }[] }[];
+      const m = msgs.find((x) => x.id === 'm-draft')!;
+      assert.equal(m.blocks[0]!.text, '前半以及后台继续收到的后半', `实际 ${m.blocks[0]!.text}`);
+      assert.equal(m.interrupted, true, '同时应标成被打断');
+      storageMap.delete(STREAM_DRAFT_KEY);
+      storageMap.delete(AI_STORAGE_KEY);
+      useAIStore.setState({ conversations: [], activeId: null, messages: [] });
+    });
+  }
+
+  /* ══════════ T105: 收尾落盘（finalizeDraft） ══════════ */
+  console.log('\n[T105] 收尾：草稿必须落成会话消息，不能只删草稿');
+  {
+    await okA('finalizeDraft：端口早断、UI 没回来时，内容仍然落进会话消息', async () => {
+      const convId = 't105-conv';
+      storageMap.set(AI_STORAGE_KEY, {
+        conversations: [
+          {
+            id: convId,
+            title: 'T105',
+            createdAt: 1,
+            updatedAt: 1,
+            messages: [
+              // 只落了「前半」——port 断得早，后面的字只在草稿里
+              { id: 'm-fin', role: 'assistant', createdAt: 1, streaming: true, blocks: [{ kind: 'text', text: '前半' }] },
+            ],
+          },
+        ],
+        activeId: convId,
+      });
+      storageMap.set(STREAM_DRAFT_KEY, { messageId: 'm-fin', text: '前半 + 后台继续跑完的后半', at: Date.now() });
+
+      const changed = await finalizeDraft(AI_STORAGE_KEY);
+      assert.equal(changed, true, '应真的改动了一条消息');
+
+      const saved = storageMap.get(AI_STORAGE_KEY) as {
+        conversations: { messages: { id: string; streaming?: boolean; blocks: { text: string }[] }[] }[];
+      };
+      const msg = saved.conversations[0]!.messages[0]!;
+      assert.equal(msg.blocks[0]!.text, '前半 + 后台继续跑完的后半', `实际 ${msg.blocks[0]!.text}`);
+      assert.equal(msg.streaming, false, '收尾后不该再挂着生成中');
+      assert.equal(storageMap.get(STREAM_DRAFT_KEY), undefined, '草稿应被清掉');
+    });
+
+    await okA('finalizeDraft：没有草稿时什么都不做（幂等）', async () => {
+      const before = storageMap.get(AI_STORAGE_KEY);
+      const changed = await finalizeDraft(AI_STORAGE_KEY);
+      assert.equal(changed, false);
+      assert.equal(storageMap.get(AI_STORAGE_KEY), before, '不该改写存储');
+      storageMap.delete(AI_STORAGE_KEY);
+      storageMap.delete(STREAM_DRAFT_KEY);
+    });
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

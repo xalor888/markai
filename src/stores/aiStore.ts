@@ -17,6 +17,7 @@ import type { UndoPoint } from '@/lib/undo/types';
 import { undoReadiness } from '@/lib/undo/journal';
 import { UNDO_STORAGE_KEY } from '@/lib/undo/recorder';
 import { describeChatTrim, trimConversationsToBudget } from '@/lib/ai/chat-budget';
+import { mergeDraft, readDraft } from '@/lib/ai/stream-draft';
 import { useBookmarkStore } from './bookmarkStore';
 
 /** storage key（popup 通过该 key 只读展示待删数） */
@@ -341,8 +342,27 @@ export const useAIStore = create<AIState>((set, get) => ({
        *  - 直接当"空回复"又会让人以为模型没说话（正是用户报的那个问题）。
        * 真实含义是"生成被打断了"，已收到的部分原样保留。
        */
+      /*
+       * 先用后台写下的草稿补全，再判定「被打断」——顺序不能反。
+       *
+       * 切标签页时 port 会断，UI 收到的最后一段可能没赶上落盘；后台侧的草稿
+       * 是权威的"到此为止收到多少"。只往更完整的方向合（mergeDraft 里保证），
+       * 绝不会因为一次晚到的读把用户眼前的字变少。
+       */
+      const draft = await readDraft();
+      const withDraft = (msgs: ChatMessage[]): ChatMessage[] =>
+        msgs.map((m) => {
+          if (!draft || m.id !== draft.messageId || m.role !== 'assistant') return m;
+          // 只处理"纯文本"回复：含工具卡片的消息结构复杂，不在这里重排
+          if (!m.blocks.every((b) => b.kind === 'text')) return m;
+          const existing = m.blocks.map((b) => (b.kind === 'text' ? b.text : '')).join('');
+          const merged = mergeDraft(existing, draft, m.id);
+          if (merged === existing) return m;
+          return { ...m, blocks: [{ kind: 'text' as const, text: merged }] };
+        });
+
       const revive = (msgs: ChatMessage[]): ChatMessage[] =>
-        msgs.map((m) => (m.streaming ? { ...m, streaming: false, interrupted: true } : m));
+        withDraft(msgs).map((m) => (m.streaming ? { ...m, streaming: false, interrupted: true } : m));
       const revivedConversations = conversations.map((c) => ({ ...c, messages: revive(c.messages ?? []) }));
       const active = revivedConversations.find((c) => c.id === activeId) ?? revivedConversations[0]!;
       set({

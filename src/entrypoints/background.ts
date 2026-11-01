@@ -16,6 +16,7 @@ import {
   handleContextMenuClick as runContextMenuClick,
   type ContextMenuClickInfo,
 } from '@/lib/ai/context-menu';
+import { appendDraft, finalizeDraft } from '@/lib/ai/stream-draft';
 import { ACTION_MENUS, registerContextMenus } from '@/lib/ai/context-menus';
 import { executeDeletions as runDeletions } from '@/lib/ai/deletion-executor';
 import {
@@ -176,6 +177,8 @@ export default defineBackground(() => {
   chrome.runtime.onConnect.addListener((port) => {
     if (port.name !== 'markai-chat') return;
     let abort: AbortController | null = null;
+    /** 断开后的宽限计时器：新一轮开始时要清掉，否则上一轮的倒计时会把新请求杀掉 */
+    const abortTimers: ReturnType<typeof setTimeout>[] = [];
     // 每个连接一份登记表：决定只结算本连接上挂起的计划
     const planApprovals = createPlanApprovalRegistry();
 
@@ -185,6 +188,8 @@ export default defineBackground(() => {
         abort?.abort();
         // 上一条若停在计划确认上：abort 不会让它的 await 返回，这里补一次结算（纵深防御）
         planApprovals.cancelAll();
+        // 新的一轮：清掉上一轮遗留的"宽限中止"计时器，否则它到点会把这一轮杀掉
+        for (const t of abortTimers.splice(0)) clearTimeout(t);
         const ctrl = new AbortController();
         abort = ctrl;
         void handleChatSend(port, raw, ctrl.signal, planApprovals).finally(() => {
@@ -202,8 +207,24 @@ export default defineBackground(() => {
     });
 
     port.onDisconnect.addListener(() => {
-      abort?.abort();
-      abort = null;
+      /*
+       * **不立刻中止**。
+       *
+       * 切标签页、切窗口、侧边栏被收起，都会让 port 断开——但用户并没有说"别生成了"。
+       * 早先这里直接 abort()，于是"只是把标签页放后台"就等于把回复砍掉，
+       * 这就是用户报的「切个标签页就没」。
+       *
+       * 现在给 30 秒宽限期：期间一轮跑完，内容会经 finalizeDraft 落进会话消息，
+       * 用户切回来能直接看到完整回复；确实没人回来，才中止以免白烧 token。
+       */
+      if (abort) {
+        const pending = setTimeout(() => {
+          abort?.abort();
+          abort = null;
+        }, 30_000);
+        // 新一轮开始时清掉（见下面的 abort = new AbortController() 处）
+        abortTimers.push(pending);
+      }
       // 面板关了没人能点确认：未决计划按"未批准"结算（绝不挂死一轮）
       planApprovals.cancelAll();
     });
@@ -794,7 +815,27 @@ async function handleChatSend(
       history: msg.history,
       text,
       signal,
-      onEvent: (e) => safePost(port, e),
+      /*
+       * 每个事件既推给 UI，也在后台侧留下痕迹。
+       *
+       * 只推给 UI 是不够的：切到后台后页面定时器被节流、SW 被回收、port 断开，
+       * 而 UI 的落盘正是靠那些被节流的定时器——坏掉的恰恰是"UI 还活着"这个前提。
+       * 增量在后台累积成草稿并节流落盘，UI 恢复时再合并，内容就不会因为切标签页蒸发。
+       */
+      onEvent: (e) => {
+        safePost(port, e);
+        if (e.type === 'chat:delta') {
+          appendDraft(e.messageId, e.text);
+        } else if (e.type === 'chat:done' || e.type === 'chat:error' || e.type === 'chat:cancelled') {
+          /*
+           * 收尾：先把草稿落到**会话消息**里，再清掉草稿。
+           *
+           * 只 clear 不 finalize 的话，port 早断、UI 一直没回来的那种情况，
+           * 内容就只剩草稿这一份——一删就真没了。会话消息才是 UI 下次 load 读的地方。
+           */
+          void finalizeDraft('markai.ai').catch(() => {});
+        }
+      },
       // 计划模式的真实确认通道：发出 chat:plan 后等这个连接上的 chat:plan_decision；
       // 端口断开/取消时由登记表按"未批准"结算（绝不挂死一轮）
       requestPlanApproval: (steps, messageId) =>

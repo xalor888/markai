@@ -47,7 +47,7 @@ const GROUPS: { title: string; items: Shortcut[] }[] = [
   {
     title: '视图与搜索',
     items: [
-      { keys: ['Ctrl', 'K'], desc: '聚焦搜索框' },
+      { keys: ['Ctrl', 'K'], desc: '打开命令面板（搜书签 / 跳文件夹 / 执行动作）' },
       { keys: ['/'], desc: '在树或列表内聚焦搜索' },
       { keys: ['Esc'], desc: '关闭浮层 / 清除搜索' },
       { keys: ['Ctrl', 'Shift', 'M'], desc: '打开 MarkAI 侧边栏' },

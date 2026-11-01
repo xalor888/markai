@@ -125,8 +125,18 @@ async function main() {
     process.exit(130);
   });
 
+  let crashed = null;
   try {
     await run();
+  } catch (e) {
+    /*
+     * **跑挂 ≠ 通过**。
+     *
+     * 早先这里只有 finally：`process.exit(process.exitCode || 0)` 会在异常传播前先退出，
+     * 于是「脚本中途抛异常」被报成「N 项通过」+ 退出码 0 —— 崩溃伪装成绿灯，
+     * 比测试失败危险得多（表现为"检查项少了几条"，很容易被当成正常）。
+     */
+    crashed = e;
   } finally {
     const failed = results.filter((r) => !r.ok);
     console.log(`\nE2E 结果：${results.length - failed.length}/${results.length} 通过 · ${((Date.now() - RUN_START) / 1000).toFixed(1)}s`);
@@ -135,6 +145,11 @@ async function main() {
       for (const c of [...slowCalls].sort((a, b) => b.ms - a.ms).slice(0, 5)) {
         console.log(`  ${String(c.ms).padStart(5)}ms  ${c.head}`);
       }
+    }
+    if (crashed) {
+      console.log(`\nE2E 执行中断：${crashed instanceof Error ? crashed.message : String(crashed)}`);
+      console.log('（上面是中断前已完成的部分；中断不等于通过）');
+      process.exitCode = 1;
     }
     if (failed.length) {
       console.log('失败项：' + failed.map((f) => f.name).join(' | '));
@@ -505,6 +520,58 @@ async function run() {
     check('空文件夹里给了下一步（含 Ctrl+D 提示）', empty.hasHint === true, JSON.stringify(empty));
 
     await ev(`chrome.bookmarks.removeTree(${JSON.stringify(emptyFolderId)}).catch(() => {})`);
+  }
+
+  /* ══════════ 9.45 快捷键说明与实际一致 ══════════ */
+  console.log('\n[9.45] 快捷键一致性');
+  {
+    /*
+     * 回归：速查表写着 `Ctrl+K` = 聚焦搜索框，但 0.2.35 起 Ctrl+K 打开的是**命令面板**。
+     * 说明与实际不符比没有说明更糟——用户照着按，得到的是别的东西。
+     *
+     * 这里同时钉住行为与文案：按 Ctrl+K 必须打开命令面板，速查表也不能再写"聚焦搜索框"。
+     */
+    await ev(`(() => { document.activeElement?.blur?.(); document.body.focus(); return true; })()`);
+    await sleep(150);
+    await ev(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }))`);
+    await sleep(500);
+    const opened = await ev(`!!document.querySelector('[data-testid="command-palette"]')`);
+    const focusInside = await ev(
+      `!!document.querySelector('[data-testid="command-palette"]')?.contains(document.activeElement)`,
+    );
+    check('Ctrl+K 打开命令面板且焦点在里面', opened === true && focusInside === true, JSON.stringify({ opened, focusInside }));
+
+    // 关掉面板，再打开速查表看文案
+    await ev(`document.querySelector('[data-testid="command-palette"] input')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    await sleep(300);
+    await ev(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }))`);
+    await sleep(500);
+    /*
+     * 这段塞进模板字符串执行，注释与代码里都不能出现反斜杠转义
+     * （模板字符串会先把它转成真字符，结果不是断行就是非法正则）。
+     *
+     * 按键在速查表里是分开渲染的 <kbd>，所以不能按"某一行同时含 Ctrl 和 K"去找。
+     * 改用两个更稳的判据：
+     *  - 旧措辞「聚焦搜索框」必须消失（这是被改掉的那句话）；
+     *  - 新措辞「命令面板」必须出现（证明改成了实际行为）。
+     */
+    const copy = await ev(`(() => {
+      const d = document.querySelector('[role="dialog"]');
+      const t = d ? d.innerText : '';
+      return {
+        hasDialog: !!d,
+        oldWording: t.includes('聚焦搜索框'),
+        hasPalette: t.includes('命令面板'),
+        excerpt: t.split(String.fromCharCode(10)).filter((l) => l.includes('Ctrl') || l.includes('命令面板')).join(' / ').slice(0, 120),
+      };
+    })()`);
+    check(
+      '速查表里的 Ctrl+K 说明与实际一致',
+      copy.hasDialog === true && copy.oldWording === false && copy.hasPalette === true,
+      JSON.stringify(copy),
+    );
+    await ev(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    await sleep(200);
   }
 
   /* ══════════ 9.5 无障碍：可点元素必须有可访问名称 ══════════ */

@@ -29,21 +29,6 @@ function initTitleTracking(): () => void {
   return unsub;
 }
 
-/** Ctrl+K 聚焦搜索框（原生应用习惯） */
-function initSearchShortcut(): () => void {
-  const onKey = (e: globalThis.KeyboardEvent) => {
-    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
-      // 输入框内不拦截
-      const el = e.target as HTMLElement;
-      if (el.closest('input, textarea, select')) return;
-      e.preventDefault();
-      document.getElementById('markai-search')?.focus();
-    }
-  };
-  window.addEventListener('keydown', onKey);
-  return () => window.removeEventListener('keydown', onKey);
-}
-
 /** 完整页入口：三分栏 IDE 工作区 */
 function PageApp() {
   useEffect(() => {
@@ -54,7 +39,6 @@ function PageApp() {
     const stopUISync = initUIWindowSync();
     const stopSync = initCrossWindowSync();
     const stopTitle = initTitleTracking();
-    const stopSearchShortcut = initSearchShortcut();
 
     // 窗口激活时强制同步：多窗口场景切回本窗口立即看到最新书签与对话（不依赖 storage 事件时序）
     const onActivate = () => {
@@ -75,7 +59,6 @@ function PageApp() {
       stopUISync();
       stopSync();
       stopTitle();
-      stopSearchShortcut();
       document.removeEventListener('visibilitychange', onActivate);
       window.removeEventListener('focus', onActivate);
       chrome.runtime.onMessage.removeListener(onMessage);

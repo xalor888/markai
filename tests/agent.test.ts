@@ -257,7 +257,17 @@ const createGate: { release: Promise<void> | null; entered: (() => void) | null 
 };
 
 const mockBookmarks = {
-  getTree: async () => [toApi({ id: '0', title: '', dateAdded: 0 })],
+  /*
+   * getTree 的可注入延迟。
+   *
+   * 用来复现「加载期间又来了刷新请求」：真实大库上 getTree 要几百毫秒，
+   * 去抖后的下一次刷新正好落在窗口里。默认 0 延迟，不影响其它用例。
+   */
+  getTree: async () => {
+    if (getTreeDelayMs > 0) await new Promise((r) => setTimeout(r, getTreeDelayMs));
+    getTreeCalls++;
+    return [toApi({ id: '0', title: '', dateAdded: 0 })];
+  },
   getSubTree: async (id: string) => {
     const node = nodeById(id);
     assert(node, `getSubTree: 节点 ${id} 不存在`);
@@ -508,6 +518,9 @@ function fireStorageChange(changes: Record<string, { oldValue?: unknown; newValu
 
 /** 内存 storage（多会话墓碑/清空/合并测试用） */
 const storageMap = new Map<string, unknown>();
+/** getTree 的人为延迟与调用计数（见 mock 里的说明） */
+let getTreeDelayMs = 0;
+let getTreeCalls = 0;
 
 /* ══════════ 2. mock fetch（SSE 响应队列） ══════════ */
 
@@ -10539,6 +10552,120 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.equal(storageMap.get(AI_STORAGE_KEY), before, '不该改写存储');
       storageMap.delete(AI_STORAGE_KEY);
       storageMap.delete(STREAM_DRAFT_KEY);
+    });
+  }
+
+  /* ══════════ T106: 错误边界覆盖（不白屏） ══════════ */
+  console.log('\n[T106] 关键区域必须有错误边界');
+  {
+    /*
+     * React 19 里任何组件抛错都会让整棵树卸载 —— 用户看到的是纯白窗口，
+     * 没有报错、没有退出路径。而书签树/设置页恰恰最依赖 chrome API 的返回形状。
+     * 这里用源码守卫钉住：新增这些区域时必须一起带上边界。
+     */
+    const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const read = (rel: string) => readFileSync(resolve(rootDir, rel), 'utf8');
+
+    ok('书签树：两种布局（完整页常驻 / 侧边栏浮层）都包在边界里', () => {
+      const ws = read('src/components/workspace/workspace.tsx');
+      const trees = (ws.match(/<BookmarkTree/g) ?? []).length;
+      const boundaries = (ws.match(/area="书签树"/g) ?? []).length;
+      assert.ok(trees >= 2, `应有两处 <BookmarkTree（实际 ${trees}）`);
+      assert.equal(boundaries, trees, `每个 <BookmarkTree 都要有边界（树 ${trees} / 边界 ${boundaries}）`);
+    });
+
+    ok('设置页：健康检查单独包边界（它挂了不该让整页白屏）', () => {
+      const form = read('src/components/options/config-form.tsx');
+      const panel = form.indexOf('<HealthPanel');
+      const boundary = form.lastIndexOf('<ErrorBoundary', panel);
+      assert.ok(panel > 0, '应渲染 HealthPanel');
+      assert.ok(boundary > 0 && boundary < panel, 'HealthPanel 必须包在 ErrorBoundary 里');
+      assert.match(form.slice(boundary, panel), /area="健康检查"/, '边界要标明区域');
+    });
+
+    ok('工作区三块（树/列表/Agent）都有各自边界，互不牵连', () => {
+      const ws = read('src/components/workspace/workspace.tsx');
+      for (const area of ['书签树', '书签列表', 'Agent 面板']) {
+        assert.ok(ws.includes(`area="${area}"`), `缺少 ${area} 的边界`);
+      }
+    });
+  }
+
+  /* ══════════ T106: 刷新不丢（并发 loadTree 合并） ══════════ */
+  console.log('\n[T106] 加载中的刷新请求不能被吞掉');
+  {
+    /*
+     * 缺陷：`loadTree()` 开头是 `if (get().loading) return;`
+     * → 加载期间到来的刷新被静默丢弃，界面停在旧数据上。
+     *
+     * 触发路径不止一条：树里的刷新按钮、AI 工具事件、书签变更事件（300ms 去抖后）
+     * 都可能撞进一次正在进行的 getTree。大库上 getTree 要几百毫秒，撞上的概率不低。
+     * 用户看到的是"点了没反应 / 新书签不出现"。
+     */
+    const { useBookmarkStore } = await import('../src/stores/bookmarkStore');
+
+    await okA('加载中的第二次刷新会补跑（而不是被丢弃）', async () => {
+      getTreeCalls = 0;
+      getTreeDelayMs = 80; // 让第一次加载有明显窗口
+      try {
+        const first = useBookmarkStore.getState().loadTree();
+        // 加载进行中再请求一次
+        await new Promise((r) => setTimeout(r, 20));
+        const second = useBookmarkStore.getState().loadTree();
+        await Promise.all([first, second]);
+        // 补跑是 fire-and-forget：等它落地
+        await new Promise((r) => setTimeout(r, 200));
+
+        assert.equal(getTreeCalls, 2, `应真正跑 2 次 getTree（1 次原始 + 1 次补跑），实际 ${getTreeCalls}`);
+      } finally {
+        getTreeDelayMs = 0;
+      }
+    });
+
+    await okA('连续多次刷新合并成一次补跑（不是排队 N 次）', async () => {
+      getTreeCalls = 0;
+      getTreeDelayMs = 80;
+      try {
+        const first = useBookmarkStore.getState().loadTree();
+        await new Promise((r) => setTimeout(r, 10));
+        // 加载期间连点 5 次刷新
+        for (let i = 0; i < 5; i++) void useBookmarkStore.getState().loadTree();
+        await first;
+        await new Promise((r) => setTimeout(r, 250));
+
+        // 1 次原始 + 1 次合并补跑；点 5 次不该变成 6 次遍历
+        assert.equal(getTreeCalls, 2, `合并后应只跑 2 次，实际 ${getTreeCalls}`);
+      } finally {
+        getTreeDelayMs = 0;
+      }
+    });
+
+    await okA('加载失败后也会补跑排队的刷新（用户点了重试不该被吞）', async () => {
+      getTreeCalls = 0;
+      getTreeDelayMs = 60;
+      const original = chrome.bookmarks.getTree;
+      let failOnce = true;
+      (chrome.bookmarks as { getTree: typeof original }).getTree = async () => {
+        if (failOnce) {
+          failOnce = false;
+          await new Promise((r) => setTimeout(r, 60));
+          throw new Error('模拟 getTree 失败');
+        }
+        return original();
+      };
+      try {
+        const first = useBookmarkStore.getState().loadTree();
+        await new Promise((r) => setTimeout(r, 15));
+        void useBookmarkStore.getState().loadTree(); // 失败期间请求的刷新
+        await first;
+        await new Promise((r) => setTimeout(r, 250));
+
+        assert.equal(getTreeCalls, 1, `失败后应补跑成功的那一次，getTree 调用 ${getTreeCalls}`);
+        assert.equal(useBookmarkStore.getState().loadError, null, '补跑成功后错误应被清掉');
+      } finally {
+        (chrome.bookmarks as { getTree: typeof original }).getTree = original;
+        getTreeDelayMs = 0;
+      }
     });
   }
 

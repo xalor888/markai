@@ -14,6 +14,7 @@ import { openUrl } from '@/lib/open-url';
 import { appVersion } from '@/lib/version';
 import { Badge } from '@/components/ui/badge';
 import { HealthPanel } from '@/components/health/health-panel';
+import { ErrorBoundary } from '@/components/common/error-boundary';
 import { Button } from '@/components/ui/button';
 import { BrandMark } from '@/components/theme/theme-provider';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -414,7 +415,14 @@ export function ConfigForm() {
           先让他看到明确结论，再往下才是逐项配置。 */}
       <Section icon={ShieldCheck} title="健康检查" anchor="health">
         <div className="py-2">
-          <HealthPanel />
+          {/*
+           * 体检要读 chrome.* 与 storage，任何一项抛错都会让整个设置页白屏——
+           * 而设置页恰恰是用户"出问题时才来"的地方，白屏等于彻底失去自救入口。
+           * 包一层边界：最坏情况是这一节显示失败原因，其余配置项照常可改。
+           */}
+          <ErrorBoundary area="健康检查">
+            <HealthPanel />
+          </ErrorBoundary>
         </div>
       </Section>
 

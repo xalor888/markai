@@ -63,6 +63,14 @@ const UI_STORAGE_KEY = 'markai.ui';
 /** 跨窗口同步标记：本窗口写入 UI 状态时置位，onChanged 据此跳过自身 */
 const crossUIWrite = { current: false };
 let uiSyncTimer: ReturnType<typeof setTimeout> | null = null;
+/**
+ * 「加载中又收到刷新请求」的合并标记。
+ *
+ * 只记一个布尔量而不是排队 N 次：连续 10 次请求合并成「再跑一次」就够——
+ * 用户要的是最终状态正确，不是中间每一次都渲染一遍。
+ */
+let refreshQueued = false;
+
 /** 跨会话 UI 恢复标记：首次 loadTree 恢复上次选中，之后保留用户当前查看 */
 let uiRestored = false;
 
@@ -138,7 +146,21 @@ export const useBookmarkStore = create<BookmarkState>((set, get) => ({
   folderSelectTick: 0,
 
   async loadTree() {
-    if (get().loading) return;
+    /*
+     * 加载中又来了新的刷新请求：**记下来再跑一次**，而不是丢掉。
+     *
+     * 早先这里是 `if (get().loading) return;` —— 并发请求被静默吞掉，
+     * 于是「树还在加载时新建了一个书签」「点刷新按钮时恰好有一轮在跑」
+     * 这类情况界面会一直停在旧数据上，直到下一次有人触发刷新。
+     * 用户看到的就是"点了没反应 / 新书签不出现"。
+     *
+     * 大库上尤其明显：一次 getTree 在 1 万节点下要几百毫秒，
+     * 300ms 去抖后的下一次刷新正好落在窗口里。
+     */
+    if (get().loading) {
+      refreshQueued = true;
+      return;
+    }
     set({ loading: true, loadError: null });
     try {
       const tree = await chrome.bookmarks.getTree();
@@ -183,6 +205,15 @@ export const useBookmarkStore = create<BookmarkState>((set, get) => ({
       // 树加载失败：记录原因供 UI 显示重试，不再静默空白
       console.error('[bookmarkStore] loadTree 失败:', e);
       set({ loading: false, loadError: e instanceof Error ? e.message : String(e) });
+    } finally {
+      /*
+       * 消费排队的刷新。放在 finally 里，成功与失败都补跑——
+       * 失败后更应该有下一轮（用户点了重试，或变更事件又来了）。
+       */
+      if (refreshQueued) {
+        refreshQueued = false;
+        void get().loadTree();
+      }
     }
   },
 

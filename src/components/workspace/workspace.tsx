@@ -356,7 +356,9 @@ export function Workspace({
       {/* 主体三栏 */}
       <div className="relative flex min-h-0 flex-1">
         {mode === 'full' ? (
-          <BookmarkTree className="w-56 shrink-0 border-r border-border" />
+          <ErrorBoundary area="书签树" className="w-56 shrink-0">
+            <BookmarkTree className="h-full border-r border-border" />
+          </ErrorBoundary>
         ) : treeCollapsed ? (
           /* 收起态：只留一条 36px 的操作条，中栏拿回宽度 */
           <div className="animate-fade-in flex w-9 shrink-0 flex-col items-center border-r border-border bg-card pt-2">
@@ -384,10 +386,18 @@ export function Workspace({
               onClick={() => setTreeCollapsed(true)}
               aria-hidden="true"
             />
-            <BookmarkTree
-              collapsible
-              className="animate-fade-in absolute inset-y-0 left-0 z-30 w-52 border-r border-border bg-card shadow-lg"
-            />
+            {/*
+             * 树也要有自己的边界。
+             * 它的渲染直接消费 chrome.bookmarks 的返回形状——一次丢字段就足够让它抛错；
+             * 而它没有被边界包住时，抛错的后果是**整个工作区被卸载**（白屏），
+             * 连带列表和 Agent 面板一起消失。现在最坏情况只是"树这块坏了，其余照常"。
+             */}
+            <ErrorBoundary area="书签树" className="absolute inset-y-0 left-0 z-30 w-52">
+              <BookmarkTree
+                collapsible
+                className="animate-fade-in h-full border-r border-border bg-card shadow-lg"
+              />
+            </ErrorBoundary>
           </>
         )}
         {/* 一个面板渲染出错不该让整个工作区白屏：中栏与 Agent 面板各包一层边界 */}

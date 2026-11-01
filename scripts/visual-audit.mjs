@@ -401,16 +401,38 @@ async function main() {
       }
     }
 
-    // 4.5) 侧边栏 · 收起书签树（窄屏优先中栏）
+    /*
+     * 4.5) 侧边栏 · **展开**书签树。
+     *
+     * 原先这里拍的是"收起"，但紧凑模式下树**本来就是收起的**——
+     * 于是 09 和 04 是同一张图（sha256 完全相同，我逐张看的时候才发现）。
+     * 真正需要人眼确认的是相反的状态：430px 宽的侧边栏里，
+     * 208px 的树覆盖层会不会把中栏挤没、会不会溢出。
+     */
     if (want('sidepanel-collapsed')) {
       const sp2 = await openPage(`chrome-extension://${EXT_ID}/sidepanel.html`, { width: 430, height: 880 });
       await sp2.waitReady(`!!document.querySelector('header')`);
-      await sleep(600);
-      await sp2.ev(`(() => { const b = document.querySelector('button[aria-label="收起书签树"]'); if (b) b.click(); })()`).catch(() => {});
-      await sleep(400);
-      await sp2.shot('09-sidepanel-collapsed');
-      // 复原，避免影响真实使用与后续截图
-      await sp2.ev(`(() => { const b = document.querySelector('button[aria-label="展开书签树"]'); if (b) b.click(); })()`).catch(() => {});
+      await sleep(700);
+
+      const opened = await sp2.ev(`(() => {
+        const b = document.querySelector('button[aria-label="展开书签树"]');
+        if (!b) return false;
+        b.click();
+        return true;
+      })()`);
+      if (!opened) throw new Error('侧边栏里没有「展开书签树」按钮，拒绝产出错误截图');
+      await sleep(450);
+
+      // 断言树真的出来了、而且有实际宽度——否则就是又拍了一张假图
+      const shape = await sp2.ev(`(() => {
+        const t = document.querySelector('[role="tree"]');
+        if (!t) return { ok: false, reason: 'no-tree' };
+        const r = t.getBoundingClientRect();
+        return { ok: r.width > 120 && r.height > 100, width: Math.round(r.width), height: Math.round(r.height) };
+      })()`);
+      if (!shape.ok) throw new Error(`书签树没有展开（${JSON.stringify(shape)}），拒绝产出错误截图`);
+
+      await sp2.shot('09-sidepanel-tree-open');
     }
 
     // 5) 弹出窗

@@ -29,8 +29,24 @@ const STEPS: { title: string; body: string }[] = [
  * 只显示一次（写 `markai.hinted.workspaceTour`），跳过与看完都算看过。
  */
 export function OnboardingTip({ onGoOrganize }: { onGoOrganize?: () => void }) {
+  /*
+   * 告诉全局"底部有 40px 常驻条"。
+   *
+   * toast 是 `fixed bottom-4` 居中浮层，而这条引导条常驻在布局最底部，
+   * 两者必然重叠——实测（430px 侧边栏）引导条 top=717 h=40，
+   * toast 底边 741，重叠约 24px，正好盖住「整理记录在这里 1/3」那行字。
+   * 这里把条的高度写进 CSS 变量，toast 据此抬高；卸载时移除，不留残留。
+   */
   const [visible, setVisible] = useState(false);
   const [step, setStep] = useState(0);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    root.style.setProperty('--markai-bottom-bar', '2.5rem'); // 与下面 h-10 保持一致
+    return () => {
+      root.style.removeProperty('--markai-bottom-bar');
+    };
+  }, []);
 
   useEffect(() => {
     let alive = true;

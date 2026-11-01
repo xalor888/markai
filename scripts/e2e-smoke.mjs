@@ -606,6 +606,53 @@ async function run() {
     await sleep(200);
   }
 
+  /* ══════════ 9.47 底部 toast 不能压住常驻条 ══════════ */
+  console.log('\n[9.47] toast 与底部常驻条不重叠');
+  {
+    /*
+     * 回归：toast 是 `fixed bottom-4` 居中浮层，而新手引导条常驻在布局最底部。
+     * 实测（430px 侧边栏）：引导条 top=717 h=40，toast 底边 741 —— 重叠 24px，
+     * 正好盖住「整理记录在这里 1/3」那行字。
+     *
+     * 修法是让引导条把自身高度写进 CSS 变量 --markai-bottom-bar，toast 据此抬高。
+     * 这里断言：变量确实被设了，且 toast 的底边在常驻条之上。
+     */
+    await ev(`(async () => {
+      await chrome.storage.local.remove('markai.hinted.workspaceTour');
+      return true;
+    })()`);
+    await cdp.send('Page.reload', {}, sessionId);
+    await sleep(900);
+    await waitFor(async () => await ev(`!!document.querySelector('[role="note"][aria-label="新手提示"]')`), 5000);
+
+    const geo = await ev(`(() => {
+      const bar = document.querySelector('[role="note"][aria-label="新手提示"]');
+      if (!bar) return { ok: false, reason: 'no-bar' };
+      const toast = [...document.querySelectorAll('div')].find((d) => {
+        const cs = getComputedStyle(d);
+        return cs.position === 'fixed' && cs.zIndex === '100';
+      });
+      if (!toast) return { ok: false, reason: 'no-toast-container' };
+      const br = bar.getBoundingClientRect();
+      const cs = getComputedStyle(toast);
+      const offset = parseFloat(cs.bottom) || 0;
+      const toastBottomEdge = window.innerHeight - offset;
+      return {
+        ok: toastBottomEdge <= br.top + 0.5,
+        barTop: Math.round(br.top),
+        barHeight: Math.round(br.height),
+        cssVar: getComputedStyle(document.documentElement).getPropertyValue('--markai-bottom-bar').trim(),
+        toastBottomOffset: offset,
+        toastBottomEdge: Math.round(toastBottomEdge),
+      };
+    })()`);
+    check(
+      'toast 底边在底部常驻条之上（不再压住引导文字）',
+      geo.ok === true && geo.cssVar !== '' && geo.toastBottomOffset >= geo.barHeight,
+      JSON.stringify(geo),
+    );
+  }
+
   /* ══════════ 9.49 整理 → 撤销（最关键的安全路径） ══════════ */
   console.log('\n[9.49] 整理后一步撤销');
   {

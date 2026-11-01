@@ -13,7 +13,12 @@ export function ToastViewport() {
       aria-live="polite"
       /* 底部居中：原来在右上角，正好压住 Agent 面板的标题与头部按钮（截图里能看到）。
          底部是唯一没有常驻操作区的位置，也不挡顶栏与输入框。 */
-      className="pointer-events-none fixed bottom-4 left-1/2 z-[100] flex w-72 max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col gap-2"
+      /*
+       * `bottom-4 + --markai-bottom-bar`：底部有常驻条（新手引导 40px）时自动抬高，
+       * 没有时仍贴底 16px。早先写死 bottom-4，实测在 430px 侧边栏里
+       * 与引导条重叠约 24px，把「整理记录在这里 1/3」那行字盖住了。
+       */
+      className="pointer-events-none fixed bottom-[calc(1rem+var(--markai-bottom-bar,0px))] left-1/2 z-[100] flex w-72 max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col gap-2"
     >
       {toasts.map((t) => (
         <div

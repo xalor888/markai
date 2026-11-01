@@ -248,6 +248,7 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
 
   return (
     <Dialog
+      testId="organize-log"
       open={open}
       onOpenChange={onOpenChange}
       title="整理记录"

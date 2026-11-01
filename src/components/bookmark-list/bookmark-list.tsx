@@ -760,6 +760,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
             <div className={cn('relative', compact && 'w-[84px]')} title="排序">
               <ArrowDownUp className="pointer-events-none absolute top-1/2 left-1.5 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
               <select
+                data-testid="sort"
                 value={sortBy}
                 disabled={!browsing}
                 onChange={(e) => {
@@ -868,6 +869,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
       ) : (
       /* 列表（键盘可导航 + 接收树拖放） */
       <div
+        data-testid="list"
         ref={listRef}
         tabIndex={0}
         onKeyDown={onListKeyDown}
@@ -1126,6 +1128,7 @@ const BookmarkRow = memo(function BookmarkRow({
   useEffect(() => () => openLater.dispose(), [openLater]);
   return (
     <div
+      data-testid="row"
       data-index={index}
       role="listitem"
       aria-selected={selected}

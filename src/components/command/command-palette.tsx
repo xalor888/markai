@@ -147,6 +147,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     <div className="fixed inset-0 z-[60] flex items-start justify-center bg-foreground/20 px-4 pt-[12vh]" onClick={() => onOpenChange(false)}>
       <div
         role="dialog"
+        data-testid="command-palette"
         aria-modal="true"
         aria-label="命令面板"
         className="animate-fade-in w-full max-w-lg overflow-hidden rounded-lg border border-border bg-card shadow-xl"
@@ -200,6 +201,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
                     <button
                       key={item.id}
                       type="button"
+                      data-testid="command-item"
                       data-idx={idx}
                       onMouseEnter={() => setActive(idx)}
                       onClick={() => runItem(item)}

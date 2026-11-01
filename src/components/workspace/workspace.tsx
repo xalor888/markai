@@ -272,7 +272,7 @@ export function Workspace({
        * 整条顶栏一起滚动时，「整理 / AI 设置」会被推出去、必须横向滑动才够得到；
        * 而这两个是最常用的入口。所以把右侧按钮组拆出来 shrink-0，让它永远在视口内。
        */}
-      <header className="relative flex h-11 min-w-0 shrink-0 items-center gap-2 border-b border-border bg-card px-3">
+      <header data-testid="topbar" className="relative flex h-11 min-w-0 shrink-0 items-center gap-2 border-b border-border bg-card px-3">
         {/* 顶栏底部：品牌色淡出分隔线 */}
         <span className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-accent/40 via-border to-transparent" />
         <BrandMark />
@@ -288,6 +288,7 @@ export function Workspace({
           />
           <input
             id="markai-search"
+            data-testid="search"
             type="search"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}

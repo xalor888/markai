@@ -112,6 +112,7 @@ export function MoreMenu({
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label="更多"
+        data-testid="more-trigger"
         title="更多"
         className={cn(
           'relative flex h-7 w-7 items-center justify-center rounded-sm transition-colors hover:bg-muted',
@@ -127,6 +128,7 @@ export function MoreMenu({
       {open && (
         <div
           role="menu"
+          data-testid="more-menu"
           className="animate-fade-in absolute right-0 z-50 mt-1 w-52 overflow-hidden rounded-md border border-border bg-card py-1 shadow-lg"
         >
           {item(BookmarkPlus, '收藏当前页面', onSaveCurrentTab)}

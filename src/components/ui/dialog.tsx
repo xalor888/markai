@@ -16,6 +16,7 @@ export function Dialog({
   children,
   footer,
   width = 'w-[420px]',
+  testId,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -24,6 +25,8 @@ export function Dialog({
   children?: ReactNode;
   footer?: ReactNode;
   width?: string;
+  /** 稳定锚点：e2e 用它定位，不依赖文案（改文案不该让测试变红） */
+  testId?: string;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -78,6 +81,7 @@ export function Dialog({
       <div
         ref={panelRef}
         role="dialog"
+        data-testid={testId}
         aria-modal="true"
         aria-label={title}
         tabIndex={-1}

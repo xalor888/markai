@@ -544,6 +544,7 @@ const TreeRow = memo(function TreeRow({
 
   return (
     <div
+      data-testid="tree-node"
       data-node-id={node.id}
       role="treeitem"
       aria-expanded={isFolder ? expanded : undefined}

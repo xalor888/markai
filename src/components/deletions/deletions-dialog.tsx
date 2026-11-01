@@ -117,6 +117,7 @@ export function DeletionsDialog({ open, onOpenChange }: { open: boolean; onOpenC
 
   return (
     <Dialog
+      testId="deletions"
       open={open}
       onOpenChange={onOpenChange}
       title={`待删除清单（${pending.length} 项）`}

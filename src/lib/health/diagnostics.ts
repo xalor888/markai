@@ -1,4 +1,5 @@
 import { parseCustomHeaders } from '@/lib/ai/request-headers';
+import { isUsableUndoPoint } from '@/lib/undo/validate';
 import {
   SEVERITY_ORDER,
   type HealthReport,
@@ -40,21 +41,6 @@ function isHttpUrl(value: string): boolean {
 /** 撤销点数据是否是一个"看起来正常"的数组 */
 function asArray(value: unknown): unknown[] {
   return Array.isArray(value) ? value : [];
-}
-
-/** 单个撤销点结构校验：只认必要字段，多余字段不管 */
-function isUsableUndoPoint(value: unknown): boolean {
-  if (!value || typeof value !== 'object') return false;
-  const p = value as Record<string, unknown>;
-  if (typeof p.id !== 'string' || !p.id) return false;
-  if (typeof p.runId !== 'string') return false;
-  if (!Array.isArray(p.ops)) return false;
-  // 每个 op 至少要有一个已知 kind
-  return p.ops.every((op) => {
-    if (!op || typeof op !== 'object') return false;
-    const kind = (op as Record<string, unknown>).kind;
-    return kind === 'move' || kind === 'update' || kind === 'create' || kind === 'remove' || kind === 'sort';
-  });
 }
 
 /** 整理记录条目结构校验 */

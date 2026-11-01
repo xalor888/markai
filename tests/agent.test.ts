@@ -10739,6 +10739,96 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T108: 撤销点校验只有一份（否则会误删撤销历史） ══════════ */
+  console.log('\n[T108] 撤销点校验：白名单必须覆盖真实 kind');
+  {
+    /*
+     * 缺陷：健康检查与修复器各写了一份 isUsableUndoPoint，两份的 kind 白名单都是
+     * `move/update/create/remove/sort` —— 漏了真实的 `moveBatch` 与 `delete`，
+     * 还多写了不存在的 `remove`/`sort`。
+     *
+     * 后果不是"少报一次"：`dropCorruptUndo` 按这份判断**直接删点**，
+     * 含批量移动或删除的撤销点会被当成"损坏"清掉——用户的撤销历史就这么没了。
+     */
+    const { KNOWN_OP_KINDS, isUsableUndoPoint } = await import('../src/lib/undo/validate');
+
+    ok('白名单覆盖全部真实 kind（move / moveBatch / update / create / delete）', () => {
+      for (const k of ['move', 'moveBatch', 'update', 'create', 'delete']) {
+        assert.ok(KNOWN_OP_KINDS.includes(k as never), `白名单缺 ${k}`);
+      }
+    });
+
+    ok('含 moveBatch 的撤销点必须被认作完整（不能当坏点）', () => {
+      const point = {
+        id: 'p1',
+        runId: 'r1',
+        ops: [{ kind: 'moveBatch', ids: ['a', 'b'], fromParentId: '1', fromIndex: 0 }],
+      };
+      assert.equal(isUsableUndoPoint(point), true, '含 moveBatch 的点被误判为损坏');
+    });
+
+    ok('含 delete 的撤销点必须被认作完整（删除最需要撤销，绝不能丢）', () => {
+      const point = {
+        id: 'p2',
+        runId: 'r2',
+        ops: [{ kind: 'delete', id: 'x', title: 't', parentId: '1', index: 0, snapshot: { title: 't' } }],
+      };
+      assert.equal(isUsableUndoPoint(point), true, '含 delete 的点被误判为损坏');
+    });
+
+    ok('真正损坏的点仍然被认出来（不是把校验改成永远通过）', () => {
+      assert.equal(isUsableUndoPoint({ id: 'p', runId: 'r', ops: [{ kind: '不存在的类型' }] }), false);
+      assert.equal(isUsableUndoPoint({ id: 'p', ops: [] }), false, '缺 runId');
+      assert.equal(isUsableUndoPoint({ id: 'p', runId: 'r', ops: 'not-array' }), false);
+      assert.equal(isUsableUndoPoint(null), false);
+    });
+
+    await okA('修复器不会删掉含 moveBatch / delete 的撤销点（真实数据损失场景）', async () => {
+      storageMap.set('markai.undo', {
+        points: [
+          { id: 'good-move', runId: 'r1', ops: [{ kind: 'move', id: 'a', title: 't', fromParentId: '1', fromIndex: 0 }] },
+          { id: 'good-batch', runId: 'r2', ops: [{ kind: 'moveBatch', ids: ['x', 'y'], fromParentId: '1', fromIndex: 2 }] },
+          { id: 'good-del', runId: 'r3', ops: [{ kind: 'delete', id: 'd', title: 't', snapshot: { title: 't' } }] },
+          { id: 'bad', runId: 'r4', ops: [{ kind: '未知操作' }] },
+        ],
+        terminalRunIds: [],
+      });
+      const res = await runFix('undo.drop-corrupt');
+      assert.equal(res.ok, true, res.detail);
+      const after = storageMap.get('markai.undo') as { points: { id: string }[] };
+      const ids = after.points.map((p) => p.id).sort();
+      assert.deepEqual(
+        ids,
+        ['good-batch', 'good-del', 'good-move'],
+        `只该删掉真正损坏的那一条，实际留下 ${JSON.stringify(ids)}`,
+      );
+      storageMap.delete('markai.undo');
+    });
+
+    ok('诊断也不会把含 moveBatch / delete 的点报成"已损坏"', () => {
+      const report = diagnose({
+        configError: null,
+        config: { providerId: 'deepseek', baseUrl: 'https://x', apiKey: 'k', model: 'm', customHeaders: '' },
+        providerNeedsKey: true,
+        permissions: ['bookmarks', 'storage', 'sidePanel'],
+        undoPoints: [
+          { id: 'a', runId: 'r1', ops: [{ kind: 'moveBatch', ids: ['x'] }] },
+          { id: 'b', runId: 'r2', ops: [{ kind: 'delete', id: 'd', snapshot: {} }] },
+        ],
+        logEntries: [],
+        bookmarks: { total: 1, folders: 1, emptyFolders: 0, maxDepth: 1, orphaned: 0, duplicateNameGroups: 0 },
+        storageBytes: 0,
+        lastAiError: null,
+        crashCount: 0,
+      });
+      assert.equal(
+        report.issues.some((i) => i.id === 'undo.corrupt'),
+        false,
+        `不该报损坏，实际 ${JSON.stringify(report.issues.map((i) => i.id))}`,
+      );
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

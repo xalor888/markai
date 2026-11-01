@@ -1,6 +1,7 @@
 import { getPreset } from '@/lib/providers';
 import { parseCustomHeaders } from '@/lib/ai/request-headers';
 import { MAX_LOG_ENTRIES, MAX_UNDO_POINTS } from '@/lib/health/diagnostics';
+import { isUsableUndoPoint } from '@/lib/undo/validate';
 import type { FixAction } from '@/lib/health/types';
 
 /**
@@ -111,17 +112,6 @@ async function dropBadHeaders(): Promise<FixResult> {
 }
 
 /* ────────────────────────── 撤销点 ────────────────────────── */
-
-const KNOWN_OP_KINDS = new Set(['move', 'update', 'create', 'remove', 'sort']);
-
-function isUsableUndoPoint(value: unknown): boolean {
-  if (!value || typeof value !== 'object') return false;
-  const p = value as Dict;
-  if (typeof p.id !== 'string' || !p.id) return false;
-  if (typeof p.runId !== 'string') return false;
-  if (!Array.isArray(p.ops)) return false;
-  return p.ops.every((op) => !!op && typeof op === 'object' && KNOWN_OP_KINDS.has(String((op as Dict).kind)));
-}
 
 /** 清理结构损坏的撤销点（正常的点一条不动） */
 async function dropCorruptUndo(): Promise<FixResult> {

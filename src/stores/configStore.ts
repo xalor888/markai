@@ -26,6 +26,8 @@ export const DEFAULT_CONFIG: AIConfig = {
   autoOrganizeNew: true,
   // 自动整理允许调用 AI（关掉则只用本地规则，见 auto-organize.ts）
   autoOrganizeAi: true,
+  // 自定义请求头默认空（有些网关要求额外头，见 lib/ai/request-headers.ts）
+  customHeaders: '',
   configVersion: CONFIG_VERSION,
 };
 

@@ -444,182 +444,27 @@ export async function autoOrganizeBookmark(
       }
     }
 
-    // ③ 兜底：按注册域归类（走到这里时书签仍在根目录 / 自动整理容器内）
-    const domainFolder = findDomainFolder(folders, domain);
-    if (domainFolder) {
-      const targetNode = (await chrome.bookmarks.get(domainFolder.id).catch(() => [] as BNode[]))[0];
-      if (targetNode && !targetNode.url) {
-        const path = await moveInto(id, targetNode);
-        // target / runId / aiFailed 一个都不能少：
-        //  - target：面板要显示「→ 去了哪个文件夹」，否则用户只看到一句「已归入」
-        //  - runId：没有它这条记录就没有「↶ 撤销」按钮（用户不满意时无路可退）
-        //  - aiFailed：这条分支是**坏 Key 时最常见**的落点，漏了它冷却就永远不触发
-        return {
-          ok: true,
-          action: 'moved',
-          detail: `已归入「${path}」`,
-          target: path,
-          via: 'fallback',
-          ...(aiFailed ? { aiFailed: true } : {}),
-          ...(owner ? { runId: owner } : {}),
-        };
-      }
-    }
-    const container = await ensureFolder(rootId, AUTO_CONTAINER, folders);
-    // 容器下的站点文件夹本来就在 `folders` 里（它是整棵根目录子树的文件夹集合）；
-    // 原先为了看容器内又调了一次 getSubTree（1 万条时 200ms+），完全是重复劳动。
-    // 本批新建的文件夹也已通过 rememberFolder 同步进 folders。
-    const siteFolder = findDomainFolder(folders, domain, container.id);
-    rememberFolder(opts.context, container, rootId);
-    const folder =
-      siteFolder && siteFolder.id !== container.id
-        ? ((await chrome.bookmarks.get(siteFolder.id).catch(() => [] as BNode[]))[0] ??
-          (await jCreate({ parentId: container.id, title: domain })))
-        : await jCreate({ parentId: container.id, title: domain });
-    rememberFolder(opts.context, folder, rootId);
-    const path = await moveInto(id, folder);
-    // 同 ③ 的第一分支：这条也是坏 Key 时的高频落点，必须把 aiFailed 交给调用方，
-    // 否则「连续失败 3 次暂停 10 分钟」在「没有任何匹配分类的用户」身上永远不生效。
+    /*
+     * 什么都不成 → **留在原地，一个字都不动**。
+     *
+     * 这里原本还有一层「按注册域建 `自动整理/<域名>` 文件夹」的兜底，已经删除。
+     * 原因不是技术性的：那种文件夹用户从来没建过，是程序拿域名硬造出来的结构；
+     * 一旦书签被搬进去，用户就再也认不出自己原来的收藏夹长什么样了
+     * （实测反馈："它是那种按照域名分类的，但是我从来都没有用过这种方法"）。
+     *
+     * 「认不出就别动」比「造一个看起来整齐的新分类」更尊重用户的既有结构。
+     *
+     * `aiFailed` 仍然必须上报：坏 Key 时这条路径是高频落点，
+     * 漏了它「连续失败 3 次暂停 10 分钟」就永远不触发，用户会每次收藏白等十几秒。
+     */
     return {
       ok: true,
-      action: 'created',
-      detail: `已归入「${path}」`,
-      target: path,
-      via: 'fallback',
+      action: 'skipped',
+      detail: '没有匹配到你已有的分类，保持原位（不会为你新建按域名的文件夹）',
       ...(aiFailed ? { aiFailed: true } : {}),
-      ...(owner ? { runId: owner } : {}),
     };
   } catch (e) {
     return { ok: false, action: 'failed', detail: `自动整理失败：${e instanceof Error ? e.message : String(e)}` };
-  } finally {
-    if (owner) await endUndoTransaction(owner);
-  }
-}
-
-/* ────────────────────── 补整理：找出「散落」的书签 ────────────────────── */
-
-export interface SweepTarget {
-  id: string;
-  title: string;
-  url: string;
-  /** 所属根目录 id：批量整理按根复用上下文（避免每条都查一次整棵树） */
-  rootId: string;
-}
-
-/**
- * 收集需要补整理的书签：**散落在根目录下的**，以及**堆在「自动整理」容器里没进站点文件夹的**。
- *
- * 为什么只收这两类：用户自己的分类文件夹（「技术」「设计」）里的书签是用户放过的，
- * 补整理去动它们就是替他改结构——和自动整理「尊重既有分类」的原则一致。
- *
- * @param maxItems 单次上限：补整理会逐条走 AI，一次几百条会拖很久；超出部分让用户分批。
- * @param exclude 已经处理过的书签 id（补整理批处理用）。
- *   **必须在收集阶段就排除，而不是收集完再 filter**：否则「前 200 条都处理过」时，
- *   截断后的批次会被一个空 filter 清空，`break` 带走剩下的全部书签，且不给任何提示。
- */
-export function collectLooseBookmarksFromRoots(
-  roots: chrome.bookmarks.BookmarkTreeNode[],
-  maxItems = 200,
-  exclude?: ReadonlySet<string>,
-): SweepTarget[] {
-  const out: SweepTarget[] = [];
-  const push = (node: chrome.bookmarks.BookmarkTreeNode, rootId: string): boolean => {
-    if (out.length >= maxItems) return false;
-    if (!node.url || !/^https?:\/\//i.test(node.url)) return true;
-    if (exclude?.has(node.id)) return true;
-    out.push({ id: node.id, title: node.title || node.url, url: node.url, rootId });
-    return out.length < maxItems;
-  };
-  for (const root of roots) {
-    for (const child of root.children ?? []) {
-      if (child.url) {
-        if (!push(child, root.id)) return out;
-        continue;
-      }
-      // 「自动整理」容器里直接躺着的书签（没能归入站点文件夹的那些）
-      if ((child.title || '') === AUTO_CONTAINER) {
-        for (const grand of child.children ?? []) {
-          if (grand.url && !push(grand, root.id)) return out;
-        }
-      }
-    }
-  }
-  return out;
-}
-
-/**
- * `chrome.bookmarks.getTree()` 形态的便捷入口（`[根节点]`）。
- * 后台拿到的就是这种形态；UI 侧手里只有三个根文件夹，用 `collectLooseBookmarksFromRoots`。
- */
-export function collectLooseBookmarks(
-  tree: chrome.bookmarks.BookmarkTreeNode[],
-  maxItems = 200,
-  exclude?: ReadonlySet<string>,
-): SweepTarget[] {
-  return collectLooseBookmarksFromRoots(tree[0]?.children ?? [], maxItems, exclude);
-}
-
-/**
- * 把一条书签直接放进指定文件夹（批量整理时复用同域名的结论）。
- *
- * 为什么不复用 autoOrganizeBookmark：那条路径每次都要走完整决策（收集候选、可能问模型）。
- * 补整理几百条同域名书签时，第一条得出的结论对后面完全适用——把结论传下来即可。
- * 仍走同一套撤销事务，所以用户在整理记录里看到的那条照样能一步撤回。
- */
-export async function moveBookmarkInto(
-  bookmarkId: string,
-  folderId: string,
-  reason = '同站点已在上面归好类',
-  opts: {
-    context?: OrganizeContext;
-    /**
-     * 父目录顺序缓存（`parentId → 子项 id`）。
-     * 批量移动时每条都要「移动前下标」，默认实现会 `getChildren` 整个父目录——
-     * 1 万条书签在根目录时等于每条读 1 万项并线性查找，整体退化成 O(n²)
-     * （干净环境实测：3000 条 35s，1 万条 402s）。传进来就让调用方自己维护这份顺序。
-     */
-    orderCache?: Map<string, string[]>;
-  } = {},
-): Promise<AutoOrganizeResult> {
-  const nodes = await chrome.bookmarks.get(bookmarkId).catch(() => [] as BNode[]);
-  const node = nodes[0];
-  if (!node) return { ok: true, action: 'skipped', detail: '书签已不存在' };
-  if (!node.url || !/^https?:\/\//i.test(node.url)) return { ok: true, action: 'skipped', detail: '非网页书签' };
-  const target = (await chrome.bookmarks.get(folderId).catch(() => [] as BNode[]))[0];
-  if (!target || target.url) return { ok: false, action: 'failed', detail: '目标文件夹已不存在' };
-  if (node.parentId === folderId) return { ok: true, action: 'skipped', detail: `已在「${target.title}」中` };
-
-  // 取「移动前下标」：优先用调用方维护的本地顺序，避免每条都读整个父目录
-  let known: { fromParentId?: string; fromIndex?: number } | undefined;
-  const cache = opts.orderCache ?? opts.context?.order;
-  if (cache && node.parentId) {
-    let order = cache.get(node.parentId);
-    if (!order) {
-      const kids = await chrome.bookmarks.getChildren(node.parentId).catch(() => [] as BNode[]);
-      order = kids.map((k) => k.id);
-      cache.set(node.parentId, order);
-    }
-    const idx = order.indexOf(bookmarkId);
-    if (idx >= 0) {
-      known = { fromParentId: node.parentId, fromIndex: idx };
-      order.splice(idx, 1);
-    }
-  }
-
-  const owner = isRecording() ? null : `auto-organize:${bookmarkId}`;
-  if (owner) await beginUndoTransaction(owner);
-  try {
-    await jMove(bookmarkId, { parentId: folderId }, known);
-    const path = target.title || '(未命名)';
-    return {
-      ok: true,
-      action: 'moved',
-      detail: `已归入「${path}」（${reason}）`,
-      target: path,
-      ...(owner ? { runId: owner } : {}),
-    };
-  } catch (e) {
-    return { ok: false, action: 'failed', detail: `归入失败：${e instanceof Error ? e.message : String(e)}` };
   } finally {
     if (owner) await endUndoTransaction(owner);
   }

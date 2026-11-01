@@ -57,21 +57,24 @@ export function OnboardingTip({ onGoOrganize }: { onGoOrganize?: () => void }) {
   const isLast = step === STEPS.length - 1;
 
   return (
+    /*
+     * 40px 单行。重做前它是中栏底部一条 200px 高的"说明书"：占着主内容区、
+     * 两行正文、还带"下一步 →"，一屏里同时压着列表和聊天两处内容。
+     * 现在只占一行，正文收进 title（悬停可读），点「知道了」永久消失。
+     */
     <div
       role="note"
       aria-label="新手提示"
-      className="animate-fade-in flex shrink-0 items-start gap-2.5 border-t border-border bg-accent-muted/50 px-3 py-2"
+      title={current.body}
+      className="animate-fade-in flex h-10 shrink-0 items-center gap-2 border-t border-border bg-accent-muted/50 px-3"
     >
-      <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent" aria-hidden="true" />
-      <div className="min-w-0 flex-1">
-        <p className="text-xs font-medium text-foreground">
-          {current.title}
-          <span className="ml-1.5 text-2xs font-normal text-muted-foreground/70">
-            {step + 1}/{STEPS.length}
-          </span>
-        </p>
-        <p className="mt-0.5 text-2xs leading-4 text-muted-foreground">{current.body}</p>
-      </div>
+      <Sparkles className="h-3.5 w-3.5 shrink-0 text-accent" aria-hidden="true" />
+      <p className="min-w-0 flex-1 truncate text-xs text-foreground">
+        {current.title}
+        <span className="ml-1.5 text-2xs text-muted-foreground/70">
+          {step + 1}/{STEPS.length}
+        </span>
+      </p>
       <div className="flex shrink-0 items-center gap-1">
         {onGoOrganize && isLast && (
           <button

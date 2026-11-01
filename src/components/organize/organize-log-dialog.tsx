@@ -14,9 +14,7 @@ import {
 } from 'lucide-react';
 import {
   buildOrganizeLogMarkdown,
-  estimateRemainingMs,
   filterOrganizeLog,
-  formatRemaining,
   groupByTarget,
   ORGANIZE_LOG_KEY,
   pickRetryableEntries,
@@ -24,8 +22,6 @@ import {
   type OrganizeStats,
 } from '@/lib/ai/organize-log';
 import { ORGANIZE_OPTOUT_KEY, type OptOutEntry } from '@/lib/ai/organize-optout';
-import { collectLooseBookmarksFromRoots } from '@/lib/ai/auto-organize';
-import { useBookmarkStore } from '@/stores/bookmarkStore';
 import { formatIsoDate, formatRelativeTime, getHost } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { pushToast } from '@/lib/toast';
@@ -59,42 +55,6 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
   const [query, setQuery] = useState('');
   /** 被用户「叫停」的站点：撤销过一次自动整理就会进来 */
   const [optouts, setOptouts] = useState<OptOutEntry[]>([]);
-  /* 面板打开时问一次后台：如果补整理还在跑，把进度接回来。
-   * `sweeping` 是组件 state，关掉对话框就没了——用户点了「开始」去干别的、
-   * 再打开时看不到进度，会以为没在跑又点一次（然后被告知「正在进行中」）。 */
-  useEffect(() => {
-    if (!open) return;
-    let alive = true;
-    void chrome.runtime
-      .sendMessage({ type: 'organize:sweep:status' })
-      .then((res) => {
-        if (!alive) return;
-        const r = res as { type?: string; running?: boolean; done?: number; total?: number; moved?: number; failed?: number } | undefined;
-        if (r?.type === 'organize:sweep:status:result' && r.running && typeof r.total === 'number') {
-          setSweeping({ done: r.done ?? 0, total: r.total, moved: r.moved ?? 0, failed: r.failed ?? 0 });
-        }
-      })
-      .catch(() => {});
-    return () => {
-      alive = false;
-    };
-  }, [open]);
-
-  const [sweeping, setSweeping] = useState<{
-    done: number;
-    total: number;
-    moved: number;
-    failed: number;
-    /** 当前正在判定的书签标题：几百条时要让用户看出「它在动，不是卡住」 */
-    current?: string;
-  } | null>(null);
-  /** 最近一次收到进度的时间：用来判断「它是不是已经不动了」 */
-  const sweepTickRef = useRef(0);
-  /** 补整理开始的时间（算剩余时间用） */
-  const sweepStartRef = useRef(0);
-  /** 定期重算 ETA 用的节拍（否则只有收到进度时才会重渲染） */
-  const [etaTick, setEtaTick] = useState(0);
-
   const refresh = useCallback(async (opts: { silent?: boolean } = {}) => {
     if (!opts.silent) setLoading(true);
     try {
@@ -150,104 +110,6 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
     if (open) void refresh();
   }, [open, refresh]);
 
-  // 补整理进度：逐条广播，边跑边显示，不必等全部结束
-  useEffect(() => {
-    if (!open) return;
-    const onMessage = (msg: {
-      type?: string;
-      done?: number;
-      total?: number;
-      moved?: number;
-      failed?: number;
-      cancelled?: boolean;
-      current?: string;
-    }) => {
-      if (msg?.type === 'markai:sweep-progress') {
-        sweepTickRef.current = Date.now();
-        if (!sweepStartRef.current) sweepStartRef.current = Date.now();
-        setSweeping({
-          done: msg.done ?? 0,
-          total: msg.total ?? 0,
-          moved: msg.moved ?? 0,
-          failed: msg.failed ?? 0,
-          ...(msg.current ? { current: msg.current } : {}),
-        });
-      } else if (msg?.type === 'markai:sweep-done') {
-        setSweeping(null);
-        const cancelled = msg.cancelled === true;
-        pushToast(cancelled ? '补整理已取消' : `补整理完成：归入 ${msg.moved ?? 0} 条`, {
-          description: cancelled
-            ? `已处理 ${msg.done ?? 0}/${msg.total ?? 0} 条，归入 ${msg.moved ?? 0} 条。`
-            : (msg.failed ?? 0) > 0
-              ? `${msg.failed} 条失败了，可在列表里逐条重试。`
-              : undefined,
-          variant: (msg.failed ?? 0) > 0 && !cancelled ? 'default' : cancelled ? 'default' : 'success',
-        });
-        void refresh();
-        /* 补整理期间书签刷新是退避的（连续变更时拉到 1.2s），结束时这里补一次立即刷新，
-         * 保证树显示的是终态而不是「还差几条」的中间样子。 */
-        void useBookmarkStore.getState().loadTree();
-      }
-    };
-    chrome.runtime.onMessage.addListener(onMessage);
-    return () => chrome.runtime.onMessage.removeListener(onMessage);
-  }, [open, refresh]);
-
-  const cancelSweep = async () => {
-    try {
-      await chrome.runtime.sendMessage({ type: 'organize:sweep:cancel' });
-    } catch {
-      /* 后台不可达时，进度广播自然也会停；这里不额外打扰 */
-    }
-  };
-
-  /**
-   * 补整理的看门狗：进度广播是唯一的「它还活着」信号。
-   * Service Worker 被浏览器回收、系统休眠都会让广播突然停掉——此时按钮会永远停在
-   * 「取消 + 正在处理」，用户只能关掉对话框再猜。这里如实收尾并说明可以重来
-   * （已处理的书签已归位，重跑只会处理剩下的，不会重复搬）。
-   */
-  useEffect(() => {
-    if (!sweeping) return;
-    sweepTickRef.current = Date.now();
-    const timer = setInterval(() => {
-      // 每 5 秒推一下状态：既让 ETA 走起来，也顺便做「是否已经不动了」的判断
-      setEtaTick((n) => n + 1);
-      if (Date.now() - sweepTickRef.current < 45_000) return;
-      setSweeping(null);
-      pushToast('补整理似乎中断了', {
-        description: '45 秒没有收到进度（后台可能被浏览器回收或电脑休眠）。可以再点一次「开始」，已归位的不受影响。',
-        variant: 'destructive',
-      });
-    }, 5_000);
-    return () => clearInterval(timer);
-  }, [sweeping]);
-
-  const startSweep = async () => {
-    try {
-      const res = (await chrome.runtime.sendMessage({ type: 'organize:sweep' })) as
-        | { type?: string; started?: boolean; count?: number; detail?: string }
-        | undefined;
-      if (res?.type !== 'organize:sweep:result') {
-        pushToast('补整理没有启动', { description: '后台未响应，请稍后再试。', variant: 'destructive' });
-        return;
-      }
-      if (!res.started) {
-        // 后台的三种「没启动」不是同一件事：正在跑 / 没有可整理的 / 读取失败。
-        // 一律写成「没有需要补整理的书签」会让「正在进行中，请稍候」变成一句自相矛盾的错话。
-        const detail = res.detail ?? '';
-        const running = detail.includes('正在进行中');
-        pushToast(running ? '补整理已在运行' : '补整理没有启动', { description: detail || undefined });
-        return;
-      }
-      sweepTickRef.current = Date.now();
-      sweepStartRef.current = Date.now();
-      setSweeping({ done: 0, total: res.count ?? 0, moved: 0, failed: 0 });
-      pushToast('开始补整理', { description: res.detail });
-    } catch {
-      pushToast('补整理没有启动', { description: '无法联系后台进程。', variant: 'destructive' });
-    }
-  };
 
   const retryOne = async (entry: OrganizeLogEntry) => {
     setRetrying(entry.id);
@@ -357,20 +219,6 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
     }
   };
 
-  /** 剩余时间：每 5 秒随看门狗重算一次（etaTick 变化触发），进度推进时也会重算 */
-  const sweepEta = useMemo(() => {
-    if (!sweeping || sweeping.done <= 0) return '';
-    return formatRemaining(
-      estimateRemainingMs({
-        done: sweeping.done,
-        total: sweeping.total,
-        startedAt: sweepStartRef.current,
-        now: Date.now(),
-      }),
-    );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sweeping?.done, sweeping?.total, etaTick]);
-
   const clearAll = async () => {
     try {
       await chrome.runtime.sendMessage({ type: 'organize:clear' });
@@ -390,19 +238,6 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
 
   // 聚合跟随当前视图：切到「只看失败」时，「归到」自然为空——
   // 失败记录没有去向，继续显示全量聚合会让人以为列表里那些成功记录还在
-  /* 待整理条数：点「开始」之前就该知道规模。散落书签是纯函数能算的，不必问后台。 */
-  const roots = useBookmarkStore((s) => s.roots);
-  /*
-   * 待整理条数：点「开始」之前就该知道规模。散落书签是纯函数能算的，不必问后台。
-   *
-   * 这里拿到的 `roots` 是**三个根文件夹**（书签栏 / 其他书签 / 移动设备），
-   * 不是 `getTree()` 那种 `[根节点]` 形态——必须走 `...FromRoots`。
-   * 之前错传了 `collectLooseBookmarks`（它内部读 `tree[0].children`），
-   * 于是一个 1 条散落书签都没有的库会显示「检测到 0 条」，
-   * 而真有一堆时数字指向的却是「书签栏里某个子文件夹里的书签」，和后台实际处理的对不上。
-   */
-  const looseCount = useMemo(() => collectLooseBookmarksFromRoots(roots, 100_000).length, [roots]);
-
   const targetGroups = groupByTarget(visibleEntries);
   const topTargets = targetGroups.slice(0, 3);
   const restTargets = targetGroups.length - topTargets.length;
@@ -416,7 +251,7 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
       open={open}
       onOpenChange={onOpenChange}
       title="整理记录"
-      description="MarkAI 自动整理新书签时做了什么、去了哪里，都在这里。失败可以重试，也可以把已有的散落书签补整理一遍。"
+      description="MarkAI 把新书签归到哪个文件夹、为什么，都在这里。失败可以重试，不满意能一步撤销。"
       width="w-[520px]"
       footer={
         <Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>
@@ -535,44 +370,6 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
           )}
         </div>
       )}
-
-      {/* 补整理：把「已经在收藏夹里、但还散着」的也收一遍 */}
-      <div className="mb-3 flex items-start gap-2 rounded-md border border-border bg-muted/40 px-3 py-2">
-        <Wand2 className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent" aria-hidden="true" />
-        <div className="min-w-0 flex-1">
-          <p className="text-xs text-foreground">补整理已有书签</p>
-          <p className="text-2xs leading-4 text-muted-foreground">
-            {sweeping
-              ? `正在处理 ${sweeping.done}/${sweeping.total} · 已归入 ${sweeping.moved}${
-                  sweeping.failed > 0 ? ` · 失败 ${sweeping.failed}` : ''
-                }${sweepEta ? ` · 还需${sweepEta}` : ''}`
-              : looseCount > 0
-                ? `检测到 ${looseCount} 条散落在根目录的书签。只处理它们，你手动搭好的分类不会被动。`
-                : '只处理散落在根目录里的书签，你手动搭好的分类不会被动。'}
-          </p>
-          {sweeping?.current && (
-            <p className="mt-0.5 truncate text-2xs text-muted-foreground/70" title={sweeping.current}>
-              当前：{sweeping.current}
-            </p>
-          )}
-        </div>
-        {sweeping ? (
-          <Button
-            variant="outline"
-            size="sm"
-            className="h-7 shrink-0 gap-1 px-2 text-2xs text-destructive"
-            onClick={() => void cancelSweep()}
-            title="停止补整理（已处理的下一条之前生效）"
-          >
-            <Loader2 className="h-3 w-3 animate-spin" />
-            取消
-          </Button>
-        ) : (
-          <Button variant="outline" size="sm" className="h-7 shrink-0 gap-1 px-2 text-2xs" onClick={() => void startSweep()}>
-            开始
-          </Button>
-        )}
-      </div>
 
       {notice && (
         <p className="mb-2 flex items-start gap-1.5 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-2 text-2xs leading-4 text-destructive">

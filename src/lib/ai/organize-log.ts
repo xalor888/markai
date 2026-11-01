@@ -271,36 +271,6 @@ export function decorateOrganizeDetail(
   return parts.filter(Boolean).join(' · ');
 }
 
-/**
- * 估算补整理「还剩多久」（纯函数，便于单测）。
- *
- * 几百上千条时进度条只会「慢慢涨」；给出时间预期，用户才能决定是等还是去干别的。
- * 返回 null 表示样本不足（还没处理完一条时，任何估算都是瞎猜）。
- */
-export function estimateRemainingMs(opts: {
-  done: number;
-  total: number;
-  startedAt: number;
-  now: number;
-}): number | null {
-  const { done, total, startedAt, now } = opts;
-  if (!Number.isFinite(done) || done <= 0) return null;
-  if (!Number.isFinite(total) || total <= 0) return null;
-  if (done >= total) return 0;
-  const elapsed = Math.max(0, now - startedAt);
-  if (elapsed <= 0) return null;
-  return Math.round((elapsed / done) * (total - done));
-}
-
-/** 把毫秒渲染成人话：「约 3 分钟」「约 1 分钟」「不到 1 分钟」 */
-export function formatRemaining(ms: number | null): string {
-  if (ms === null) return '';
-  if (ms <= 0) return '即将完成';
-  if (ms < 60_000) return '不到 1 分钟';
-  const minutes = Math.round(ms / 60_000);
-  return `约 ${minutes} 分钟`;
-}
-
 /** 本地时间 `YYYY-MM-DD HH:mm`（导出文件要人能读，不用 ISO 的 T/Z） */
 function localStamp(ms: number): string {
   const d = new Date(ms);

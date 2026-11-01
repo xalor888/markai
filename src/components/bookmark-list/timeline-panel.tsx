@@ -1,7 +1,6 @@
 import { ArrowDown, ArrowLeft, ArrowUp, Clock, ExternalLink, LocateFixed, Search, X } from 'lucide-react';
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from 'react';
 import { useBookmarkStore } from '@/stores/bookmarkStore';
-import { useUIStore } from '@/stores/uiStore';
 import { filterTimeline, flattenBookmarks, groupByDay, pageGroups, sortTimeline, type TimelineItem, type TimelineOrder } from '@/lib/bookmarks/timeline';
 import { formatRelativeTime, getHost } from '@/lib/format';
 import { openUrl } from '@/lib/open-url';
@@ -29,8 +28,8 @@ function clockOf(ms: number): string {
 export function TimelinePanel({ className }: { className?: string }) {
   const roots = useBookmarkStore((s) => s.roots);
   const setContextMenu = useBookmarkStore((s) => s.setContextMenu);
-  const setMainView = useUIStore((s) => s.setMainView);
-  const [query, setQuery] = useState('');
+  // 与顶栏那个唯一的搜索框共用同一个词（重做前这里还有第二个输入框）
+  const query = useBookmarkStore((s) => s.searchQuery);
   const [order, setOrder] = useState<TimelineOrder>('newest');
   const [limit, setLimit] = useState(PAGE_SIZE);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -73,19 +72,18 @@ export function TimelinePanel({ className }: { className?: string }) {
       const typing = !!el?.closest('input, textarea, select');
       if (e.key === 'Escape') {
         if (typing) {
-          setQuery('');
+          useBookmarkStore.getState().setSearchQuery('');
           (el as HTMLInputElement | null)?.blur();
-        } else {
-          setMainView('list');
         }
       } else if (e.key === '/' && !typing && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        // 搜索框已经搬到顶栏，这里聚焦的是那一个
         e.preventDefault();
-        searchRef.current?.focus();
+        document.getElementById('markai-search')?.focus();
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [setMainView]);
+  }, []);
 
   const openRow = useCallback((item: TimelineItem) => {
     void openUrl(item.url);
@@ -104,16 +102,6 @@ export function TimelinePanel({ className }: { className?: string }) {
     <div className={cn('animate-fade-in flex h-full min-h-0 min-w-0 flex-col bg-background', className)}>
       {/* 工具栏：入口说明 + 排序 + 过滤 */}
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-2.5">
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => setMainView('list')}
-          title="返回文件夹列表"
-          aria-label="返回文件夹列表"
-          className="h-7 w-7 shrink-0"
-        >
-          <ArrowLeft className="h-3.5 w-3.5" />
-        </Button>
         <Clock className="h-3.5 w-3.5 shrink-0 text-accent/70" />
         <span className="shrink-0 text-xs font-medium text-foreground">时间线</span>
         <span className="shrink-0 text-2xs text-muted-foreground/70">{all.length} 条书签</span>
@@ -129,27 +117,9 @@ export function TimelinePanel({ className }: { className?: string }) {
             {order === 'newest' ? <ArrowDown className="h-3 w-3" /> : <ArrowUp className="h-3 w-3" />}
             {order === 'newest' ? '最新' : '最早'}
           </button>
-          <div className="relative min-w-0">
-            <Search className="absolute top-1/2 left-2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              ref={searchRef}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="过滤时间线…"
-              aria-label="过滤时间线"
-              className="h-7 w-28 pl-6 pr-6 text-xs sm:w-36"
-            />
-            {query && (
-              <button
-                type="button"
-                onClick={() => setQuery('')}
-                className="absolute top-1/2 right-1.5 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
-                aria-label="清除过滤"
-              >
-                <X className="h-3 w-3" />
-              </button>
-            )}
-          </div>
+          <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
+            共 {sorted.length} 条
+          </span>
         </div>
       </div>
 
@@ -161,15 +131,15 @@ export function TimelinePanel({ className }: { className?: string }) {
             <p className="text-2xs leading-4 text-muted-foreground/70">
               收藏任意页面后，它会按收藏时间出现在这里。
             </p>
-            <Button variant="outline" size="sm" className="mt-1" onClick={() => setMainView('list')}>
-              去收藏夹看看
-            </Button>
+            <p className="text-2xs leading-4 text-muted-foreground/70">
+              （在顶栏搜索框里输入可以过滤）
+            </p>
           </div>
         ) : sorted.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-2 px-5 text-center">
             <Search className="h-5 w-5 text-muted-foreground/40" />
             <p className="text-xs text-muted-foreground">没有匹配「{query.trim()}」的书签</p>
-            <button type="button" onClick={() => setQuery('')} className="text-2xs text-accent hover:underline">
+            <button type="button" onClick={() => useBookmarkStore.getState().setSearchQuery('')} className="text-2xs text-accent hover:underline">
               清除过滤
             </button>
           </div>
@@ -220,7 +190,7 @@ const TimelineRow = memo(function TimelineRow({
   const host = getHost(item.url);
   return (
     <div
-      role="button"
+      role="listitem"
       tabIndex={0}
       onClick={() => onOpen(item)}
       onKeyDown={(e) => {
@@ -252,8 +222,9 @@ const TimelineRow = memo(function TimelineRow({
         onClick={(e) => {
           e.preventDefault();
           e.stopPropagation();
+          // 时间线现在是列表的一种排序，不再有「切回列表」这回事：
+          // 定位就是让书签树展开并高亮到那个节点
           useBookmarkStore.getState().revealInTree(item.id);
-          useUIStore.getState().setMainView('list');
         }}
         className="shrink-0 rounded-sm p-1 text-muted-foreground/50 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-card hover:text-foreground focus-visible:opacity-100"
         title="在文件夹中定位"

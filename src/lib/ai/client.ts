@@ -2,6 +2,7 @@
 
 import { normalizeBaseUrl } from '../providers';
 import { createSseAccumulator, finalizeToolCalls, type StreamToolCall } from './stream';
+import { buildRequestHeaders, getStableSessionId } from './request-headers';
 import type { AIConfig } from './types';
 
 /** AI 请求错误（携带用户可读的中文信息） */
@@ -140,6 +141,22 @@ class ActivityWatchdog {
 }
 
 /**
+ * 装配请求头（三处请求共用：流式 / 非流式降级 / 连接测试）。
+ *
+ * 为什么必须共用：原先 `chatCompletion` 与 `testConnection` 各写一遍
+ * `{ 'Content-Type' } + Authorization`，于是加了自定义请求头之后必然出现
+ * 「聊天能通、点测试连接报 400」的错位——两条路径的请求头不是同一个来源。
+ * 现在只要改这一处，三条路径一起变。
+ *
+ * 会话头只在预设确实要求时才去读 storage（`getStableSessionId` 要动 storage，
+ * 对 OpenAI/DeepSeek 这类不需要的预设没必要付这个代价）。
+ */
+async function makeHeaders(config: AIConfig): Promise<Record<string, string>> {
+  const sessionId = config.sessionHeader ? await getStableSessionId() : undefined;
+  return buildRequestHeaders(config, sessionId);
+}
+
+/**
  * 发送一轮 chat completion（优先流式，失败自动降级非流式重试一次；
  * 可恢复错误（网络/5xx/429/超时/传输中断）自动重连最多 MAX_RETRIES 次，指数退避）。
  * 所有网络请求都经由 background Service Worker 发出，无 CORS 限制。
@@ -156,8 +173,7 @@ export async function chatCompletion(
   if (!config.model) throw new ChatError('模型未配置，请先在设置页选择模型。');
 
   const url = `${baseUrl}/chat/completions`;
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
+  const headers = await makeHeaders(config);
 
   // 追踪"已投递给 UI 的内容"：重试前必须让 UI 作废它，否则两段回复会拼在一起
   let hasOutput = false;
@@ -373,8 +389,7 @@ export async function testConnection(config: AIConfig): Promise<{ ok: boolean; m
   if (!baseUrl) return { ok: false, message: '请先填写 Base URL。' };
   if (!config.model) return { ok: false, message: '请先填写模型名称。' };
 
-  const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-  if (config.apiKey) headers.Authorization = `Bearer ${config.apiKey}`;
+  const headers = await makeHeaders(config);
 
   const ctrl = new AbortController();
   const timeout = setTimeout(() => ctrl.abort(), 20_000);

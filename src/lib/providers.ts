@@ -11,6 +11,15 @@ export interface ProviderPreset {
   defaultModel: string;
   /** 是否需要 API Key */
   needsKey: boolean;
+  /**
+   * 该服务强制要求的**会话头名**（值是稳定会话 ID，运行时注入）。
+   *
+   * 只放头名、不放值：值是每台安装一个的稳定 ID，见 `getStableSessionId()`。
+   * 缺这个头会直接 400，且错误文案完全不像"配置问题"
+   * （「missing x-opencode-session and cannot be routed efficiently」），
+   * 所以选中预设时自动带上，而不是让用户自己去猜要配什么头。
+   */
+  sessionHeader?: string;
 }
 
 export const PROVIDERS: ProviderPreset[] = [
@@ -55,6 +64,24 @@ export const PROVIDERS: ProviderPreset[] = [
     models: ['qwen3:32b', 'qwen3:14b', 'qwen3:8b', 'gemma3:27b', 'llama3.3:70b', 'deepseek-r1:8b'],
     defaultModel: 'qwen3:8b',
     needsKey: false,
+  },
+  {
+    id: 'opencode-go',
+    name: 'OpenCode Go',
+    /*
+     * OpenCode Go 的 OpenAI 兼容端点。2026-09-06 起它**强制**要求
+     * `x-opencode-session`（值：每会话稳定的 ID），缺失直接 400：
+     *
+     *   Request is missing x-opencode-session and cannot be routed efficiently.
+     *
+     * 这里的 models 留空是刻意的：Go 计划的可用模型随订阅与官方调整变化，
+     * 与其写一份必然过期的清单，不如让用户点「获取模型列表」实时拉（GET /models）。
+     */
+    baseUrl: 'https://opencode.ai/zen/go/v1',
+    models: [],
+    defaultModel: '',
+    needsKey: true,
+    sessionHeader: 'x-opencode-session',
   },
   {
     id: 'custom',
@@ -204,6 +231,14 @@ export function resolveConfig(saved?: Partial<AIConfig> | null): AIConfig {
     // ⚠️ 这里是**白名单**：新增的配置字段必须同时加进来，否则 UI 存进去了、
     // 后台读出来却被丢掉——设置看起来生效了，实际仍是默认值（T81 就是踩了这个坑）。
     autoOrganizeAi: saved?.autoOrganizeAi ?? true,
+    // 自定义请求头：原样透传（解析与校验在 request-headers.ts，读的时候不拦）
+    customHeaders: saved?.customHeaders ?? '',
+    /*
+     * 会话头名**总是由预设决定**，不读用户存的值：
+     * 它不是一个可配置项，而是"这个服务商要求什么"的事实。用户从 OpenCode Go 切到
+     * DeepSeek 后，如果还带着 x-opencode-session，就会往一个不认它的端点发无意义的头。
+     */
+    ...(preset?.sessionHeader ? { sessionHeader: preset.sessionHeader } : {}),
     configVersion: CONFIG_VERSION,
   };
 }

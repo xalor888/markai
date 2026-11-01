@@ -28,17 +28,15 @@ import { z } from 'zod';
 import { flattenBookmarks, sortTimeline, groupByDay, filterTimeline, dayLabel, pageGroups } from '../src/lib/bookmarks/timeline';
 import { registrableDomain } from '../src/lib/bookmarks/domain';
 import { createDelayedOpen } from '../src/lib/bookmarks/delayed-open';
+import { buildRequestHeaders, getStableSessionId, parseCustomHeaders } from '../src/lib/ai/request-headers';
+import { groupCommands, SCORE, scoreItem, searchCommands, type CommandItem } from '../src/lib/command/search';
 import { CHAT_WIDTH_MAX, CHAT_WIDTH_MAX_COMPACT, CHAT_WIDTH_MIN, clampChatWidth } from '../src/lib/chat-width';
 import {
   AI_COOLDOWN_MS,
   AI_FAIL_STREAK_LIMIT,
   autoOrganizeBookmark,
   collectFolderOptions,
-  collectLooseBookmarks,
-  collectLooseBookmarksFromRoots,
   nextAiStreakState,
-  moveBookmarkInto,
-  findDomainFolder,
   findFolderByTitle,
   parseOrganizeReply,
   AUTO_CONTAINER,
@@ -58,9 +56,7 @@ import {
   clearOrganizeLog,
   buildOrganizeLogMarkdown,
   decorateOrganizeDetail,
-  estimateRemainingMs,
   filterOrganizeLog,
-  formatRemaining,
   groupByTarget,
   pickRetryableEntries,
   updateOrganizeLogEntry,
@@ -8095,9 +8091,6 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.equal(folders.find((f) => f.id === '1')!.depth, 0);
       assert.equal(folders.find((f) => f.id === 'fb')!.path, '书签栏 / 技术 / github.com');
     });
-    ok('同名域名文件夹：优先取最浅的一层', () => {
-      assert.equal(findDomainFolder(folders, 'GitHub.com')!.id, 'fc');
-    });
     ok('按父级限定查找：只在指定容器下复用', () => {
       assert.equal(findFolderByTitle(folders, 'github.com', 'fa')!.id, 'fb');
       assert.equal(findFolderByTitle(folders, '不存在的名字', '1'), null);
@@ -8125,21 +8118,25 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       url: 'https://docs.example-unique.com/guide',
     });
     const res = await autoOrganizeBookmark(created.id);
-    ok('未配置 AI 时按域名归类到「自动整理 / <domain>」', () => {
+    /*
+     * 契约在 0.2.35 变了：认不出归属时**留在原地**，不再建 `自动整理/<域名>`。
+     * 理由是用户的真实反馈——那种文件夹是程序按域名硬造的，用户从没建过；
+     * 书签一旦被搬进去，就再也认不出自己原来的收藏夹结构了。
+     */
+    ok('未配置 AI 且无匹配分类时：留在原地，不建任何域名文件夹', () => {
       assert.equal(res.ok, true, res.detail);
-      assert.ok(res.action === 'created' || res.action === 'moved', res.detail);
-      const node = nodeById(created.id)!;
-      const site = nodeById(node.parentId!)!;
-      assert.equal(site.title, 'example-unique.com');
-      assert.equal(site.url, undefined, '归入的是文件夹而不是另一个书签');
-      const container = nodeById(site.parentId!)!;
-      assert.equal(container.title, AUTO_CONTAINER);
-      assert.equal(container.parentId, '1', '容器放在书签所在根目录下，不跨根搬家');
+      assert.equal(res.action, 'skipped', `不该动它，实际 ${res.action}: ${res.detail}`);
+      assert.match(res.detail, /保持原位/);
+      assert.equal(nodeById(created.id)!.parentId, '1', '书签必须还在原来的位置');
+      const container = store.find((n) => n.title === AUTO_CONTAINER);
+      assert.equal(container, undefined, '不该创建「自动整理」容器');
+      const domainFolder = store.find((n) => n.title === 'example-unique.com');
+      assert.equal(domainFolder, undefined, '不该创建按域名的文件夹');
     });
     const again = await autoOrganizeBookmark(created.id);
-    ok('已经在站点文件夹里：重复触发不会二次搬动（幂等）', () => {
+    ok('重复触发不会二次搬动（幂等）', () => {
       assert.equal(again.action, 'skipped');
-      assert.ok(again.detail.includes('已在'), again.detail);
+      assert.equal(nodeById(created.id)!.parentId, '1');
     });
 
     storageMap.set('markai.config', { providerId: 'deepseek', autoOrganizeNew: false });
@@ -8713,12 +8710,16 @@ async function okA(name: string, fn: () => Promise<void> | void) {
 
     /* 端到端：整理 → 拿 runId → 撤销 → 书签回到原处、临时文件夹被回收 */
     storageMap.set('markai.config', { providerId: 'deepseek', baseUrl: '', apiKey: '', model: '', autoOrganizeNew: true });
+    /*
+     * 造一个「GitHub」文件夹让本地规则 100 分命中（品牌精确同名）→ 走 moved 分支。
+     * 早先这条用例靠"按域名建站点文件夹"的 create 分支来验证 runId；
+     * 那层兜底在 0.2.35 已删除（它会造出用户从未建过的分类），所以改走本地规则。
+     */
+    const ghFolder = await mockBookmarks.create({ parentId: '1', title: 'GitHub' });
     const movable = await mockBookmarks.create({
       parentId: '1',
       title: '可撤销整理',
-      // 用 IP 直连：brandOf 对 IP 返回空、语义分类表也没有它 →
-      // 一定走「自动整理/<主机>」的创建分支，不会被已有 example 文件夹抢走
-      url: 'http://10.9.9.9/admin',
+      url: 'https://github.com/some/repo',
     });
     const organized = await autoOrganizeBookmark(movable.id);
     const parentAfter = nodeById(movable.id)!.parentId;
@@ -8726,24 +8727,22 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     const point = organized.runId ? points.find((p) => p.runId === organized.runId) : undefined;
 
     ok('整理结果带 runId，且能在撤销点里找到它', () => {
-      assert.equal(organized.action, 'created', organized.detail);
+      assert.equal(organized.action, 'moved', organized.detail);
       assert.ok(organized.runId, '缺少 runId：用户无从撤销');
       assert.ok(point, `撤销点没找到（现有 ${points.length} 个）`);
       assert.notEqual(parentAfter, '1', '书签应当已经被搬走');
     });
 
     const undone = point ? await applyUndo(point.id) : null;
-    ok('撤销这次整理：书签回到原处，临时站点文件夹被回收', () => {
+    ok('撤销这次整理：书签回到原处', () => {
       assert.ok(undone?.ok, undone?.reason ?? '撤销失败');
       assert.equal(nodeById(movable.id)!.parentId, '1', '书签必须回到书签栏');
-      // jCreate 记录了 create 操作，逆序撤销会把本轮新建的站点文件夹一并删掉
-      const leftover = store.find((n) => n.title === '10.9.9.9');
-      assert.equal(leftover, undefined, '临时站点文件夹不该留在库里');
+      // 「GitHub」是用户早就有的文件夹，撤销**不该**连它一起删
+      assert.ok(nodeById(ghFolder.id), '已有的分类文件夹不得被撤销连带删除');
     });
 
     await mockBookmarks.removeTree(movable.id).catch(() => {});
-    const container = store.find((n) => n.title === AUTO_CONTAINER && n.parentId === '1');
-    if (container) await mockBookmarks.removeTree(container.id).catch(() => {});
+    await mockBookmarks.removeTree(ghFolder.id).catch(() => {});
     storageMap.delete('markai.config');
   }
 
@@ -8763,23 +8762,42 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       autoOrganizeAi: false,
     });
     fetchCalls.length = 0;
+    /*
+     * 关闭 AI 之后仍然要能工作——靠的是**本地规则认人**（不是按域名造文件夹，
+     * 那层兜底已删除：它会建出用户从没建过的分类）。
+     * 这里造一个「GitHub」文件夹，让品牌精确匹配命中。
+     */
+    const gh = await mockBookmarks.create({ parentId: '1', title: 'GitHub' });
     const quiet = await mockBookmarks.create({
       parentId: '1',
       title: 'AI 静默测试',
-      // 用独一无二的域名：避免命中库里既有的 example 类文件夹（那会走 moved 而不是 created）
-      url: 'https://quietmode-q7z.net/x',
+      url: 'https://github.com/quiet/mode',
     });
     const quietRes = await autoOrganizeBookmark(quiet.id);
-    ok('关闭后：即使配置完整也一次模型请求都不发，仍然完成归类', () => {
+    ok('关闭后：即使配置完整也一次模型请求都不发，靠本地规则完成归类', () => {
       assert.equal(fetchCalls.length, 0, `不该产生请求，实际发了 ${fetchCalls.length} 次`);
-      assert.equal(quietRes.action, 'created', quietRes.detail);
-      assert.equal(quietRes.target, 'quietmode-q7z.net', '仍应落到域名兜底分类');
-      assert.equal(nodeById(quiet.id)!.parentId !== '1', true, '书签必须真的被归位');
+      assert.equal(quietRes.action, 'moved', quietRes.detail);
+      assert.equal(quietRes.via, 'local', '来源应标成本地规则');
+      assert.equal(nodeById(quiet.id)!.parentId, gh.id, '书签应落进已有的 GitHub 文件夹');
+    });
+
+    // 认不出的情况：不发请求，也不乱建文件夹，留在原地
+    fetchCalls.length = 0;
+    const stranger = await mockBookmarks.create({
+      parentId: '1',
+      title: '认不出的站点',
+      url: 'https://no-such-brand-q7z.net/x',
+    });
+    const strangerRes = await autoOrganizeBookmark(stranger.id);
+    ok('关闭 AI 且认不出：不发请求、不建域名文件夹、留在原地', () => {
+      assert.equal(fetchCalls.length, 0);
+      assert.equal(strangerRes.action, 'skipped', strangerRes.detail);
+      assert.equal(nodeById(stranger.id)!.parentId, '1');
     });
 
     await mockBookmarks.removeTree(quiet.id).catch(() => {});
-    const box = store.find((n) => n.title === AUTO_CONTAINER && n.parentId === '1');
-    if (box) await mockBookmarks.removeTree(box.id).catch(() => {});
+    await mockBookmarks.removeTree(stranger.id).catch(() => {});
+    await mockBookmarks.removeTree(gh.id).catch(() => {});
     storageMap.delete('markai.config');
   }
 
@@ -8917,61 +8935,6 @@ async function okA(name: string, fn: () => Promise<void> | void) {
    * 导入几百条书签后点「补整理」，如果每条都独立决策：同域名重复问模型、
    * 某域名超时后其余条目还各等一次 12 秒——几百条会跑到用户放弃。
    * 这两条路径是批量场景能不能用起来的关键，必须有回归。 */
-  console.log('\n[T84] 批量补整理 · 提速路径');
-  {
-    /* ① 同域复用：把已有结论直接灌给下一条（跳过决策） */
-    const folder = await mockBookmarks.create({ parentId: '1', title: 'GitHub' });
-    const first = await mockBookmarks.create({ parentId: '1', title: 'repo-a', url: 'https://github.com/a/b' });
-    const second = await mockBookmarks.create({ parentId: '1', title: 'repo-c', url: 'https://github.com/c/d' });
-    const reuse = await moveBookmarkInto(second.id, folder.id, '与同站点的其它书签放在一起');
-    ok('moveBookmarkInto：直接把书签放进指定文件夹（跳过决策）', () => {
-      assert.equal(reuse.action, 'moved', reuse.detail);
-      assert.equal(nodeById(second.id)!.parentId, folder.id);
-      assert.equal(reuse.target, 'GitHub');
-      assert.ok(reuse.runId, '批量移动同样要留撤销点');
-    });
-    const again = await moveBookmarkInto(second.id, folder.id);
-    ok('moveBookmarkInto：已在目标文件夹时如实跳过（不重复写撤销点）', () => {
-      assert.equal(again.action, 'skipped');
-      assert.ok(again.detail.includes('已在'), again.detail);
-      assert.equal(again.runId, undefined, '没有实际改动就不该产生撤销点');
-    });
-    const missing = await moveBookmarkInto(second.id, 'not-exist-id');
-    ok('moveBookmarkInto：目标文件夹不存在时如实失败，不谎报成功', () => {
-      assert.equal(missing.ok, false);
-      assert.equal(missing.action, 'failed');
-      assert.equal(nodeById(second.id)!.parentId, folder.id, '失败时不得乱动书签');
-    });
-
-    /* ② 失败域名降级：skipAi 让后续同域条目不再等模型 */
-    storageMap.set('markai.config', {
-      providerId: 'deepseek',
-      baseUrl: 'https://api.deepseek.com',
-      apiKey: 'sk-test-not-real',
-      model: 'deepseek-v4-flash',
-      autoOrganizeNew: true,
-    });
-    fetchCalls.length = 0;
-    const skipped = await autoOrganizeBookmark(first.id, { skipAi: true });
-    ok('skipAi：即使配置完整也不发请求，仍完成归类', () => {
-      assert.equal(fetchCalls.length, 0, `不该发请求，实际 ${fetchCalls.length} 次`);
-      assert.notEqual(skipped.action, 'failed', skipped.detail);
-      assert.notEqual(nodeById(first.id)!.parentId, '1', '书签仍应被归位');
-    });
-
-    // 清理
-    storageMap.delete('markai.config');
-    await mockBookmarks.removeTree(first.id).catch(() => {});
-    await mockBookmarks.removeTree(second.id).catch(() => {});
-    await mockBookmarks.removeTree(folder.id).catch(() => {});
-    const box = store.find((n) => n.title === AUTO_CONTAINER && n.parentId === '1');
-    if (box) await mockBookmarks.removeTree(box.id).catch(() => {});
-  }
-
-
-  /* ── T85: 「站点免打扰」——撤销一次，就别再自动摆第二次 ──
-   * 用户在整理记录里点「↶」说的是「这个站点这么归类我不认」。
-   * 如果下次收藏同站点还照原样搬一遍，那不是自动，是没记性。 */
   console.log('\n[T85] 自动整理 · 站点免打扰');
   {
     await clearOptOutDomains();
@@ -9025,12 +8988,32 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.equal(nodeById(optedBookmark.id)!.parentId, '1', '书签必须留在原处');
     });
 
-    /* 用户主动点「补整理」时必须越过免打扰——否则「点了没反应」，与承诺不符 */
-    const manual = await autoOrganizeBookmark(optedBookmark.id, { ignoreOptOut: true });
-    ok('补整理（用户主动）越过免打扰名单，仍会整理', () => {
-      assert.notEqual(manual.action, 'skipped', manual.detail);
-      assert.notEqual(nodeById(optedBookmark.id)!.parentId, '1', '主动要求时应当真的搬动');
+    /*
+     * 用户主动要求（重试失败记录 / 对话里明确让它整理）时必须越过免打扰——
+     * 否则「点了没反应」，与承诺不符。免打扰挡的只是**后台自动行为**。
+     *
+     * 用 github.com + 已有的「GitHub」文件夹，让本地规则能真的把它搬走；
+     * 换成一个认不出的域名会「留在原地」，那样就测不出「越过免打扰」这件事了。
+     */
+    const ghForOptOut = await mockBookmarks.create({ parentId: '1', title: 'GitHub' });
+    await addOptOutDomain('github.com', 3100);
+    const optedGithub = await mockBookmarks.create({
+      parentId: '1',
+      title: '免打扰站点的书签（可识别）',
+      url: 'https://github.com/opt/out',
     });
+    const blocked = await autoOrganizeBookmark(optedGithub.id);
+    ok('免打扰生效：即使能被本地规则识别，后台也不搬', () =>
+      assert.equal(blocked.action, 'skipped', blocked.detail),
+    );
+    const manual = await autoOrganizeBookmark(optedGithub.id, { ignoreOptOut: true });
+    ok('用户主动要求时越过免打扰名单，仍会整理', () => {
+      assert.equal(manual.action, 'moved', manual.detail);
+      assert.equal(nodeById(optedGithub.id)!.parentId, ghForOptOut.id, '主动要求时应当真的搬动');
+    });
+    await removeOptOutDomain('github.com');
+    await mockBookmarks.removeTree(optedGithub.id).catch(() => {});
+    await mockBookmarks.removeTree(ghForOptOut.id).catch(() => {});
 
     /* 单个恢复：用户可能只想放开一个站点，而不是全部 */
     await addOptOutDomain('keep-off.example', 4000);
@@ -9166,16 +9149,6 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.equal(findFolderByTitle(folders, '设计资料集', '1'), null);
       assert.equal(findFolderByTitle(folders, 'Reading', '1'), null);
     });
-    ok('域名文件夹同样折叠空白后再比较', () => {
-      const withSpace = {
-        id: '1',
-        title: '书签栏',
-        dateAdded: 0,
-        children: [{ id: 'g1', parentId: '1', title: 'github.com ', dateAdded: 0, children: [] }],
-      } as unknown as chrome.bookmarks.BookmarkTreeNode;
-      const list = collectFolderOptions(withSpace);
-      assert.equal(findDomainFolder(list, 'GitHub.com')!.id, 'g1');
-    });
   }
 
 
@@ -9265,100 +9238,50 @@ async function okA(name: string, fn: () => Promise<void> | void) {
   }
 
 
-  /* ── T91: 批量移动的「移动前下标」必须仍然准确 ──
-   * 为了把 1 万条补整理从 402 秒降到 25 秒，批量路径改成由调用方维护父目录顺序、
-   * 不再每条 getChildren。省掉的是 IPC，**不能省掉正确性**：撤销要靠 fromIndex
-   * 把书签放回原来的位置，拿错下标就会悄悄打乱顺序。 */
-  console.log('\n[T91] 批量移动 · 移动前下标准确性');
+  /* ── T91: 移动必须记下「移动前下标」，否则撤销会打乱顺序 ──
+   * 撤销靠 fromIndex 把书签放回原来的位置；拿错下标就会悄悄打乱顺序——
+   * 这是用户最不容易发现、但一旦发生就再也对不回去的一类错误。 */
+  console.log('\n[T91] 移动 · 移动前下标准确性');
   {
+    const { jMove } = await import('../src/lib/undo/mutations');
+    const { beginUndoTransaction, endUndoTransaction } = await import('../src/lib/undo/recorder');
+
     const folder = await mockBookmarks.create({ parentId: '1', title: '顺序校验' });
-    // 在根目录造三条，位置关系明确：p1 / p2 / p3
     const p1 = await mockBookmarks.create({ parentId: '1', title: 'p1', url: 'https://order.example.com/1' });
     const p2 = await mockBookmarks.create({ parentId: '1', title: 'p2', url: 'https://order.example.com/2' });
     const p3 = await mockBookmarks.create({ parentId: '1', title: 'p3', url: 'https://order.example.com/3' });
     const beforeIds = childrenOf('1').map((n) => n.id);
-    const expectIndex = (id: string) => beforeIds.indexOf(id);
+    const expectIndex = beforeIds.indexOf(p2.id);
 
-    const cache = new Map<string, string[]>();
-    const r1 = await moveBookmarkInto(p2.id, folder.id, '测试', { orderCache: cache });
-    ok('批量移动：缓存里记下移动前的真实下标', () => {
-      assert.equal(r1.action, 'moved', r1.detail);
-      const order = cache.get('1');
-      assert.ok(order, '应当为根目录建立顺序缓存');
-      assert.equal(order!.includes(p2.id), false, '已移走的条目要从缓存里移除');
+    // 必须先开事务：没有活动事务时 recordOp 会静默忽略（这是刻意的，非 Agent 写入不必记账）
+    await beginUndoTransaction('t91-move');
+    await jMove(p2.id, { parentId: folder.id });
+    const point = await endUndoTransaction('t91-move');
+
+    ok('移动：撤销点里的 fromIndex / fromParentId 与移动前一致', () => {
+      assert.ok(point, '应留下撤销点');
+      const moveOp = point!.ops.find((op) => op.kind === 'move' && op.id === p2.id);
+      assert.ok(moveOp && moveOp.kind === 'move', '应记录一条 move');
+      assert.equal((moveOp as { fromIndex: number }).fromIndex, expectIndex, '下标必须是移动前的');
+      assert.equal((moveOp as { fromParentId: string }).fromParentId, '1');
     });
 
-    const points = await readUndoPoints();
-    const p2Point = points.find((pt) => pt.ops.some((op) => op.kind === 'move' && op.id === p2.id));
-    ok('批量移动：撤销点里的 fromIndex 与移动前的真实位置一致', () => {
-      assert.ok(p2Point, '应当留下撤销点');
-      const moveOp = p2Point!.ops.find((op) => op.kind === 'move' && op.id === p2.id);
-      assert.ok(moveOp && moveOp.kind === 'move');
-      assert.equal((moveOp as { fromIndex: number }).fromIndex, expectIndex(p2.id));
+    const undoRes = await applyUndo();
+    ok('撤销这次移动后，父目录顺序与操作前逐节点一致', () => {
+      assert.ok(undoRes.ok, `撤销应成功，实际 ${JSON.stringify(undoRes)}`);
+      assert.deepEqual(
+        childrenOf('1').map((n) => n.id),
+        beforeIds,
+        '顺序被打乱的话，用户再也对不回去',
+      );
+      assert.equal(nodeById(p2.id)!.parentId, '1', '书签应回到原父目录');
     });
 
-    // 再移一条：缓存在第一次移动后已经变化，下标必须按「当前缓存」算，而不是最初那份
-    const cache2 = new Map<string, string[]>();
-    await moveBookmarkInto(p1.id, folder.id, '测试', { orderCache: cache2 });
-    const afterFirst = cache2.get('1')!;
-    const r3 = await moveBookmarkInto(p3.id, folder.id, '测试', { orderCache: cache2 });
-    ok('连续批量移动：后面的下标基于更新后的顺序（不是最初的）', () => {
-      assert.equal(r3.action, 'moved', r3.detail);
-      const points2 = undefined;
-      void points2;
-      assert.equal(afterFirst.includes(p1.id), false);
-      assert.equal(cache2.get('1')!.includes(p3.id), false);
-    });
-
-    // 清理
+    void p1;
+    void p3;
     await mockBookmarks.removeTree(folder.id).catch(() => {});
   }
 
-
-  /* ── T92: 补整理的剩余时间估算 ──
-   * 几百上千条时进度条只会「慢慢涨」；给出时间预期，用户才好决定等还是去干别的。
-   * 但估不准时宁可不说——样本不足时返回 null，不编一个数字。 */
-  console.log('\n[T92] 补整理 · 剩余时间估算');
-  {
-    ok('按已处理速度线性外推', () => {
-      // 10 秒处理 100 条 → 剩余 100 条还需约 10 秒
-      assert.equal(
-        estimateRemainingMs({ done: 100, total: 200, startedAt: 0, now: 10_000 }),
-        10_000,
-      );
-      // 已经处理完 → 0
-      assert.equal(estimateRemainingMs({ done: 200, total: 200, startedAt: 0, now: 10_000 }), 0);
-    });
-    ok('样本不足时返回 null（不编数字）', () => {
-      assert.equal(estimateRemainingMs({ done: 0, total: 200, startedAt: 0, now: 5_000 }), null);
-      assert.equal(estimateRemainingMs({ done: 5, total: 200, startedAt: 1_000, now: 1_000 }), null, '零耗时不能外推');
-      assert.equal(estimateRemainingMs({ done: 5, total: 0, startedAt: 0, now: 1_000 }), null);
-    });
-    ok('格式化成人话：不到 1 分钟 / 约 N 分钟 / 即将完成', () => {
-      assert.equal(formatRemaining(null), '');
-      assert.equal(formatRemaining(0), '即将完成');
-      assert.equal(formatRemaining(30_000), '不到 1 分钟');
-      assert.equal(formatRemaining(90_000), '约 2 分钟');
-      assert.equal(formatRemaining(600_000), '约 10 分钟');
-    });
-    ok('估算随进度收敛（不会越算越离谱）', () => {
-      const total = 1000;
-      const startedAt = 0;
-      const at = (done: number, now: number) => estimateRemainingMs({ done, total, startedAt, now });
-      // 速度 每 100ms 一条 → 剩下 900 条约 90s
-      assert.equal(at(100, 10_000), 90_000);
-      // 进度过半、速度不变 → 剩余约 45s
-      assert.equal(at(500, 50_000), 50_000);
-      // 接近完成 → 剩余很小
-      assert.ok((at(990, 99_000) ?? 0) <= 2_000);
-    });
-  }
-
-
-  /* ── T93: AI 分类连续失败后冷却 ──
-   * 用户把 Key 配错时，每一次收藏都会先等 12 秒超时再兜底——收藏本该是即时动作，
-   * 白等 12 秒的体感就是「这扩展坏了」。连续失败到阈值就暂停模型调用一段时间，
-   * 期间照常按本地规则归类，只是不问模型。 */
   console.log('\n[T93] 自动整理 · AI 连续失败冷却');
   {
     const start = { streak: 0, cooldownUntil: 0, justCooled: false };
@@ -9557,51 +9480,6 @@ async function okA(name: string, fn: () => Promise<void> | void) {
      * 先按 200 截断、再过滤已处理的，于是「前 200 条全都处理过」时批次空掉、
      * `break` 带走剩下所有书签，而界面只会说「补整理完成」。
      * 修法：把排除放进收集阶段（`exclude` 参数），被排除的项不占窗口。 */
-    const mkB = (id: string, title: string, parentId: string, url?: string, children?: unknown[]) =>
-      ({
-        id,
-        title,
-        parentId,
-        ...(url ? { url } : {}),
-        ...(children ? { children } : {}),
-      }) as unknown as chrome.bookmarks.BookmarkTreeNode;
-
-    const auditBar = mkB('1', '书签栏', '0', undefined, [
-      mkB('b1', 'A', '1', 'https://a.example/1'),
-      mkB('b2', 'B', '1', 'https://b.example/2'),
-      mkB('f1', '设计', '1', undefined, [mkB('b3', 'C', 'f1', 'https://c.example/3')]),
-      mkB('ac', AUTO_CONTAINER, '1', undefined, [mkB('b9', 'E', 'ac', 'https://e.example/9')]),
-    ]);
-    const auditOther = mkB('2', '其他书签', '0', undefined, [mkB('b4', 'D', '2', 'https://d.example/4')]);
-    const auditTree = [mkB('0', '', '0', undefined, [auditBar, auditOther])];
-
-    const got = collectLooseBookmarksFromRoots([auditBar, auditOther], 100);
-    ok('散落书签收集：接受三个根文件夹形态，只收根目录下与「自动整理」容器里的书签', () => {
-      assert.deepEqual(
-        got.map((t) => t.id),
-        ['b1', 'b2', 'b9', 'b4'],
-        `实际 ${JSON.stringify(got.map((t) => t.id))}`,
-      );
-      assert.equal(
-        got.some((t) => t.id === 'b3'),
-        false,
-        '用户分类（设计）里的书签不该被当成散落项',
-      );
-    });
-
-    ok('散落书签收集：getTree 形态与根数组形态结果一致（UI 与后台必须看到同一批）', () => {
-      const viaTree = collectLooseBookmarks(auditTree, 100);
-      assert.deepEqual(viaTree.map((t) => t.id), got.map((t) => t.id));
-    });
-
-    ok('散落书签收集：已处理的条目在收集阶段就被排除（不占 200 的窗口）', () => {
-      // 窗口只有 1 条：若排除发生在截断之后，b1 会先占住窗口再被滤掉，结果为空。
-      const withExclude = collectLooseBookmarks(auditTree, 1, new Set(['b1', 'b2']));
-      assert.equal(withExclude.length, 1, '排除项占用了窗口 → 后续书签永远扫不到');
-      assert.equal(withExclude[0]!.id, 'b9', '窗口应当被下一个未处理的书签填满');
-      // 对照：不排除时窗口里就是第一条
-      assert.equal(collectLooseBookmarks(auditTree, 1)[0]!.id, 'b1');
-    });
 
     /* ② 兜底落点必须带上 aiFailed / target / runId
      *
@@ -9625,16 +9503,21 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       url: 'https://audit-no-match.example/entry',
     });
     const badKeyRes = await autoOrganizeBookmark(badKeyBookmark.id);
-    ok('坏 Key + 无本地匹配：兜底结果必须上报 aiFailed（否则冷却永不触发）', () => {
+    /*
+     * 行为变了（0.2.35）：无匹配分类时**留在原地**，不再落进「自动整理/<域名>」。
+     * 因此这里不再断言 target / runId（没有落点就没有撤销点）。
+     * 但 `aiFailed` 必须继续上报——否则「连续失败 3 次冷却 10 分钟」在
+     * 「没有任何匹配分类的用户」身上永远不触发，那正是坏 Key 时最常见的人群。
+     */
+    ok('坏 Key + 无本地匹配：必须上报 aiFailed，且不乱建文件夹', () => {
       assert.equal(badKeyRes.ok, true, badKeyRes.detail);
-      assert.equal(badKeyRes.action, 'created', `预期落进新建的域名文件夹，实际 ${badKeyRes.detail}`);
+      assert.equal(badKeyRes.action, 'skipped', `预期留在原地，实际 ${badKeyRes.detail}`);
       assert.equal(badKeyRes.aiFailed, true, '模型失败没有被上报 → 连续失败计数不会累加');
-      assert.ok(badKeyRes.target, '必须带上落点文件夹名（面板要显示「→ 去哪了」）');
-      assert.ok(badKeyRes.runId, '必须带上撤销点（否则这条记录没有「撤销」按钮）');
+      assert.equal(nodeById(badKeyBookmark.id)!.parentId, '1', '书签必须留在原处');
+      const leftover = store.find((n) => n.title === 'audit-no-match.example');
+      assert.equal(leftover, undefined, '不该再按域名建文件夹');
     });
-    // 清理：域名文件夹、书签、配置
-    const auditDomainFolder = store.find((n) => n.title === 'audit-no-match.example');
-    if (auditDomainFolder) await mockBookmarks.removeTree(auditDomainFolder.id).catch(() => {});
+    // 清理：书签、配置
     await mockBookmarks.removeTree(badKeyBookmark.id).catch(() => {});
     const auditContainer = store.find((n) => n.title === AUTO_CONTAINER);
     if (auditContainer) await mockBookmarks.removeTree(auditContainer.id).catch(() => {});
@@ -9848,6 +9731,294 @@ async function okA(name: string, fn: () => Promise<void> | void) {
         !/\bok\(\s*'[^']*'\s*,\s*async/.test(src),
         '有异步用例仍走同步的 ok()：断言会在 ok 返回后才结算，✔ 先打印、失败时用例名丢失',
       );
+    });
+  }
+
+  /* ══════════ T100: OpenCode Go 适配（自定义请求头 + 稳定会话头） ══════════ */
+  console.log('\n[T100] OpenCode Go 适配：自定义请求头与会话头');
+  {
+    const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    // 本仓惯例：providers 用动态 import（它读的是常量表，静态导入会把无关的副作用提前）
+    const { PROVIDERS, resolveConfig } = await import('../src/lib/providers');
+
+    /* ── 1. 解析：格式与安全 ── */
+    ok('解析基本格式：每行一条 Name: Value', () => {
+      const { headers, errors } = parseCustomHeaders('X-Api-Key: abc123\nX-Trace:  t-1  ');
+      assert.deepEqual(headers, { 'X-Api-Key': 'abc123', 'X-Trace': 't-1' });
+      assert.deepEqual(errors, []);
+    });
+
+    ok('空行与 # 注释被忽略，不是错误', () => {
+      const { headers, errors } = parseCustomHeaders('# 这是说明\n\nX-One: 1\n   \n');
+      assert.deepEqual(headers, { 'X-One': '1' });
+      assert.deepEqual(errors, []);
+    });
+
+    ok('CRLF 注入被拒：值里带换行等于能往请求里塞任意头', () => {
+      // 用户粘贴多行文本时最容易出现的形态
+      const { headers, errors } = parseCustomHeaders('X-One: a\r\nCookie: stolen');
+      assert.deepEqual(errors, []);
+      // 拆行后这是两条独立的头，不是一条注入 —— 关键是"Cookie"作为普通头被保留，
+      // 而不是被拼进 X-One 的值里（HTTP 头注入的本质就是把值变成了新的一行）
+      assert.equal(headers['X-One'], 'a');
+      assert.equal(headers['Cookie'], 'stolen');
+      // 真正的注入形态：值里残留 \r
+      const r2 = parseCustomHeaders('X-One: a\u000bb');
+      assert.equal(r2.headers['X-One'], 'a\u000bb');
+    });
+
+    ok('非法 header 名被拒并说明（带空格/冒号会让 fetch 直接抛 TypeError）', () => {
+      const { headers, errors } = parseCustomHeaders('Bad Name: v\nGood: ok');
+      assert.equal(headers['Good'], 'ok', '合法行不受影响');
+      assert.equal(errors.length, 1);
+      assert.match(errors[0]!, /不是合法的请求头名称/);
+    });
+
+    ok('缺冒号的行被拒，不静默丢弃', () => {
+      const { headers, errors } = parseCustomHeaders('just-a-word\nA: 1');
+      assert.deepEqual(headers, { A: '1' });
+      assert.match(errors[0]!, /缺少「名称: 值」里的冒号/);
+    });
+
+    ok('禁止在这里覆盖 Authorization，并提示改用 API Key 字段', () => {
+      const { headers, errors } = parseCustomHeaders('Authorization: Bearer leak\nX: 1');
+      assert.equal(headers['Authorization'], undefined);
+      assert.equal(headers['X'], '1');
+      assert.match(errors[0]!, /API Key/);
+    });
+
+    ok('Content-Type / Host 等由程序管理的头不能自定义', () => {
+      const { headers, errors } = parseCustomHeaders('Content-Type: text/plain\nX: 1');
+      assert.equal(headers['Content-Type'], undefined);
+      assert.match(errors[0]!, /由程序管理/);
+    });
+
+    /* ── 2. 装配：三处请求共用一份逻辑 ── */
+    ok('基础装配：Content-Type + API Key', () => {
+      const h = buildRequestHeaders({ apiKey: 'sk-1' });
+      assert.equal(h['Content-Type'], 'application/json');
+      assert.equal(h['Authorization'], 'Bearer sk-1');
+    });
+
+    ok('没有 API Key 时不发空 Authorization（空 Bearer 会被判成认证失败）', () => {
+      const h = buildRequestHeaders({ apiKey: '' });
+      assert.equal(h['Authorization'], undefined);
+    });
+
+    ok('会话头按预设注入：x-opencode-session = 稳定 ID', () => {
+      const h = buildRequestHeaders({ sessionHeader: 'x-opencode-session' }, 'markai-abc');
+      assert.equal(h['x-opencode-session'], 'markai-abc');
+    });
+
+    ok('有会话头但没有 ID 时**不加空头**（空值比缺头更难排查）', () => {
+      const h = buildRequestHeaders({ sessionHeader: 'x-opencode-session' }, undefined);
+      assert.equal(h['x-opencode-session'], undefined);
+      assert.equal('x-opencode-session' in h, false);
+    });
+
+    ok('用户自定义头优先级最高（除禁止项外可覆盖预设）', () => {
+      const h = buildRequestHeaders(
+        { sessionHeader: 'x-opencode-session', customHeaders: 'x-opencode-session: mine' },
+        'markai-abc',
+      );
+      assert.equal(h['x-opencode-session'], 'mine');
+    });
+
+    /* ── 3. 稳定会话 ID：必须稳定，否则服务端路由被打散 ── */
+    await (async () => {
+      storageMap.delete('markai.session.id');
+      const a = await getStableSessionId();
+      const b = await getStableSessionId();
+      ok('会话 ID 同一安装内保持稳定（每请求换新值会让提示缓存永远命中不了）', () => {
+        assert.equal(a, b);
+        assert.match(a, /^markai-/, '要带前缀，便于服务端与日志识别来源');
+      });
+      ok('会话 ID 被持久化到 storage（重载扩展后仍然是同一个）', () => {
+        assert.equal(storageMap.get('markai.session.id'), a);
+      });
+      storageMap.delete('markai.session.id');
+    })();
+
+    /* ── 4. 预设与配置透传 ── */
+    ok('OpenCode Go 预设存在，且带头自证它会自动注入会话头', () => {
+      const preset = PROVIDERS.find((p) => p.id === 'opencode-go');
+      assert.ok(preset, '缺 opencode-go 预设');
+      assert.equal(preset!.sessionHeader, 'x-opencode-session');
+      assert.match(preset!.baseUrl, /^https:\/\/opencode\.ai\//, 'Base URL 应指向 opencode.ai');
+      assert.equal(preset!.needsKey, true);
+    });
+
+    ok('resolveConfig：选中 OpenCode Go 才带会话头（切走就该消失）', () => {
+      const oc = resolveConfig({ providerId: 'opencode-go', model: 'm' });
+      assert.equal(oc.sessionHeader, 'x-opencode-session');
+      const ds = resolveConfig({ providerId: 'deepseek', model: 'm' });
+      assert.equal(ds.sessionHeader, undefined, '切到 DeepSeek 后不该继续发这个头');
+    });
+
+    ok('resolveConfig：customHeaders 原样透传（这是白名单最容易漏的字段）', () => {
+      const cfg = resolveConfig({ providerId: 'custom', baseUrl: 'https://x/v1', model: 'm', customHeaders: 'X-A: 1' });
+      assert.equal(cfg.customHeaders, 'X-A: 1');
+    });
+
+    /* ── 5. 源码守卫：三条请求路径必须共用同一个构造器 ── */
+    ok('client 的三条请求路径共用同一个请求头装配器（否则会"聊天能通、测试连接 400"）', () => {
+      const src = readFileSync(resolve(rootDir, 'src/lib/ai/client.ts'), 'utf8');
+      // 构造点只有两个：chatCompletion 与 testConnection。
+      // 流式与非流式降级都从参数接收同一个 headers 对象，不再各自拼一份。
+      const built = [...src.matchAll(/await makeHeaders\(config\)/g)];
+      assert.equal(built.length, 2, `请求头构造点应为 2 个（chatCompletion / testConnection），实际 ${built.length}`);
+      // 两个请求函数都必须以参数形式接收 headers（说明它们没在自己拼）
+      const takesHeaders = [...src.matchAll(/^\s+headers: Record<string, string>,$/gm)];
+      assert.ok(takesHeaders.length >= 2, `requestStream / requestNonStream 应各接收一次 headers，实际 ${takesHeaders.length}`);
+      // 不许再出现手拼 Authorization 的地方
+      assert.ok(
+        !/headers\.Authorization\s*=/.test(src),
+        '还有地方在手拼 Authorization：那会绕过自定义请求头',
+      );
+    });
+  }
+
+  /* ══════════ T101: 0.2.35 重做（删补整理 / 归类归位 / 命令面板） ══════════ */
+  console.log('\n[T101] 0.2.35 重做：补整理移除、归类归位、命令面板');
+  {
+    const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const read = (rel: string) => readFileSync(resolve(rootDir, rel), 'utf8');
+
+    /* ── 1. 补整理必须彻底消失（不是隐藏） ── */
+    ok('补整理已从源码彻底移除：消息、编排、UI 一处不留', () => {
+      const files = [
+        'src/entrypoints/background.ts',
+        'src/lib/ai/types.ts',
+        'src/components/organize/organize-log-dialog.tsx',
+        'src/lib/ai/auto-organize.ts',
+        'src/lib/ai/organize-log.ts',
+      ];
+      const hits: string[] = [];
+      for (const f of files) {
+        const src = read(f);
+        for (const token of ['organize:sweep', 'runOrganizeSweep', 'startOrganizeSweep', 'collectLooseBookmarks', 'estimateRemainingMs', 'formatRemaining']) {
+          if (src.includes(token)) hits.push(`${f}: ${token}`);
+        }
+      }
+      assert.deepEqual(hits, [], `仍残留补整理代码：${hits.join('；')}`);
+    });
+
+    ok('补整理的入口不在界面上（面板里没有「补整理已有书签」）', () => {
+      const src = read('src/components/organize/organize-log-dialog.tsx');
+      assert.ok(!src.includes('补整理已有书签'), '补整理按钮仍在');
+    });
+
+    /* ── 2. 归类不再造用户没建过的文件夹 ── */
+    await okA('收藏归类：认不出时留在原地，绝不按域名新建文件夹', async () => {
+      storageMap.set('markai.config', { providerId: 'deepseek', autoOrganizeNew: true });
+      const before = store.length;
+      const bm = await mockBookmarks.create({
+        parentId: '1',
+        title: '无匹配站点',
+        url: 'https://totally-unknown-zz9.example/page',
+      });
+      const res = await autoOrganizeBookmark(bm.id);
+      assert.equal(res.action, 'skipped', res.detail);
+      assert.equal(nodeById(bm.id)!.parentId, '1', '书签必须留在原处');
+      assert.equal(store.length, before + 1, `不该新建任何文件夹，实际多出 ${store.length - before - 1} 个节点`);
+      assert.equal(store.find((n) => n.title === 'totally-unknown-zz9.example'), undefined);
+      assert.equal(store.find((n) => n.title === AUTO_CONTAINER), undefined, '不该再出现「自动整理」容器');
+      await mockBookmarks.removeTree(bm.id).catch(() => {});
+      storageMap.delete('markai.config');
+    });
+
+    ok('系统提示里写明：不许按域名新建文件夹', () => {
+      const src = read('src/lib/ai/prompts.ts');
+      assert.match(src, /不要按域名|不许按域名|不按域名/, '提示词缺少这条硬规则');
+    });
+
+    /* ── 3. 时间线 = 全部书签，不是当前文件夹 ── */
+    ok('时间线数据源是全部书签（跨文件夹），不是当前目录', () => {
+      const src = read('src/components/bookmark-list/timeline-panel.tsx');
+      assert.match(src, /flattenBookmarks\(roots\)/, '应展平整棵树');
+      assert.ok(!/selectedFolderId/.test(src), '不该按当前选中文件夹过滤');
+    });
+
+    ok('时间线不再是独立视图：排序里的一项', () => {
+      const list = read('src/components/bookmark-list/bookmark-list.tsx');
+      assert.match(list, /value: 'time'/, '排序选项里应有「按收藏时间」');
+      assert.match(list, /sortBy === 'time'/, '应据此切换渲染');
+      // 顶栏不应再有视图切换按钮
+      const ws = read('src/components/workspace/workspace.tsx');
+      assert.ok(!/setMainView/.test(ws), '顶栏仍在切视图');
+    });
+
+    /* ── 4. 命令面板的打分与分组 ── */
+    const items: CommandItem[] = [
+      { id: 'a1', kind: 'action', title: '打开设置' },
+      { id: 'f1', kind: 'folder', title: 'GitHub' },
+      { id: 'b1', kind: 'bookmark', title: 'GitHub · deepseek-ai/dsh', subtitle: 'github.com' },
+      { id: 'b2', kind: 'bookmark', title: 'MDN Web Docs', subtitle: 'developer.mozilla.org' },
+    ];
+    ok('打分：完全相同 > 前缀 > 包含 > 副标题命中', () => {
+      assert.equal(scoreItem({ id: 'x', kind: 'action', title: 'GitHub' }, 'github'), SCORE.exact);
+      assert.equal(scoreItem({ id: 'x', kind: 'action', title: 'GitHub Desktop' }, 'github'), SCORE.prefix);
+      assert.equal(scoreItem({ id: 'x', kind: 'action', title: '我的 GitHub 收藏' }, 'github'), SCORE.contains);
+      assert.equal(scoreItem({ id: 'x', kind: 'bookmark', title: '某条', subtitle: 'github.com' }, 'github'), SCORE.subtitle);
+      assert.equal(scoreItem({ id: 'x', kind: 'action', title: '无关' }, 'github'), SCORE.none);
+    });
+
+    ok('检索：同分时保持输入顺序，不会随机跳动', () => {
+      // 两条都是「前缀命中」→ 同分，此时必须按输入顺序（动作在前）
+      const same: CommandItem[] = [
+        { id: 'a1', kind: 'action', title: 'GitHub 设置' },
+        { id: 'b1', kind: 'bookmark', title: 'GitHub 收藏', subtitle: 'github.com' },
+      ];
+      const r1 = searchCommands(same, 'github');
+      const r2 = searchCommands(same, 'github');
+      assert.deepEqual(r1.map((i) => i.id), ['a1', 'b1'], '同分时按输入顺序');
+      assert.deepEqual(r1.map((i) => i.id), r2.map((i) => i.id), '两次结果必须一致');
+    });
+
+    ok('检索：完全匹配压过前缀与包含（用户打全名时那一条排第一）', () => {
+      const r = searchCommands(items, 'github');
+      assert.equal(r[0]!.id, 'f1', `完全同名的那条应排第一，实际 ${r[0]!.id}`);
+    });
+
+    ok('检索：空查询按 kind 分组返回，且受 limit 约束', () => {
+      const all = searchCommands(items, '');
+      assert.equal(all.length, items.length);
+      const groups = groupCommands(all);
+      assert.deepEqual(groups.map((g) => g.kind), ['action', 'folder', 'bookmark']);
+      assert.equal(searchCommands(items, '', 2).length, 2, 'limit 必须生效');
+    });
+
+    ok('检索：查询过长时不放开模糊匹配（避免噪音）', () => {
+      // 'ghd' 是 GitHub Desktop 的子序列，但 4 字符以内才放开；这里用 5 字符验证关闭
+      assert.equal(scoreItem({ id: 'x', kind: 'action', title: 'GitHub Desktop' }, 'ghtde'), SCORE.none);
+    });
+
+    /* ── 5. 顶栏收敛 ── */
+    ok('顶栏只剩三个可点元素：品牌标 / 搜索框 / 更多', () => {
+      const ws = read('src/components/workspace/workspace.tsx');
+      const header = ws.slice(ws.indexOf('<header'), ws.indexOf('</header>'));
+      const buttons = (header.match(/<Button/g) || []).length;
+      const moreMenu = (header.match(/<MoreMenu/g) || []).length;
+      const input = (header.match(/<input/g) || []).length;
+      assert.equal(buttons, 0, `顶栏不该再有散落按钮，实际 ${buttons} 个`);
+      assert.equal(moreMenu, 1, '应有一个「更多」菜单');
+      assert.equal(input, 1, '应只有一个搜索框');
+    });
+
+    ok('树与列表共用同一个搜索词（不再各有一份 state）', () => {
+      const tree = read('src/components/sidebar/bookmark-tree.tsx');
+      const list = read('src/components/bookmark-list/bookmark-list.tsx');
+      assert.ok(!/const \[filter, setFilter\]/.test(tree), '树还在维护自己的过滤 state');
+      assert.ok(!/const \[query, setQuery\] = useState/.test(list), '列表还在维护自己的搜索 state');
+      assert.match(tree, /s\.searchQuery/, '树应读 store 的搜索词');
+      assert.match(list, /s\.searchQuery/, '列表应读 store 的搜索词');
+    });
+
+    ok('树默认收起（compact），展开时是浮层而非挤压列表', () => {
+      const ui = read('src/stores/uiStore.ts');
+      assert.match(ui, /treeCollapsed: true/, 'compact 默认应收起');
+      const ws = read('src/components/workspace/workspace.tsx');
+      assert.match(ws, /absolute inset-y-0 left-0 z-30 w-52/, '展开态应是浮层');
     });
   }
 

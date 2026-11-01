@@ -73,7 +73,12 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
   // 稳定引用：TreeRow 已 memo，回调必须保持引用不变（否则 memo 失效）
   const handleActivate = useCallback((id: string) => setActiveId(id), []);
   const [dropTarget, setDropTarget] = useState<{ nodeId: string; position: 'above' | 'below' } | null>(null);
-  const [filter, setFilter] = useState('');
+  /*
+   * 过滤词与列表共用同一个来源（顶栏那个唯一的搜索框）。
+   * 重做前树有自己的一份 state，于是"搜一下"要分别搜两次、结果还各截一半。
+   */
+  const filter = useBookmarkStore((s) => s.searchQuery);
+  const setFilter = useBookmarkStore((s) => s.setSearchQuery);
   const listRef = useRef<HTMLDivElement>(null);
 
   // 「在树中显示」：滚动到目标节点、同步键盘高亮并聚焦容器，随后清空标记
@@ -274,23 +279,6 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
             </button>
           </>
         )}
-      </div>
-      {/* 树内过滤输入 */}
-      <div className="relative px-3 py-2">
-        <Search className="absolute top-1/2 left-5 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
-        <input
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Escape' && filter) {
-              e.preventDefault();
-              setFilter('');
-            }
-          }}
-          aria-label="过滤书签树"
-          placeholder="过滤树…"
-          className="h-8 w-full rounded-sm border border-input bg-card pr-2.5 pl-7 text-xs text-foreground outline-none placeholder:text-muted-foreground/60 focus-visible:border-ring focus-visible:ring-1 focus-visible:ring-ring"
-        />
       </div>
       {/* 树内过滤（匹配节点自动展开祖先链） */}
       {filter && (

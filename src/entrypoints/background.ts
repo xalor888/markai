@@ -21,8 +21,6 @@ import { executeDeletions as runDeletions } from '@/lib/ai/deletion-executor';
 import {
   AI_COOLDOWN_MS,
   autoOrganizeBookmark,
-  collectLooseBookmarks,
-  moveBookmarkInto,
   nextAiStreakState,
   type OrganizeContext,
 } from '@/lib/ai/auto-organize';
@@ -438,9 +436,6 @@ async function handleOneShot(msg: OneShotInbound): Promise<OneShotOutbound> {
       };
     }
 
-    case 'organize:sweep': {
-      return await startOrganizeSweep();
-    }
 
     case 'organize:optout:list': {
       const list = await readOptOutDomains();
@@ -455,19 +450,6 @@ async function handleOneShot(msg: OneShotInbound): Promise<OneShotOutbound> {
     case 'organize:optout:remove': {
       await removeOptOutDomain(msg.domain);
       return { type: 'organize:optout:remove:result', ok: true };
-    }
-
-    case 'organize:sweep:status': {
-      return {
-        type: 'organize:sweep:status:result',
-        running: sweepRunning,
-        ...(sweepSnapshot ? sweepSnapshot : {}),
-      };
-    }
-    case 'organize:sweep:cancel': {
-      if (!sweepRunning) return { type: 'organize:sweep:cancel:result', ok: false, detail: '当前没有进行中的补整理' };
-      sweepRunning = false;
-      return { type: 'organize:sweep:cancel:result', ok: true, detail: '已停止补整理' };
     }
 
     case 'organize:undo': {
@@ -560,21 +542,6 @@ const autoRecentCreates: number[] = [];
 const AUTO_BURST_WINDOW_MS = 10_000;
 const AUTO_BURST_THRESHOLD = 15;
 
-/**
- * ── 补整理状态 ──
- *
- * 声明在 `flushAutoOrganize` 之前：自动整理要让路给补整理（见那里的注释），
- * 把状态放后面会让「这个变量哪来的」变成一个必须往下翻才能回答的问题。
- */
-let sweepRunning = false;
-/**
- * 当前补整理的进度快照。
- *
- * 面板里的 `sweeping` 是组件 state，关掉对话框就没了——用户点完「开始」去干别的，
- * 再打开会看不到进度，甚至以为没在跑又点一次（然后被告知「正在进行中，请稍候」）。
- * 存在这里，面板打开时能把它读回来。
- */
-let sweepSnapshot: { done: number; total: number; moved: number; failed: number } | null = null;
 
 /** 调度一次自动整理（去抖 + 批量导入保护） */
 function scheduleAutoOrganize(id: string): void {
@@ -654,18 +621,6 @@ async function flushAutoOrganize(): Promise<void> {
    * 唤醒由 `clearBadge`（任务结束/取消/失败三条路径都经过它）负责。
    */
   if (agentTaskRunning) {
-    for (const id of ids) autoPending.add(id);
-    return;
-  }
-  /*
-   * 补整理正在跑：同样让路。
-   *
-   * 两条路径都会 `beginUndoTransaction`。而 `beginUndoTransaction` 发现已有活动事务时
-   * 会先把上一轮**强行收尾**——于是补整理正在记的 A 事务被自动整理收掉，
-   * 补整理后半段的移动被记进自动整理的 B 点里，用户点「撤销 B」会连带退掉补整理的书签。
-   * 撤销点串味比「晚一点再整理」糟得多，所以这里原样放回待处理集合，等补整理结束再跑。
-   */
-  if (sweepRunning) {
     for (const id of ids) autoPending.add(id);
     return;
   }
@@ -749,153 +704,6 @@ async function flushAutoOrganize(): Promise<void> {
 }
 
 /** ── 补整理：把散落在根目录的已有书签也走一遍同一套决策 ── */
-
-async function startOrganizeSweep(): Promise<OneShotOutbound> {
-  // 占用必须在**任何 await 之前**：原先先 `await getTree()` 再置位，
-  // 两次快速点击（或重试按钮）都能穿过这道检查，于是两个 sweep 并发跑同一批书签，
-  // 彼此抢撤销事务、同一条书签被搬两次。这里改成「先占位，失败再释放」。
-  if (sweepRunning) {
-    return { type: 'organize:sweep:result', started: false, count: 0, detail: '补整理正在进行中，请稍候' };
-  }
-  sweepRunning = true;
-  let all: ReturnType<typeof collectLooseBookmarks> = [];
-  try {
-    const tree = await chrome.bookmarks.getTree().catch(() => [] as chrome.bookmarks.BookmarkTreeNode[]);
-    // 先数出**总数**（不设上限）：UI 的进度与「还剩多少」都要靠它。
-    // 原先只数上限内的一批（200），用户点了补整理、处理 200 条就停了，
-    // 剩下几百条静静躺在根目录且没有任何提示——压测时才暴露出来。
-    all = collectLooseBookmarks(tree, 100_000);
-  } catch {
-    sweepRunning = false;
-    return { type: 'organize:sweep:result', started: false, count: 0, detail: '读取书签失败，请稍后再试' };
-  }
-  if (all.length === 0) {
-    sweepRunning = false;
-    return { type: 'organize:sweep:result', started: false, count: 0, detail: '没有需要补整理的散落书签' };
-  }
-  sweepSnapshot = { done: 0, total: all.length, moved: 0, failed: 0 };
-  // 立即返回、后台分批跑：几千条时不能让消息通道挂住
-  void runOrganizeSweep(all.length);
-  return {
-    type: 'organize:sweep:result',
-    started: true,
-    count: all.length,
-    detail: `开始补整理 ${all.length} 条散落书签`,
-  };
-}
-
-async function runOrganizeSweep(totalHint: number): Promise<void> {
-  let done = 0;
-  let moved = 0;
-  let failed = 0;
-  let cancelled = false;
-  /**
-   * 域名 → 已确定的落点文件夹。
-   * 补整理几百条时书签高度集中在少数站点：第一条问过模型之后，后面同域名的直接用同一结论，
-   * 既省调用也省用户等待（每条都重新收集候选 + 问模型，几百条会跑到天荒地老）。
-   */
-  const domainFolder = new Map<string, string>();
-  /** 已经让模型失败的域名：后续同域条目跳过 AI，免得每一条都各等一次 12 秒超时 */
-  const aiDeadDomains = new Set<string>();
-  /** 本轮已经处理过的书签：整理失败的书签会留在原位，不记下来就会在下一批被反复捞起 */
-  const processed = new Set<string>();
-  /**
-   * 父目录顺序缓存：批量移动时避免每条都 `getChildren` 整个根目录（1 万条时是 1 万项）。
-   * 这是 1 万条补整理从 402 秒降到几十秒的关键——干净环境实测的 O(n²) 就在这里。
-   */
-  const orderCache = new Map<string, string[]>();
-  /*
-   * 已知风险（第 35 轮回退了「整批合并一个撤销点」）：
-   * 合并后一个点里会同时有「新建站点文件夹」和「若干条移入」的 op。撤销这个点时，
-   * 撤销「新建文件夹」是**递归删除**，会连带删掉同批里已经移进去的内容，
-   * 于是后面的 move 回放找不到目标、整批只还原了一部分（实测 124 条只 restored 5）。
-   * 逐条点虽然会撞上限（只能退最近 10 步），但**每步都是可靠的**——
-   * 可靠性优先，所以退回「一条一个撤销点」，并用「撤销全部 N 步」缓解连点疲劳。
-   */
-
-  /*
-   * 注：曾试过「按根目录复用候选文件夹上下文」来省掉每条一次的 getTree()（1 万条时 223ms/次）。
-   * 实现在 `auto-organize.ts` 的 OrganizeContext 里保留着，但**没有**接进这条路径：
-   * 实测在 600/3000 两档都没有带来可复现的收益（差异落在运行间波动内），
-   * 而它会让「新建文件夹是否漏进缓存」成为一类新的正确性风险。宁可少一层抽象。 */
-  const total = totalHint;
-  try {
-    // 分批重新扫描：处理会把书签移走，所以每批都要以**当前树**为准。
-    // 一批处理不完就再来一批，直到根目录里没有可收的书签。
-    outer: while (true) {
-      const tree = await chrome.bookmarks.getTree().catch(() => [] as chrome.bookmarks.BookmarkTreeNode[]);
-      // 排除放在**收集阶段**：先截断成 200 再 filter 的话，一旦前 200 条都处理过
-      // （失败的书签会留在原位、skipped 的也留在原位），batch 会空掉、break 带走剩下全部书签，
-      // 而用户只会看到「补整理完成」，不会知道后面几百条根本没被看过。
-      const batch = collectLooseBookmarks(tree, 200, processed);
-      if (batch.length === 0) break;
-      for (const t of batch) {
-      // 用户随时可以喊停：几百条逐条判定会跑几分钟，取消必须真的停在下一条之前
-      if (!sweepRunning) {
-        cancelled = true;
-        break outer;
-      }
-      processed.add(t.id);
-      const domain = registrableDomain(t.url) ?? '';
-      const cachedFolderId = domain ? domainFolder.get(domain) : undefined;
-      let res;
-      if (cachedFolderId) {
-        res = await moveBookmarkInto(t.id, cachedFolderId, `与同站点的其它书签放在一起`, { orderCache });
-        // 缓存的文件夹可能已被撤销/删掉：清掉缓存，让后面同域名的重新走完整决策
-        if (!res.ok && domain) domainFolder.delete(domain);
-      } else {
-        // ignoreOptOut：补整理是用户主动点的，免打扰名单只该挡后台的自动行为
-        res = await autoOrganizeBookmark(t.id, {
-          skipAi: !!domain && aiDeadDomains.has(domain),
-          ignoreOptOut: true,
-        });
-        if (domain) {
-          if (res.action === 'failed') aiDeadDomains.add(domain);
-          if (res.ok && res.action !== 'skipped') {
-            const node = (await chrome.bookmarks.get(t.id).catch(() => [] as chrome.bookmarks.BookmarkTreeNode[]))[0];
-            if (node?.parentId) domainFolder.set(domain, node.parentId);
-          }
-        }
-      }
-      done++;
-      if (res.ok && res.action !== 'skipped') moved++;
-      if (res.action === 'failed') failed++;
-      sweepSnapshot = { done, total, moved, failed };
-      // 进度逐条广播：补整理可能持续几分钟，用户需要看见它在动
-      void chrome.runtime
-        .sendMessage({
-          type: 'markai:sweep-progress',
-          done,
-          total,
-          moved,
-          failed,
-          current: t.title,
-        })
-        .catch(() => {});
-      }
-    }
-  } finally {
-    sweepRunning = false;
-    sweepSnapshot = null;
-    // 补整理期间被让路的自动整理在这里被唤醒（结束责任在结束方）
-    wakeAutoOrganize();
-  }
-  void chrome.runtime
-    .sendMessage({ type: 'markai:sweep-done', done, total, moved, failed, cancelled })
-    .catch(() => {});
-  void appendOrganizeLog(
-    makeOrganizeLogEntry({
-      title: `补整理 ${done} 条散落书签`,
-      url: '',
-      domain: '',
-      action: failed > 0 ? 'failed' : moved > 0 ? 'moved' : 'skipped',
-      detail: cancelled
-        ? `补整理已取消：已处理 ${done}/${total} 条，归入 ${moved} 条。`
-        : `补整理完成：成功归入 ${moved} 条${failed > 0 ? `，失败 ${failed} 条（可在记录里逐条重试）` : ''}。`,
-      ...(failed > 0 ? { needsAttention: true, retryable: true } : {}),
-    }),
-  );
-}
 
 /** 通知已打开的界面弹 toast；没有界面在听时静默（自动动作不需要打扰） */
 function notifyAutoOrganized(ok: boolean, detail: string, burst: boolean, kind?: 'optout' | 'ai-cooldown'): void {

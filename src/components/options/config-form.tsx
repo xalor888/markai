@@ -7,6 +7,7 @@ import { CATEGORY_LABELS, type MemoryCategory } from '@/lib/ai/memory';
 import { clearUndoPoints } from '@/lib/undo/recorder';
 import { useThemeStore, type Theme } from '@/stores/themeStore';
 import { PROVIDERS, getPreset, getModelContextWindow } from '@/lib/providers';
+import { parseCustomHeaders } from '@/lib/ai/request-headers';
 import type { OneShotOutbound } from '@/lib/ai/types';
 import { pushToast } from '@/lib/toast';
 import { openUrl } from '@/lib/open-url';
@@ -17,6 +18,7 @@ import { BrandMark } from '@/components/theme/theme-provider';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Select } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
@@ -127,6 +129,15 @@ export function ConfigForm() {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; message: string } | null>(null);
   const [modelInput, setModelInput] = useState('');
+  /**
+   * 自定义请求头输入框。
+   *
+   * 本地 state 而不是直接绑 config：这些文本要按行解析、非法行要就地报错，
+   * 每次按键都写 storage 会让输入过程被往返覆盖（也是在别处踩过的坑）。
+   * 失焦/停止输入时才提交。
+   */
+  const [headersInput, setHeadersInput] = useState('');
+  const [headerErrors, setHeaderErrors] = useState<string[]>([]);
   const [remoteModels, setRemoteModels] = useState<string[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -162,6 +173,14 @@ export function ConfigForm() {
   const autoWindow = getModelContextWindow(config.model || preset?.defaultModel || '');
   const effectiveWindow = config.contextWindow ?? autoWindow;
   const isAuto = typeof config.contextWindow !== 'number';
+
+  // 自定义请求头：从配置载入一次（之后由用户输入驱动，避免被往返覆盖）
+  useEffect(() => {
+    setHeadersInput(config.customHeaders ?? '');
+    setHeaderErrors(parseCustomHeaders(config.customHeaders).errors);
+    // 只在首次载入配置时同步；用户编辑期间不覆盖输入框
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 载入长期记忆与跨窗口同步监听
   useEffect(() => {
@@ -483,6 +502,52 @@ export function ConfigForm() {
                 <option key={`r-${m}`} value={m} />
               ))}
             </datalist>
+          </Field>
+
+          <Field
+            label="自定义请求头"
+            htmlFor="custom-headers"
+            hint={
+              preset?.sessionHeader ? (
+                <>
+                  已自动带上 <code className="text-foreground">{preset.sessionHeader}</code>
+                  （每个安装一个稳定 ID，不用手填；服务端靠它把同一会话路由到同一节点、让提示缓存生效）。
+                  下面只填服务商**额外**要求的头，每行一条 <code className="text-foreground">Name: Value</code>。
+                </>
+              ) : (
+                <>
+                  有些网关在标准协议之外要求额外请求头（例如 OpenCode Go 的{' '}
+                  <code className="text-foreground">x-opencode-session</code>，缺了直接 400）。
+                  每行一条 <code className="text-foreground">Name: Value</code>；空行与 <code className="text-foreground">#</code> 开头的行忽略。
+                </>
+              )
+            }
+          >
+            <Textarea
+              id="custom-headers"
+              rows={2}
+              value={headersInput}
+              spellCheck={false}
+              placeholder={'# 例：X-Api-Key: abc123\n# 例：x-opencode-session: my-stable-id'}
+              onChange={(e) => {
+                const text = e.target.value;
+                setHeadersInput(text);
+                // 就地校验：非法行当场报出来，别等到请求 400 才让用户猜
+                setHeaderErrors(parseCustomHeaders(text).errors);
+                void update({ customHeaders: text });
+              }}
+              onBlur={() => setHeaderErrors(parseCustomHeaders(headersInput).errors)}
+            />
+            {headerErrors.length > 0 && (
+              <ul role="alert" className="space-y-0.5 text-2xs leading-4 text-destructive">
+                {headerErrors.map((err) => (
+                  <li key={err} className="flex items-start gap-1">
+                    <AlertTriangle className="mt-px h-3 w-3 shrink-0" />
+                    <span className="min-w-0">{err}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
           </Field>
 
           {/* 测试连接：结果独占一行，失败时不会把按钮挤走 */}

@@ -10,6 +10,7 @@ import { createDelayedOpen } from '@/lib/bookmarks/delayed-open';
 import { pushToast } from '@/lib/toast';
 import { openUrl, openUrls } from '@/lib/open-url';
 import { describeBulk } from '@/lib/bookmarks/bulk';
+import { TimelinePanel } from '@/components/bookmark-list/timeline-panel';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
@@ -19,7 +20,7 @@ import { Input } from '@/components/ui/input';
 type BNode = chrome.bookmarks.BookmarkTreeNode;
 
 /** 排序方式（原生书签管理器风格） */
-type SortKey = 'manual' | 'title' | 'url' | 'dateAdded' | 'dateLastUsed';
+type SortKey = 'manual' | 'title' | 'url' | 'dateAdded' | 'dateLastUsed' | 'time';
 
 const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: 'manual', label: '原始顺序' },
@@ -27,6 +28,12 @@ const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: 'url', label: '按地址' },
   { value: 'dateAdded', label: '按添加时间' },
   { value: 'dateLastUsed', label: '按最近使用' },
+  /*
+   * 「按收藏时间」= 原来的时间线：**跨文件夹**列出全部书签、按天分组。
+   * 它不再是顶栏的一个独立视图按钮——切视图会丢上下文，而且用户得先想起来去点它。
+   * 现在只是排序里的一项，选中即生效。
+   */
+  { value: 'time', label: '按收藏时间（全部书签）' },
 ];
 
 /**
@@ -57,7 +64,12 @@ export function BookmarkList({ className, compact = false }: { className?: strin
   /** 子项加载失败的原因（真失败，不是删除/移动竞态） */
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState<BNode[] | null>(null);
-  const [query, setQuery] = useState('');
+  /*
+   * 搜索词只有一个来源：`bookmarkStore.searchQuery`（顶栏那个唯一的搜索框写入）。
+   * 重做前列表自己维护一份 state、树再维护一份，两边各搜一半——用户永远搜不全。
+   */
+  const query = useBookmarkStore((s) => s.searchQuery);
+  const setQuery = useBookmarkStore((s) => s.setSearchQuery);
   const [sortBy, setSortBy] = useState<SortKey>('manual');
   const [activeIndex, setActiveIndex] = useState(-1);
   const [anchorIndex, setAnchorIndex] = useState<number | null>(null);
@@ -107,12 +119,6 @@ export function BookmarkList({ className, compact = false }: { className?: strin
     if (listRef.current) listRef.current.scrollTop = 0;
   }, [selectedFolderId, query]);
 
-  // 「在树中显示」会清空 store.searchQuery → 同步清空本地搜索词（回到浏览模式）
-  const storeSearchQuery = useBookmarkStore((s) => s.searchQuery);
-  useEffect(() => {
-    if (storeSearchQuery === '' && query) setQuery('');
-  }, [storeSearchQuery]); // eslint-disable-line react-hooks/exhaustive-deps
-
   // 搜索（防抖）
   useEffect(() => {
     if (!query.trim()) {
@@ -133,6 +139,22 @@ export function BookmarkList({ className, compact = false }: { className?: strin
       clearTimeout(timer);
     };
   }, [query]);
+
+  /*
+   * 「按收藏时间」是**跨文件夹的全部书签**。此时用户点树里某个文件夹，
+   * 意思显然是想看那个文件夹——继续停在时间线会让人觉得"点了没反应"。
+   * 所以一旦切换文件夹，就自动退回普通排序。
+   */
+  /*
+   * 用 `folderSelectTick`（每次点文件夹都 +1）而不是比较 id：
+   * 用户点的往往就是**当前已选中**的那个文件夹（「书签栏」），id 不变，
+   * 只比 id 的写法会正好漏掉最常走的那条路径 —— 表现就是"点了没反应"。
+   */
+  const folderSelectTick = useBookmarkStore((s) => s.folderSelectTick);
+  useEffect(() => {
+    if (folderSelectTick === 0) return; // 首次挂载 / 恢复上次选中不算用户操作
+    setSortBy((cur) => (cur === 'time' ? 'manual' : cur));
+  }, [folderSelectTick]);
 
   const browsing = !query.trim();
   const rawItems = browsing ? children : searchResults;
@@ -470,11 +492,10 @@ export function BookmarkList({ className, compact = false }: { className?: strin
     void copyText(lines.join('\n'), `已复制 ${lines.length} 条 Markdown`);
   };
 
-  /** 搜索词变化：同步到 store（「在树中显示」依赖该镜像清空搜索） */
+  /** 搜索词变化（现在只有顶栏那一个入口会调它） */
   const onQueryChange = (value: string) => {
     setQuery(value);
     setActiveIndex(-1); // 搜索/清空切换数据集，残留高亮会指向错误行
-    useBookmarkStore.getState().setSearchQuery(value.trim());
     if (!value.trim()) setAnchorIndex(null);
   };
 
@@ -652,6 +673,27 @@ export function BookmarkList({ className, compact = false }: { className?: strin
     [canReorder, selectedFolderId, items],
   );
 
+  /*
+   * 顶栏搜索框里按 Enter：直接打开第一条匹配（文件夹则进入）。
+   * 搜索框搬到顶栏之后，这个便利行为要靠 document 级监听补回来——
+   * 否则「输完按回车」会变成什么都不发生（README 里承诺过这条）。
+   */
+  useEffect(() => {
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== 'Enter' || e.isComposing) return;
+      const el = document.activeElement as HTMLElement | null;
+      if (el?.id !== 'markai-search') return;
+      const first = (searchResults ?? items ?? [])[0];
+      if (!first) return;
+      e.preventDefault();
+      if (first.url) void openUrl(first.url);
+      else useBookmarkStore.getState().selectFolder(first.id);
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [searchResults, items]);
+
+
   return (
     <div className={cn('animate-fade-in flex h-full min-h-0 min-w-0 flex-col bg-background', className)}>
       {/* 工具栏：面包屑 + 排序 + 搜索 */}
@@ -709,9 +751,13 @@ export function BookmarkList({ className, compact = false }: { className?: strin
               {!compact && '打开全部'}
             </Button>
           )}
-          {/* 排序（仅浏览模式 + 非紧凑布局可用） */}
-          {!compact && (
-            <div className="relative" title="排序">
+          {/*
+           * 排序：**紧凑布局也要有**。
+           * 重做前这里写着 `!compact`，于是侧边栏（最常用的形态）根本没有排序下拉——
+           * 而「按收藏时间」正是时间线的入口，等于窄屏下完全进不去时间线。
+           */}
+          {(
+            <div className={cn('relative', compact && 'w-[84px]')} title="排序">
               <ArrowDownUp className="pointer-events-none absolute top-1/2 left-1.5 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
               <select
                 value={sortBy}
@@ -731,37 +777,6 @@ export function BookmarkList({ className, compact = false }: { className?: strin
               </select>
             </div>
           )}
-          {/* 搜索 */}
-          <div className={cn('relative', compact ? 'w-32' : 'w-40')}>
-            <Search className="absolute top-1/2 left-2 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              id="markai-search"
-              value={query}
-              onChange={(e) => onQueryChange(e.target.value)}
-              onKeyDown={(e) => {
-                // Enter：直接打开第一条匹配（文件夹则进入）
-                if (e.key === 'Enter' && !e.nativeEvent.isComposing) {
-                  const first = (searchResults ?? items ?? [])[0];
-                  if (!first) return;
-                  e.preventDefault();
-                  if (first.url) void openUrl(first.url);
-                  else useBookmarkStore.getState().selectFolder(first.id);
-                }
-              }}
-              placeholder="搜索书签…"
-              className="h-7 pl-6 pr-6 text-xs"
-            />
-            {query && (
-              <button
-                type="button"
-                onClick={() => onQueryChange('')}
-                className="absolute top-1/2 right-1.5 -translate-y-1/2 text-muted-foreground transition-colors hover:text-foreground"
-                aria-label="清除搜索"
-              >
-                <X className="h-3 w-3" />
-              </button>
-            )}
-          </div>
         </div>
       </div>
 
@@ -848,7 +863,10 @@ export function BookmarkList({ className, compact = false }: { className?: strin
         </div>
       )}
 
-      {/* 列表（键盘可导航 + 接收树拖放） */}
+      {sortBy === 'time' ? (
+        <TimelinePanel className="min-w-0 flex-1" />
+      ) : (
+      /* 列表（键盘可导航 + 接收树拖放） */
       <div
         ref={listRef}
         tabIndex={0}
@@ -978,6 +996,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
           </div>
         )}
       </div>
+      )}
     </div>
   );
 }

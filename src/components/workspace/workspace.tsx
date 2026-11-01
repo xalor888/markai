@@ -1,15 +1,4 @@
-import {
-  BookmarkPlus,
-  Clock,
-  Keyboard,
-  LayoutPanelLeft,
-  Maximize,
-  MessageSquare,
-  PanelLeftOpen,
-  Settings,
-  Trash2,
-  Wand2,
-} from 'lucide-react';
+import { PanelLeftOpen, Search } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useAIStore } from '@/stores/aiStore';
 import { resolveTitlePath, useBookmarkStore } from '@/stores/bookmarkStore';
@@ -17,11 +6,12 @@ import { pushToast } from '@/lib/toast';
 import { openUrl } from '@/lib/open-url';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
-import { BrandMark, ThemeToggle } from '@/components/theme/theme-provider';
+import { BrandMark } from '@/components/theme/theme-provider';
+import { MoreMenu } from '@/components/workspace/more-menu';
+import { CommandPalette } from '@/components/command/command-palette';
 import { ChatPanel } from '@/components/chat/chat-panel';
 import { BookmarkTree, ContextMenuOverlay } from '@/components/sidebar/bookmark-tree';
 import { BookmarkList } from '@/components/bookmark-list/bookmark-list';
-import { TimelinePanel } from '@/components/bookmark-list/timeline-panel';
 import { BookmarkDialogs } from '@/components/bookmark-list/bookmark-dialogs';
 import { DeletionsDialog } from '@/components/deletions/deletions-dialog';
 import { OrganizeLogDialog } from '@/components/organize/organize-log-dialog';
@@ -53,6 +43,8 @@ export function Workspace({
   // 整理记录：自动整理是后台行为，用户需要一个随时能翻账的地方
   const [organizeLogOpen, setOrganizeLogOpen] = useState(initialOrganizeOpen);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
+  /** ⌘K 命令面板：一个入口做三件事（搜书签 / 跳文件夹 / 执行动作） */
+  const [commandOpen, setCommandOpen] = useState(false);
   /** 有「需要留意」的整理失败，入口上挂一个小红点（打开记录后清除） */
   const [organizeAlert, setOrganizeAlert] = useState(false);
   // 聊天面板宽度（用户可拖拽调整，持久化到 storage）
@@ -100,22 +92,16 @@ export function Workspace({
       .get('markai.ui.treeCollapsed')
       .then((d) => {
         const saved = d['markai.ui.treeCollapsed'];
-        if (typeof saved === 'boolean') useUIStore.setState({ treeCollapsed: saved });
+        // full 模式是宽屏三分栏，树应当常驻；compact 才需要"默认收起、用时展开"
+        if (mode === 'full') useUIStore.setState({ treeCollapsed: false });
+        else if (typeof saved === 'boolean') useUIStore.setState({ treeCollapsed: saved });
       })
       .catch(() => {});
   }, []);
-  const mainView = useUIStore((s) => s.mainView);
-  const setMainView = useUIStore((s) => s.setMainView);
-  // 树里选了文件夹（**包括点的就是当前已选中的那个**）= 想看这个文件夹的内容：
-  // 时间线自动让位回列表，避免「点了没反应」。
-  // 用计数而不是比较 selectedFolderId：同一文件夹再次点击时值不变，
-  // 只比值的写法会正好漏掉用户最常走的那条路径（T77 回归）。
-  const folderSelectTick = useBookmarkStore((s) => s.folderSelectTick);
-  useEffect(() => {
-    if (folderSelectTick === 0) return; // 首次挂载 / 恢复上次选中不算用户操作
-    if (useUIStore.getState().mainView === 'timeline') setMainView('list');
-  }, [folderSelectTick, setMainView]);
   const pendingCount = useAIStore((s) => s.pendingDeletions.filter((p) => p.status === 'pending').length);
+  // 顶栏唯一搜索框：树与列表都读它
+  const searchQuery = useBookmarkStore((s) => s.searchQuery);
+  const setSearchQuery = useBookmarkStore((s) => s.setSearchQuery);
   const streaming = useAIStore((s) => s.streaming);
   const messages = useAIStore((s) => s.messages);
   const activeId = useAIStore((s) => s.activeId);
@@ -180,6 +166,43 @@ export function Workspace({
     };
     chrome.runtime.onMessage.addListener(onMessage);
     return () => chrome.runtime.onMessage.removeListener(onMessage);
+  }, []);
+
+  /*
+   * ⌘K / Ctrl+K：命令面板。
+   * 这是「找东西」的主路径——重做前要找一条书签得先想"它在哪个文件夹"，再一层层点开。
+   */
+  useEffect(() => {
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setCommandOpen((v) => !v);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  /*
+   * 命令面板里点「打开整理记录 / 待删除清单 / 快捷键」时，用自定义事件转交过来。
+   * 为什么不直接把 setState 传进去：面板的数据源只依赖 roots，
+   * 传一堆回调会让它每次渲染都重建整个结果集（400 条书签的扁平化）。
+   */
+  useEffect(() => {
+    const onOrganize = () => {
+      setOrganizeLogOpen(true);
+      setOrganizeAlert(false);
+    };
+    const onDeletions = () => setDeletionsOpen(true);
+    const onShortcuts = () => setShortcutsOpen(true);
+    document.addEventListener('markai:open-organize-log', onOrganize);
+    document.addEventListener('markai:open-deletions', onDeletions);
+    document.addEventListener('markai:open-shortcuts', onShortcuts);
+    return () => {
+      document.removeEventListener('markai:open-organize-log', onOrganize);
+      document.removeEventListener('markai:open-deletions', onDeletions);
+      document.removeEventListener('markai:open-shortcuts', onShortcuts);
+    };
   }, []);
 
   // 「?」打开快捷键速查：界面上不看文档也能发现这些键
@@ -252,120 +275,55 @@ export function Workspace({
       <header className="relative flex h-11 min-w-0 shrink-0 items-center gap-2 border-b border-border bg-card px-3">
         {/* 顶栏底部：品牌色淡出分隔线 */}
         <span className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-accent/40 via-border to-transparent" />
-        <div className="flex min-w-0 flex-1 items-center gap-2 overflow-x-auto">
         <BrandMark />
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={() => void saveCurrentTab()}
-          title="收藏当前页面"
-          aria-label="收藏当前页面"
-        >
-          <BookmarkPlus className="h-3.5 w-3.5" />
-        </Button>
-        <Button
-          variant="ghost"
-          size="sm"
-          className={cn('h-8 gap-1.5 px-2', pendingCount > 0 ? 'text-destructive' : 'text-muted-foreground')}
-          onClick={() => setDeletionsOpen(true)}
-          title="待删除清单"
-        >
-          <Trash2 className="h-4 w-4" />
-          <span className="max-[560px]:hidden">待删</span>
-          {pendingCount > 0 && (
-            <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive/10 px-1.5 text-2xs font-semibold text-destructive">
-              {pendingCount}
-            </span>
-          )}
-        </Button>
-
-        <Button
-          variant="ghost"
-          size="sm"
-          className={cn('relative h-8 gap-1.5 px-2', organizeLogOpen ? 'bg-accent-muted text-accent' : 'text-muted-foreground')}
-          onClick={() => {
+        {/*
+         * 唯一的搜索框：同时过滤书签树与列表。
+         * 重做前这里有两个（树的「过滤树…」与列表的「搜索书签…」），用户不知道该用哪个，
+         * 而且两个框各管一半，搜出来的结果永远不完整。
+         */}
+        <div className="relative min-w-0 flex-1">
+          <Search
+            className="pointer-events-none absolute top-1/2 left-2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
+            aria-hidden="true"
+          />
+          <input
+            id="markai-search"
+            type="search"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                setSearchQuery('');
+                (e.target as HTMLInputElement).blur();
+              }
+            }}
+            placeholder="搜索书签与文件夹…"
+            aria-label="搜索书签与文件夹"
+            spellCheck={false}
+            className="h-7 w-full rounded-sm border border-transparent bg-muted/60 pr-2 pl-8 text-xs text-foreground outline-none placeholder:text-muted-foreground focus:border-ring focus:bg-card [&::-webkit-search-cancel-button]:hidden"
+          />
+        </div>
+        {/* 其余入口全收进「更多」：有待删/整理异常时触发按钮上带红点，收起来不等于藏起来 */}
+        <MoreMenu
+          pendingCount={pendingCount}
+          organizeAlert={organizeAlert}
+          chatOpen={chatOpen}
+          mode={mode}
+          onToggleChat={() => setChatOpen((v) => !v)}
+          onDeletions={() => setDeletionsOpen(true)}
+          onOrganize={() => {
             setOrganizeLogOpen(true);
             setOrganizeAlert(false);
           }}
-          title="整理记录：自动整理做了哪些事、能否重试"
-        >
-          <Wand2 className="h-4 w-4" />
-          {mode === 'full' && <span className="max-[560px]:hidden">整理</span>}
-          {organizeAlert && (
-            <span className="absolute top-1 right-1 h-1.5 w-1.5 rounded-full bg-destructive ring-2 ring-card" aria-hidden="true" />
-          )}
-        </Button>
-
-        <Button
-          variant="ghost"
-          size="sm"
-          className={cn('h-8 gap-1.5 px-2', mainView === 'timeline' ? 'bg-accent-muted text-accent' : 'text-muted-foreground')}
-          onClick={() => setMainView(mainView === 'timeline' ? 'list' : 'timeline')}
-          title={mainView === 'timeline' ? '返回文件夹列表' : '时间线：按收藏时间浏览全部书签（不含文件夹）'}
-          aria-pressed={mainView === 'timeline'}
-        >
-          <Clock className="h-4 w-4" />
-          {mode === 'full' && <span className="max-[560px]:hidden">时间线</span>}
-        </Button>
-
-        </div>
-
-        <div className="ml-auto flex shrink-0 items-center gap-1">
-          {mode === 'compact' && (
-            <Button variant="ghost" size="icon" onClick={openFullPage} title="在完整页面打开" aria-label="在完整页面打开">
-              <Maximize className="h-3.5 w-3.5" />
-            </Button>
-          )}
-          {mode === 'full' && (
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => void openSidePanel()}
-              title="在侧边栏打开"
-              aria-label="在侧边栏打开"
-            >
-              <LayoutPanelLeft className="h-3.5 w-3.5" />
-            </Button>
-          )}
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => setChatOpen((v) => !v)}
-            title={chatOpen ? '收起 Agent 面板' : '展开 Agent 面板'}
-            aria-label={chatOpen ? '收起 Agent 面板' : '展开 Agent 面板'}
-            className={chatOpen ? 'bg-accent-muted text-accent' : 'relative'}
-          >
-            <MessageSquare className="h-3.5 w-3.5" />
-            {/* 抽屉收起期间的新消息未读数 */}
-            {unread > 0 && (
-              <span className="absolute -top-0.5 -right-0.5 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-accent px-0.5 text-2xs font-medium text-accent-foreground ring-2 ring-card">
-                {unread > 99 ? '99+' : unread}
-              </span>
-            )}
-          </Button>
-          {mode === 'full' && (
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => setShortcutsOpen(true)}
-              title="快捷键与操作（?）"
-              /* 极窄屏让位：顶栏放不下，先收次要入口 */
-              aria-label="快捷键与操作"
-            >
-              <Keyboard className="h-3.5 w-3.5" />
-            </Button>
-          )}
-          <ThemeToggle />
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => void chrome.runtime.openOptionsPage()}
-            title="AI 设置"
-            aria-label="AI 设置"
-          >
-            <Settings className="h-3.5 w-3.5" />
-          </Button>
-        </div>
+          onSettings={() => void chrome.runtime.openOptionsPage()}
+          onShortcuts={() => setShortcutsOpen(true)}
+          onSwitchContainer={() => {
+            if (mode === 'full') void openSidePanel();
+            else openFullPage();
+          }}
+          onSaveCurrentTab={() => void saveCurrentTab()}
+        />
       </header>
 
       {/* 主体三栏 */}
@@ -386,12 +344,24 @@ export function Workspace({
             </button>
           </div>
         ) : (
-          // 极窄屏（320px 是侧边栏最小宽度）把树压窄：176px 的树 + 中栏在这个宽度下会撑出横向滚动条
-          // overflow-hidden：窄到放不下时宁可裁掉树头部的次要图标，也不要让它盖住中栏
-          <BookmarkTree
-            collapsible
-            className="w-44 max-[359px]:w-32 shrink-0 overflow-hidden border-r border-border"
-          />
+          /*
+           * 展开态 = **浮层盖在列表上**，而不是挤压列表宽度。
+           *
+           * 重做前树常驻 176–200px：410px 宽的侧边栏里，中栏只剩两百多像素，标题全被截断，
+           * 用户看到的一屏就是"三行文件夹 + 一大片空白"。现在列表永远占满宽度，
+           * 需要导航时才把树浮出来，点空白处（或选中文件夹）就收起。
+           */
+          <>
+            <div
+              className="absolute inset-0 z-20 bg-foreground/5"
+              onClick={() => setTreeCollapsed(true)}
+              aria-hidden="true"
+            />
+            <BookmarkTree
+              collapsible
+              className="animate-fade-in absolute inset-y-0 left-0 z-30 w-52 border-r border-border bg-card shadow-lg"
+            />
+          </>
         )}
         {/* 一个面板渲染出错不该让整个工作区白屏：中栏与 Agent 面板各包一层边界 */}
         <ErrorBoundary area="书签列表" className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -401,11 +371,7 @@ export function Workspace({
            * 显式给一个 flex-col 容器，提示条才真的在列表下方。
            */}
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">
-            {mainView === 'timeline' ? (
-              <TimelinePanel className="min-w-0 flex-1" />
-            ) : (
-              <BookmarkList compact={mode === 'compact'} className="min-w-0 flex-1" />
-            )}
+            <BookmarkList compact={mode === 'compact'} className="min-w-0 flex-1" />
             {/* 首次打开的三步提示：底部一条可跳过的横幅，不做遮罩导览——
                 顶栏图标不显眼，但把界面压暗、还要点三下才能用，对「只想赶紧整理一下」的人是净负担。 */}
             <OnboardingTip onGoOrganize={() => setOrganizeLogOpen(true)} />
@@ -475,6 +441,7 @@ export function Workspace({
       {/* 浮层：右键菜单、书签管理对话框、全局待删清单 */}
       <ContextMenuOverlay />
       <BookmarkDialogs />
+      <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} />
       <DeletionsDialog open={deletionsOpen} onOpenChange={setDeletionsOpen} />
       <OrganizeLogDialog open={organizeLogOpen} onOpenChange={setOrganizeLogOpen} />
       <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />

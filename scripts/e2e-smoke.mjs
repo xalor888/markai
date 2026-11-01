@@ -73,7 +73,6 @@ const RUN_START = Date.now();
  * 快速档：跳过三处最慢的段落，用于「改一行 UI 后 20 秒内知道有没有砸东西」。
  *  - 大库渲染（1200 条，约 35s）
  *  - 新用户视角（清空 storage + 重载，约 10s）
- *  - 补整理的取消（造 400 条 + 跑到一半取消，约 15s）
  * 提交前仍应跑完整档（不加这个环境变量）。
  */
 const QUICK = process.env.MARKAI_E2E_QUICK === '1';
@@ -188,6 +187,58 @@ async function run() {
   const hasApi = await ev('typeof chrome !== "undefined" && !!chrome.bookmarks');
   check('扩展页面在真实 Chrome 中加载成功', href === PAGE_URL && hasApi, href);
 
+  /**
+   * 重做后顶栏只剩三个元素（品牌标 / 搜索框 / 更多），原来的「整理记录 / 待删 / 时间线 /
+   * 快捷键」都收进了「更多」菜单；时间线也变成排序里的一项。
+   *
+   * **必须在每次 reload 之后重新注入**：`window.__mk` 挂在页面上，页面一刷新就没了——
+   * 早先把注入写在第一段之前，后面任何一次 reload 都让 helper 静默失效（表现为
+   * "对话框打不开"），而失败信息完全指不到真正的原因。
+   */
+  async function installHelpers() {
+  /*
+   * 重做后顶栏只剩三个元素（品牌标 / 搜索框 / 更多），原来的「整理记录 / 待删 / 时间线 /
+   * 快捷键」按钮都收进了「更多」菜单；时间线也变成了排序里的一项。
+   * 这里注入一组页面内 helper，让下面的断言不必每处都重写"点开菜单再点那一项"。
+   */
+    await ev(`(() => {
+    const setSelect = (value) => {
+      const sel = document.querySelector('select');
+      if (!sel) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, 'value').set;
+      setter.call(sel, value);
+      sel.dispatchEvent(new Event('change', { bubbles: true }));
+      return true;
+    };
+    window.__mk = {
+      openMenu() {
+        // 幂等：菜单已经开着时再点会把 it 关掉（早先的 helper 就栽在这里）
+        if (document.querySelector('[role="menu"]')) return;
+        document.querySelector('button[aria-label="更多"]')?.click();
+      },
+      async item(label) {
+        this.openMenu();
+        await new Promise((r) => setTimeout(r, 320));
+        const items = [...document.querySelectorAll('[role="menuitem"]')];
+        const hit = items.find((b) => (b.textContent || '').includes(label));
+        if (hit) hit.click();
+        return !!hit;
+      },
+      async openOrganizeLog() { return this.item('整理记录'); },
+      async openDeletions() { return this.item('待删除清单'); },
+      async openShortcuts() { return this.item('快捷键'); },
+      setSortTime() { return setSelect('time'); },
+      setSortManual() { return setSelect('manual'); },
+      /** 现在「在时间线里」= 排序是 time（不再有独立视图） */
+      inTimeline() {
+        const sel = document.querySelector('select');
+        return !!sel && sel.value === 'time';
+      },
+    };
+    return true;
+  })()`);
+  }
+
   async function reload() {
     await cdp.send('Page.reload', {}, sessionId);
     for (let i = 0; i < 80; i++) {
@@ -196,6 +247,7 @@ async function run() {
       await sleep(150);
     }
     await sleep(400);
+    await installHelpers();
   }
 
   /* ── 准备数据：3 条书签（放在同一文件夹里，避开自动整理的干扰） ── */
@@ -211,21 +263,23 @@ async function run() {
   })()`);
   check('测试书签创建成功（3 条）', seed.ids.length === 3);
 
+
   markSection('时间线');
 
   /* ── 1. 时间线面板 ── */
   await reload();
-  const entry = await ev(`(() => {
-    const btn = document.querySelector('button[title^="时间线"]');
-    if (!btn) return { found: false };
-    btn.click();
-    return { found: true, label: btn.getAttribute('title') };
+  // 时间线不再是顶栏按钮，而是排序里的一项「按收藏时间（全部书签）」
+  const entry = await ev(`(async () => {
+    const ok = window.__mk?.setSortTime();
+    await new Promise((r) => setTimeout(r, 400));
+    const sel = document.querySelector('select');
+    return { found: !!ok && sel?.value === 'time', label: sel?.selectedOptions?.[0]?.textContent || '' };
   })()`);
-  check('顶栏存在清晰的时间线入口', entry.found, entry.label || '');
+  check('排序里能切到「按收藏时间」（= 原来的时间线）', entry.found, entry.label || '');
   await sleep(500);
 
   const timeline = await ev(`(() => {
-    const rows = [...document.querySelectorAll('[role="button"]')].filter(el => (el.getAttribute('title') || '').includes('http'));
+    const rows = [...document.querySelectorAll('[role="listitem"]')].filter(el => (el.getAttribute('title') || '').includes('http'));
     const titles = rows.map(el => el.querySelector('p')?.textContent || '');
     const text = document.body.innerText;
     return {
@@ -252,7 +306,7 @@ async function run() {
 
   // 空状态：过滤无匹配
   const empty = await ev(`(() => {
-    const input = document.querySelector('input[aria-label="过滤时间线"]');
+    const input = document.querySelector('input#markai-search');
     if (!input) return { found: false };
     const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
     setter.call(input, '绝对不存在的关键词zzz');
@@ -498,9 +552,10 @@ async function run() {
     const grand = parent?.parentId ? (await chrome.bookmarks.get(parent.parentId))[0] : null;
     return { parentTitle: parent?.title, grandTitle: grand?.title, nodeTitle: node.title };
   })()`);
+  // 契约变了（0.2.35）：认不出归属时留在原地，不再建「自动整理/<域名>」
   check(
-    '新增书签自动归类到「自动整理 / <域名>」',
-    autoResult.parentTitle === 'example-preview.dev' && autoResult.grandTitle === '自动整理',
+    '新增书签认不出归属时留在原地（不再按域名建文件夹）',
+    autoResult.parentTitle === '书签栏' && !autoResult.grandTitle,
     JSON.stringify(autoResult),
   );
 
@@ -522,7 +577,7 @@ async function run() {
     (await chrome.bookmarks.getTree()).forEach(walk);
     return ids.length;
   })()`);
-  await ev(`(() => { const b = document.querySelector('button[title^="时间线"]'); if (b) b.click(); })()`);
+  await ev(`(async () => { window.__mk?.setSortTime(); await new Promise(r => setTimeout(r, 150)); })()`);
   await sleep(700);
   const dayHeader = await ev(`(() => {
     const h = [...document.querySelectorAll('h3')].find((x) => x.textContent.includes('今天'));
@@ -539,7 +594,7 @@ async function run() {
   /* ── 6. 时间线里点树中「已选中」的文件夹：必须回到列表 ──
    * 默认选中的就是「书签栏」：用户在时间线里点它想看内容时，
    * selectedFolderId 没变化，靠"监听选中值变化"的写法不会触发 → 点了没反应。 */
-  const inTimelineBefore = await ev(`!!document.querySelector('input[aria-label="过滤时间线"]')`);
+  const inTimelineBefore = await ev(`!!document.querySelector('input#markai-search')`);
   const clickedSelected = await ev(`(() => {
     const row = document.querySelector('[data-node-id="1"][aria-selected="true"]');
     if (!row) return false;
@@ -547,106 +602,25 @@ async function run() {
     return true;
   })()`);
   await sleep(500);
-  const inTimelineAfter = await ev(`!!document.querySelector('input[aria-label="过滤时间线"]')`);
+  const inTimelineAfter = await ev(`!!document.querySelector('input#markai-search')`);
   check(
     '时间线里点树中「已选中」的文件夹会回到列表（不再「点了没反应」）',
     inTimelineBefore && clickedSelected === true && inTimelineAfter === false,
     `在时间线=${inTimelineBefore} · 点中已选中行=${clickedSelected} · 点完仍在时间线=${inTimelineAfter}`,
   );
 
-  markSection('整理记录与补整理');
+  markSection('整理记录');
 
-  /* ── 7. 整理记录 + 补整理（用户要「看得见」的自动整理） ── */
-  const organizeEntry = await ev(`(() => {
-    const btn = document.querySelector('button[title^="整理记录"]');
-    return { found: !!btn, title: btn?.getAttribute('title') || '' };
+  /* ── 7. 整理记录（用户要「看得见」的自动整理） ── */
+  // 重做后顶栏只剩三个元素：整理记录收在「更多」菜单里（点开能看到即可）
+  const organizeEntry = await ev(`(async () => {
+    document.querySelector('button[aria-label="更多"]')?.click();
+    await new Promise((r) => setTimeout(r, 150));
+    const items = [...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent.trim());
+    document.querySelector('button[aria-label="更多"]')?.click();
+    return { found: items.some((t) => t.includes('整理记录')), items };
   })()`);
-  check('顶栏有「整理记录」入口', organizeEntry.found, organizeEntry.title);
-
-  /* 补整理的规模数字必须是真话：面板写「检测到 N 条散落」时，N 必须等于后台真的会处理的条数。
-   * 先关掉自动整理开关造两条散落在根目录的书签，再把它和「实际会处理的条数」逐一对上。
-   * 曾出过的错：UI 传错了收集函数的入参形态（把三个根文件夹当成 getTree 的 [根]），
-   * 显示的数字实际指向「书签栏里某个子文件夹里的书签」；而这条用例当时只断言
-   * 「这句话存在」、不校验数字，于是它一直是绿的。 */
-  const looseSeed = await ev(`(async () => {
-    const cfg = (await chrome.storage.local.get('markai.config'))['markai.config'] || {};
-    await chrome.storage.local.set({ 'markai.config': { ...cfg, autoOrganizeNew: false } });
-    const bar = (await chrome.bookmarks.getTree())[0].children.find((c) => c.id === '1');
-    const a = await chrome.bookmarks.create({ parentId: bar.id, title: '散落规模 A', url: 'https://loose-alpha.example.net/a' });
-    const b = await chrome.bookmarks.create({ parentId: bar.id, title: '散落规模 B', url: 'https://loose-beta.example.net/b' });
-    // 越过 onCreated 的去抖窗口，确保它们确实留在根目录
-    await new Promise((r) => setTimeout(r, 1600));
-    return { ids: [a.id, b.id], cfg };
-  })()`);
-  await sleep(700);
-
-  await ev(`(() => { document.querySelector('button[title^="整理记录"]')?.click(); })()`);
-  await sleep(900);
-  const logDialog = await ev(`(() => {
-    const dlg = document.querySelector('[role="dialog"]');
-    if (!dlg) return { open: false };
-    const text = dlg.innerText;
-    return {
-      open: true,
-      hasTitle: text.includes('整理记录'),
-      hasToday: /今天\\s*\\d+\\s*条/.test(text),
-      hasSweep: text.includes('补整理已有书签'),
-      hasTargets: text.includes('归到'),
-      // 第一次自动整理的结果里应当带一次引导（之后不再重复）
-      hasFirstHint: text.includes('回看与撤销'),
-      // 判断来源：用户能看出 AI 到底用了多频繁
-      hasViaRow: text.includes('判断来源') && text.includes('兜底'),
-      // 补整理前先告诉用户规模（「检测到 N 条散落…」），别让人盲点
-      hasLooseCount: text.includes('检测到 ') && text.includes(' 条散落'),
-      // 第 4 段真实触发过自动整理，记录里必须能看到它去过哪里
-      hasRecord: text.includes('自动整理测试页') || text.includes('example-preview'),
-      text: text.slice(0, 160),
-    };
-  })()`);
-  check(
-    '整理记录面板：统计、判断来源、补整理规模、真实记录、首次引导都在',
-    logDialog.open && logDialog.hasTitle && logDialog.hasToday && logDialog.hasSweep && logDialog.hasRecord &&
-      logDialog.hasTargets && logDialog.hasFirstHint && logDialog.hasViaRow && logDialog.hasLooseCount,
-    JSON.stringify(logDialog),
-  );
-
-  /* 规模数字对不对：面板上的 N 必须等于后台真会处理的条数。
-   * 这里按「根目录直挂的书签 + 自动整理容器里直挂的书签」自己算一遍（与后台同一规则），
-   * 然后和面板文案里的数字逐字比较——数字错了就红，而不是只检查这句话存在。 */
-  const looseAudit = await ev(`(async () => {
-    const dlg = document.querySelector('[role="dialog"]');
-    const text = dlg ? dlg.innerText : '';
-    const m = text.match(/检测到\\s*(\\d+)\\s*条散落/);
-    const roots = (await chrome.bookmarks.getTree())[0]?.children ?? [];
-    let actual = 0;
-    for (const root of roots) {
-      for (const child of root.children ?? []) {
-        if (child.url && /^https?:\\/\\//i.test(child.url)) { actual++; continue; }
-        if ((child.title || '') === '自动整理') {
-          for (const g of child.children ?? []) {
-            if (g.url && /^https?:\\/\\//i.test(g.url)) actual++;
-          }
-        }
-      }
-    }
-    return { shown: m ? Number(m[1]) : null, actual };
-  })()`);
-  check(
-    '补整理的规模数字与实际会处理的条数一致（不是凭空的数字）',
-    looseAudit.shown !== null && looseAudit.shown === looseAudit.actual && looseAudit.actual >= 2,
-    JSON.stringify(looseAudit),
-  );
-
-  // 清理刚才造的两条散落书签并恢复自动整理开关，避免影响后面的补整理用例
-  await ev(`(async () => {
-    const cfg = (await chrome.storage.local.get('markai.config'))['markai.config'] || {};
-    await chrome.storage.local.set({ 'markai.config': { ...cfg, autoOrganizeNew: true } });
-    for (const id of ${JSON.stringify(looseSeed.ids)}) {
-      await chrome.bookmarks.remove(id).catch(() => {});
-    }
-    return true;
-  })()`);
-  await sleep(400);
+  check('「更多」菜单里有「整理记录」入口', organizeEntry.found, JSON.stringify(organizeEntry.items));
 
   // 对话框打开后的对比度：整理记录是文本最密的地方，此前只验过初始渲染
   const logContrast = await ev(CONTRAST_EXPR);
@@ -750,7 +724,7 @@ async function run() {
   // 但 reload 会把整理记录对话框一起关掉，而下面的用例依赖它——所以重新打开。
   await reload();
   await sleep(700);
-  await ev(`(() => { document.querySelector('button[title^="整理记录"]')?.click(); })()`);
+  await ev(`(async () => { await (async () => {if (!document.querySelector('[role="menu"]')) document.querySelector('button[aria-label="更多"]')?.click();await new Promise(r => setTimeout(r, 320));const items = [...document.querySelectorAll('[role="menuitem"]')];const hit = items.find(b => (b.textContent || '').includes('整理记录'));if (hit) hit.click();await new Promise(r => setTimeout(r, 300));return !!hit; })(); })()`);
   await sleep(800);
   check(
     '撤销历史面板：能打开，且标出「自动整理」来源',
@@ -1005,7 +979,7 @@ async function run() {
 
   // 清空记录必须先二次确认：点一下就把历史抹掉是不可接受的
   // （上一段结束时把对话框关掉了，这里重新打开）
-  await ev(`(() => { document.querySelector('button[title^="整理记录"]')?.click(); })()`);
+  await ev(`(async () => { await (async () => {if (!document.querySelector('[role="menu"]')) document.querySelector('button[aria-label="更多"]')?.click();await new Promise(r => setTimeout(r, 320));const items = [...document.querySelectorAll('[role="menuitem"]')];const hit = items.find(b => (b.textContent || '').includes('整理记录'));if (hit) hit.click();await new Promise(r => setTimeout(r, 300));return !!hit; })(); })()`);
   await sleep(800);
   const clearFlow = await ev(`(() => {
     const dlg = document.querySelector('[role="dialog"]');
@@ -1042,206 +1016,19 @@ async function run() {
   })()`);
   check('取消清空后记录仍在（不会因为点过确认按钮就丢）', afterCancel.stillHasRecords, JSON.stringify(afterCancel));
 
-  /* 补整理：先关掉自动整理开关造两条「散落」书签（否则 onCreated 立刻把它们归位了），
-   * 再打开开关、点补整理，验证它们被收走。 */
-  const sweepSeed = await ev(`(async () => {
-    const cfg = (await chrome.storage.local.get('markai.config'))['markai.config'] || {};
-    const off = { ...cfg, providerId: 'deepseek', baseUrl: '', apiKey: '', model: '', autoOrganizeNew: false };
-    await chrome.storage.local.set({ 'markai.config': off });
-    const bar = (await chrome.bookmarks.getTree())[0].children.find(c => c.id === '1');
-    const a = await chrome.bookmarks.create({ parentId: bar.id, title: '补整理 A', url: 'https://sweep-alpha.example.org/x' });
-    await new Promise(r => setTimeout(r, 60));
-    const b = await chrome.bookmarks.create({ parentId: bar.id, title: '补整理 B', url: 'https://sweep-beta.example.org/y' });
-    // 越过 onCreated 的 1.2s 去抖窗口，确保它们确实留在根目录
-    await new Promise(r => setTimeout(r, 1600));
-    await chrome.storage.local.set({ 'markai.config': { ...cfg, autoOrganizeNew: true } });
-    return { ids: [a.id, b.id], barId: bar.id };
-  })()`);
-  const beforeParents = await ev(`(async () => {
-    const out = [];
-    for (const id of ${JSON.stringify(sweepSeed.ids)}) {
-      const n = (await chrome.bookmarks.get(id))[0];
-      out.push(n.parentId);
-    }
-    return out;
-  })()`);
-  const started = await ev(`(() => {
-    const dlg = document.querySelector('[role="dialog"]');
-    if (!dlg) return false;
-    const btn = [...dlg.querySelectorAll('button')].find(b => b.textContent.trim() === '开始');
-    if (!btn) return false;
-    btn.click();
-    return true;
-  })()`);
-  check('补整理按钮可点击并启动', started === true && beforeParents.every(p => p === sweepSeed.barId), JSON.stringify(beforeParents));
-  await sleep(6000);
-  const afterSweep = await ev(`(async () => {
-    const out = [];
-    for (const id of ${JSON.stringify(sweepSeed.ids)}) {
-      const n = (await chrome.bookmarks.get(id))[0];
-      const parent = n.parentId ? (await chrome.bookmarks.get(n.parentId))[0] : null;
-      out.push({ parentId: n.parentId, parentTitle: parent?.title });
-    }
-    return out;
-  })()`);
-  check(
-    '补整理把散落书签归了位（不再躺在根目录）',
-    afterSweep.every(x => x.parentId !== sweepSeed.barId),
-    JSON.stringify(afterSweep),
-  );
-  // 两条种子用的是同一注册域（example.org）：同域复用结论后应落到同一个文件夹，
-  // 而不是各建一个（批量补整理时这条路径决定了几百条要跑多久）
-  check(
-    '补整理：同域名的书签落到同一个文件夹（复用结论）',
-    afterSweep.length >= 2 && afterSweep[0].parentId === afterSweep[1].parentId,
-    JSON.stringify(afterSweep.map(x => x.parentTitle)),
-  );
-
-  /* 撤销历史里「只能从最新开始」这条约束：非最新项必须禁用并给出原因。
-   * 放开它会让「撤销新建文件夹」这类递归操作把后来移入的内容一起删掉——
-   * 界面要如实表达「请先撤销较新的操作」，而不是让人点了没反应。 */
-  const historyRows = await ev(`(async () => {
-    const btn = document.querySelector('button[aria-label="撤销历史"]');
-    if (!btn || btn.disabled) return { ok: false, reason: 'no-history' };
-    btn.click();
-    await new Promise(r => setTimeout(r, 500));
-    const all = [...document.querySelectorAll('button')];
-    const latest = all.filter((b) => (b.getAttribute('title') || '') === '撤销最新的一步');
-    const older = all.filter((b) => (b.getAttribute('title') || '') === '请先撤销较新的操作');
-    const result = {
-      ok: true,
-      latestCount: latest.length,
-      latestEnabled: latest.length > 0 && !latest[0].disabled,
-      olderCount: older.length,
-      olderAllDisabled: older.every((b) => b.disabled),
-    };
-    const back = all.find((b) => (b.getAttribute('aria-label') || '') === '返回聊天');
-    if (back) back.click();
-    return result;
-  })()`);
-  check(
-    '撤销历史：只有最新一步可点，较早的都被禁用并说明原因',
-    historyRows.ok === true && historyRows.latestCount === 1 && historyRows.latestEnabled === true &&
-      historyRows.olderCount >= 1 && historyRows.olderAllDisabled === true,
-    JSON.stringify(historyRows),
-  );
-  /* 「撤销全部 N 步」：补整理 1000 条后会攒下好几个撤销点，逐个点太累。
-   * 这里断言一次点击真的把点用完（remaining = 0），而不是只退了一步。 */
-  const undoAll = await ev(`(async () => {
-    const before = await chrome.runtime.sendMessage({ type: 'undo:list' });
-    const beforeCount = (before?.points || []).length;
-    const btn = document.querySelector('button[aria-label="撤销历史"]');
-    if (!btn || btn.disabled) return { ok: false, reason: 'no-history', beforeCount };
-    btn.click();
-    await new Promise(r => setTimeout(r, 400));
-    const allBtn = [...document.querySelectorAll('button')].find((b) => (b.textContent || '').includes('撤销全部'));
-    if (!allBtn) return { ok: false, reason: 'no-undo-all', beforeCount };
-    allBtn.click();
-    await new Promise(r => setTimeout(r, 4000));
-    const after = await chrome.runtime.sendMessage({ type: 'undo:list' });
-    return { ok: true, beforeCount, remaining: (after?.points || []).length };
-  })()`);
-  /* 断言「确实退掉了一大截」而不是「必须清零」：
-   * 某些步骤本身不可撤销（含删除的轮次），「撤销全部」会在那里安全地停下。
-   * 要求清零等于逼实现去绕过安全约束。 */
-  /* toast 出现时的对比度：toast 由 background 广播触发，这里借「撤销全部」弹出的那条抓一次。
-   * 判据是「屏幕上真的有一个 toast 在显示」，否则这条检查等于没测。 */
-  await ev(`(() => { document.querySelector('button[aria-label="撤销历史"]')?.click(); })()`);
-  await sleep(400);
-  await ev(`(() => {
-    const btn = [...document.querySelectorAll('button')].find((b) => (b.textContent || '').includes('撤销全部'));
-    if (btn) btn.click();
-  })()`);
-  await sleep(900);
-  const toastContrast = await ev(`(() => {
-    const toast = document.querySelector('[role="status"]');
-    if (!toast) return { visible: false };
-    const style = getComputedStyle(toast);
-    const r = toast.getBoundingClientRect();
-    // 位置检查：它曾经在右上角、正好压住 Agent 面板头部（常驻操作区）。
-    // 现在应当底部居中，且不能落在顶部 120px 内。
-    const nearBottom = window.innerHeight - r.bottom < 120;
-    const centered = Math.abs(r.left + r.width / 2 - window.innerWidth / 2) < 40;
-    const coversHeader = r.top < 120;
-    return {
-      visible: true,
-      text: (toast.innerText || '').slice(0, 20),
-      bg: style.backgroundColor,
-      nearBottom,
-      centered,
-      coversHeader,
-    };
-  })()`);
-  check(
-    'toast 出现在底部居中，不会压住 Agent 面板头部',
-    toastContrast.visible === true && toastContrast.nearBottom === true &&
-      toastContrast.centered === true && toastContrast.coversHeader === false,
-    JSON.stringify(toastContrast),
-  );
-  check(
-    'toast 真的出现在屏幕上（对比度检查的前提）',
-    toastContrast.visible === true,
-    JSON.stringify(toastContrast),
-  );
-  const toastRatio = toastContrast.visible ? await ev(CONTRAST_EXPR) : { total: -1 };
-  check(
-    'toast 显示时页面仍然没有低对比度文本（WCAG AA）',
-    toastContrast.visible === true && toastRatio.total === 0,
-    JSON.stringify({ toast: toastContrast, ratio: toastRatio }),
-  );
-
-  /* 深色下的 toast：它用 card 背景 + 前景文字，主题切换时最容易出现「灰底灰字」 */
-  await ev(`chrome.storage.local.set({ 'markai.theme': 'dark' })`);
-  await waitFor(async () => await ev(`document.documentElement.classList.contains('dark')`), 3000);
-  await sleep(300);
-  const darkToast = await ev(`(() => {
-    const t = document.querySelector('[role="status"]');
-    return { visible: !!t, text: t ? (t.innerText || '').slice(0, 16) : '' };
-  })()`);
-  const darkToastRatio = darkToast.visible ? await ev(CONTRAST_EXPR) : { total: -1 };
-  await ev(`chrome.storage.local.set({ 'markai.theme': 'light' })`);
-  await waitFor(async () => await ev(`!document.documentElement.classList.contains('dark')`), 3000);
-  check(
-    '深色模式下的 toast：仍有 toast 在屏且无低对比度文本',
-    darkToast.visible === true && darkToastRatio.total === 0,
-    JSON.stringify({ toast: darkToast, ratio: darkToastRatio }),
-  );
-
-  check(
-    '撤销全部：一次点击连续回退（遇到不可撤销的点会安全停下）',
-    undoAll.ok === true && undoAll.beforeCount >= 2 && undoAll.remaining < undoAll.beforeCount,
-    JSON.stringify(undoAll),
-  );
-  await sleep(400);
-
-  const cancelIdle = await ev(`chrome.runtime.sendMessage({ type: 'organize:sweep:cancel' })`);
-  check(
-    '没有进行中的补整理时，取消会如实说明（不假装停成功）',
-    cancelIdle?.type === 'organize:sweep:cancel:result' && cancelIdle.ok === false,
-    JSON.stringify(cancelIdle),
-  );
-
-  /* 深链：#organize 打开完整页时直接弹出整理记录（popup 的「查看记录」依赖它） */
-  await ev(`(() => { location.hash = '#organize'; })()`);
-  await reload();
-  const deepLink = await ev(`(() => {
-    const dlg = document.querySelector('[role="dialog"]');
-    return { open: !!dlg, text: dlg?.innerText?.slice(0, 60) || '' };
-  })()`);
-  check('#organize 深链直接打开整理记录', deepLink.open && deepLink.text.includes('整理记录'), deepLink.text);
-  // 清掉 hash，避免影响后续（当前已是最后一段，仍保持页面干净）
-  await ev(`(() => { history.replaceState(null, '', location.pathname); })()`);
-
   markSection('快捷键 / 大库 / 多选 / 树 / 移动');
 
   /* ── 8. 快捷键速查：可发现性（文档里的键产品里也要能查到） ── */
   await ev(`(() => { document.querySelector('[role="dialog"] [aria-label="关闭"]')?.click(); })()`);
   await sleep(300);
-  const shortcutEntry = await ev(`(() => {
-    const btn = document.querySelector('button[title^="快捷键与操作"]');
-    return { found: !!btn };
+  const shortcutEntry = await ev(`(async () => {
+    if (!document.querySelector('[role="menu"]')) document.querySelector('button[aria-label="更多"]')?.click();
+    await new Promise((r) => setTimeout(r, 320));
+    const items = [...document.querySelectorAll('[role="menuitem"]')].map((b) => b.textContent.trim());
+    if (document.querySelector('[role="menu"]')) document.querySelector('button[aria-label="更多"]')?.click();
+    return { found: items.some((t) => t.includes('快捷键')), items };
   })()`);
-  check('顶栏有「快捷键与操作」入口', shortcutEntry.found);
+  check('「更多」菜单里有「快捷键与操作」入口', shortcutEntry.found, JSON.stringify(shortcutEntry.items));
 
   // 在搜索框里按「?」必须当作正常输入，不能弹出浮层（劫持输入是最烦人的一类 bug）
   const typingQuestion = await ev(`(() => {
@@ -1302,16 +1089,15 @@ async function run() {
   await reload();
   const bulkTiming = await ev(`(async () => {
     const t0 = performance.now();
-    const btn = document.querySelector('button[title^="时间线"]');
-    if (!btn) return { ms: -1, rows: 0, reason: 'no-entry' };
-    btn.click();
+    // 时间线 = 排序切到「按收藏时间」（不再是顶栏按钮）
+    window.__mk?.setSortTime();
     for (let i = 0; i < 300; i++) {
       await new Promise(r => requestAnimationFrame(r));
-      const rows = [...document.querySelectorAll('[role="button"]')]
+      const rows = [...document.querySelectorAll('[role="listitem"]')]
         .filter(el => (el.getAttribute('title') || '').includes('http')).length;
       if (rows >= 40) return { ms: Math.round(performance.now() - t0), rows };
     }
-    const rows = [...document.querySelectorAll('[role="button"]')]
+    const rows = [...document.querySelectorAll('[role="listitem"]')]
       .filter(el => (el.getAttribute('title') || '').includes('http')).length;
     return { ms: Math.round(performance.now() - t0), rows, reason: 'timeout' };
   })()`);
@@ -1597,7 +1383,7 @@ async function run() {
   })()`);
   await reload();
   await waitFor(async () => await ev(`document.body.innerText.includes('我是你的书签管家')`), 6000);
-  await waitFor(async () => await ev(`!!document.querySelector('button[title^="整理记录"]')`), 4000);
+  await waitFor(async () => await ev(`!!document.querySelector('button[aria-label="更多"]')`), 4000);
 
   const freshUser = await ev(`(() => {
     const text = document.body.innerText;
@@ -1616,7 +1402,7 @@ async function run() {
   );
 
   // 整理记录的空状态：不能是空白面板
-  await ev(`(() => { document.querySelector('button[title^="整理记录"]')?.click(); })()`);
+  await ev(`(async () => { await (async () => {if (!document.querySelector('[role="menu"]')) document.querySelector('button[aria-label="更多"]')?.click();await new Promise(r => setTimeout(r, 320));const items = [...document.querySelectorAll('[role="menuitem"]')];const hit = items.find(b => (b.textContent || '').includes('整理记录'));if (hit) hit.click();await new Promise(r => setTimeout(r, 300));return !!hit; })(); })()`);
   await waitFor(async () => await ev(`!!document.querySelector('[role="dialog"]')`), 4000);
   await sleep(200);
   const emptyLog = await ev(`(() => {
@@ -1963,7 +1749,6 @@ async function run() {
     return {
       ...before,
       dlgWithinViewport: dlgRect ? dlgRect.right <= 322 && dlgRect.left >= -2 : false,
-      hasSweep: text.includes('补整理已有书签'),
       hasStats: text.includes('今天'),
     };
   })()`);
@@ -2004,7 +1789,7 @@ async function run() {
   await waitFor(async () => await evSp(`!document.documentElement.classList.contains('dark')`), 3000);
   await sleep(300);
   // 三条件同时成立：320px + 深色 + 对话框打开（窄屏下对话框会切到不同的内边距与换行）
-  await evSp(`(() => { document.querySelector('button[title^="整理记录"]')?.click(); })()`);
+  await evSp(`(async () => { await (async () => {if (!document.querySelector('[role="menu"]')) document.querySelector('button[aria-label="更多"]')?.click();await new Promise(r => setTimeout(r, 320));const items = [...document.querySelectorAll('[role="menuitem"]')];const hit = items.find(b => (b.textContent || '').includes('整理记录'));if (hit) hit.click();await new Promise(r => setTimeout(r, 300));return !!hit; })(); })()`);
   await sleep(600);
   const tripleContrast = await evSp(CONTRAST_EXPR);
   check(
@@ -2067,7 +1852,7 @@ async function run() {
   await reload();
   await sleep(600);
   const uncheckedFlow = await ev(`(async () => {
-    const openBtn = document.querySelector('button[title="待删除清单"]');
+    const openBtn = document.querySelector('button[title*="待删"], button[aria-label*="待删"]');
     if (!openBtn) return { ok: false, reason: 'no-open-button' };
     openBtn.click();
     await new Promise(r => setTimeout(r, 600));
@@ -2083,7 +1868,7 @@ async function run() {
     // 关闭再打开
     dlg.querySelector('button[aria-label="关闭"]')?.click();
     await new Promise(r => setTimeout(r, 500));
-    document.querySelector('button[title="待删除清单"]')?.click();
+    document.querySelector('button[title*="待删"], button[aria-label*="待删"]')?.click();
     await new Promise(r => setTimeout(r, 600));
     const dlg2 = document.querySelector('[role="dialog"]');
     const sameBox = dlg2 ? [...dlg2.querySelectorAll('[role="checkbox"]')].find((b) => (b.getAttribute('aria-label') || '') === label) : null;
@@ -2470,228 +2255,7 @@ async function run() {
   await ev(`chrome.bookmarks.removeTree(${JSON.stringify(deepSeed.srcId)}).catch(() => {})`);
   await ev(`chrome.bookmarks.removeTree(${JSON.stringify(deepSeed.dstId)}).catch(() => {})`);
 
-  /* 撤销粒度：见证「补整理会留下很多撤销点，被上限截断」这个现状。
-   * 曾试过整批合并成一个点（能做到），但撤销时「撤销新建文件夹」是递归删除，
-   * 会连带删掉同批已移入的内容 —— 可靠性优先，已回退。这条用例记录现状，不谎报已优化。 */
-  const undoSeed = await ev(`(async () => {
-    const bar = (await chrome.bookmarks.getTree())[0].children.find(c => c.id === '1');
-    const cfg = (await chrome.storage.local.get('markai.config'))['markai.config'] || {};
-    await chrome.storage.local.set({ 'markai.config': { ...cfg, providerId: 'deepseek', autoOrganizeNew: false } });
-    await new Promise(r => setTimeout(r, 200));
-    await chrome.storage.local.remove(['markai.organize.log', 'markai.undo']);
-    const batch = [];
-    for (let i = 0; i < 120; i++) {
-      batch.push(chrome.bookmarks.create({
-        parentId: bar.id, title: '撤销粒度 ' + i, url: 'https://undo-grain.example.com/p/' + i,
-      }));
-      if (batch.length >= 60) { await Promise.all(batch); batch.length = 0; }
-    }
-    await Promise.all(batch);
-    await chrome.storage.local.set({ 'markai.config': { ...cfg, providerId: 'deepseek', autoOrganizeNew: true } });
-    await new Promise(r => setTimeout(r, 200));
-    return { count: 120 };
-  })()`);
-  await reload();
-  const undoGrain = await ev(`(async () => {
-    await chrome.storage.local.remove(['markai.undo', 'markai.organize.log']);
-    await new Promise(r => setTimeout(r, 400));
-    const res = await chrome.runtime.sendMessage({ type: 'organize:sweep' });
-    if (!res?.started) return { ok: false, reason: 'sweep-not-started', res };
-    for (let i = 0; i < 120; i++) {
-      await new Promise(r => setTimeout(r, 250));
-      const list = await chrome.runtime.sendMessage({ type: 'organize:list' });
-      if ((list?.entries || []).some((e) => (e.title || '').startsWith('补整理 '))) break;
-    }
-    const undo = await chrome.runtime.sendMessage({ type: 'undo:list' });
-    const points = undo?.points || [];
-    return {
-      ok: true,
-      pointCount: points.length,
-      allAutoTagged: points.every((p) => String(p.runId || '').startsWith('auto-organize:')),
-    };
-  })()`);
-  check(
-    '现状记录：补整理后撤销点被上限截断（每条一个点，最多保留 10 个）',
-    undoGrain.ok === true && undoGrain.pointCount === 10 && undoGrain.allAutoTagged === true,
-    JSON.stringify(undoGrain),
-  );
-  // 清理
-  await ev(`(async () => {
-    const tree = await chrome.bookmarks.getTree();
-    const bar = tree[0].children.find(c => c.id === '1');
-    for (const child of bar.children || []) {
-      if (child.url && (child.title || '').startsWith('撤销粒度 ')) await chrome.bookmarks.remove(child.id).catch(() => {});
-      if (!child.url && child.title === '自动整理') {
-        const kids = await chrome.bookmarks.getChildren(child.id).catch(() => []);
-        for (const k of kids) {
-          if (!k.url && /undo-grain[.]example[.]com$/.test(k.title || '')) await chrome.bookmarks.removeTree(k.id).catch(() => {});
-        }
-      }
-    }
-    await chrome.storage.local.remove(['markai.organize.log', 'markai.undo']);
-    return true;
-  })()`);
-  await sleep(600);
-
-  markSection('补整理的取消');
-
-    if (!QUICK) {  // ── 快速档跳过：补整理的取消
-  /* 补整理跑到一半关掉面板、再打开：进度必须接回来。
-   * 否则用户会以为没在跑，又点一次「开始」（然后被告知「正在进行中，请稍候」）。 */
-  const resumeSeed = await ev(`(async () => {
-    const bar = (await chrome.bookmarks.getTree())[0].children.find(c => c.id === '1');
-    const cfg = (await chrome.storage.local.get('markai.config'))['markai.config'] || {};
-    await chrome.storage.local.set({ 'markai.config': { ...cfg, providerId: 'deepseek', autoOrganizeNew: false } });
-    await new Promise(r => setTimeout(r, 200));
-    const batch = [];
-    // 600 条：关面板 + 重开约 1.4 秒，300 条在 1.5 秒内就跑完了，窗口太窄
-    for (let i = 0; i < 600; i++) {
-      batch.push(chrome.bookmarks.create({
-        parentId: bar.id, title: '恢复测试 ' + i, url: 'https://resume-test.example.com/p/' + i,
-      }));
-      if (batch.length >= 100) { await Promise.all(batch); batch.length = 0; }
-    }
-    await Promise.all(batch);
-    await chrome.storage.local.set({ 'markai.config': { ...cfg, providerId: 'deepseek', autoOrganizeNew: true } });
-    await new Promise(r => setTimeout(r, 200));
-    return { count: 600 };
-  })()`);
-  await reload();
-  await ev(`(() => { document.querySelector('button[title^="整理记录"]')?.click(); })()`);
-  await sleep(700);
-  const resumeFlow = await ev(`(async () => {
-    const dlg = document.querySelector('[role="dialog"]');
-    const start = dlg ? [...dlg.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === '开始') : null;
-    if (!start) return { ok: false, reason: 'no-start' };
-    start.click();
-    let sawProgress = false;
-    for (let i = 0; i < 60; i++) {
-      await new Promise(r => setTimeout(r, 100));
-      if ((dlg.innerText || '').includes('正在处理')) { sawProgress = true; break; }
-    }
-    return { ok: true, sawProgress };
-  })()`);
-  await ev(`(() => {
-    const dlg = document.querySelector('[role="dialog"]');
-    const close = dlg ? dlg.querySelector('button[aria-label="关闭"]') : null;
-    if (close) close.click();
-  })()`);
-  await sleep(500);
-  await ev(`(() => { document.querySelector('button[title^="整理记录"]')?.click(); })()`);
-  await sleep(900);
-  /* 先问后台还在不在跑：600 条虽然够久，但机器快的时候仍可能在「关→开」的 1.4 秒里跑完，
-   * 那时断言「必须显示进度」就变成 flaky 了。已跑完就不该指望有进度条。 */
-  const stillRunning = await ev(`chrome.runtime.sendMessage({ type: 'organize:sweep:status' }).then((r) => r && r.running === true)`);
-  const resumeState = await ev(`(() => {
-    const dlg = document.querySelector('[role="dialog"]');
-    if (!dlg) return { ok: false, reason: 'no-dialog-after-reopen' };
-    const text = dlg.innerText;
-    return { ok: true, hasProgress: text.includes('正在处理'), hasCancel: text.includes('取消') };
-  })()`);
-  check(
-    '补整理跑到一半关掉面板、再打开：进度被接回来（不会让人以为没在跑）',
-    resumeFlow.ok === true && resumeFlow.sawProgress === true &&
-      (stillRunning === true ? resumeState.ok === true && resumeState.hasProgress === true : resumeState.ok === true),
-    JSON.stringify({ flow: resumeFlow, stillRunning, after: resumeState }),
-  );
-  await ev(`chrome.runtime.sendMessage({ type: 'organize:sweep:cancel' })`);
-  await sleep(600);
-  await ev(`(async () => {
-    const bar = (await chrome.bookmarks.getTree())[0].children.find(c => c.id === '1');
-    for (const child of bar.children || []) {
-      if (child.url && (child.title || '').startsWith('恢复测试 ')) await chrome.bookmarks.remove(child.id).catch(() => {});
-      if (!child.url && child.title === '自动整理') {
-        const kids = await chrome.bookmarks.getChildren(child.id).catch(() => []);
-        for (const k of kids) {
-          if (!k.url && /resume-test[.]example[.]com$/.test(k.title || '')) await chrome.bookmarks.removeTree(k.id).catch(() => {});
-        }
-      }
-    }
-    return true;
-  })()`);
-  await sleep(500);
-
-
-/* ── 15. 补整理「真在跑」时取消：几百条逐条判定，取消必须真的停住 ──
-   * 已有用例只测了「没有进行中时取消会如实说明」；跑到一半喊停这条路径没验证过，
-   * 而它失效的后果是用户点了取消、后台还在搬几百条书签。 */
-  const cancelSeed = await ev(`(async () => {
-    const bar = (await chrome.bookmarks.getTree())[0].children.find(c => c.id === '1');
-    const cfg = (await chrome.storage.local.get('markai.config'))['markai.config'] || {};
-    await chrome.storage.local.set({ 'markai.config': { ...cfg, providerId: 'deepseek', autoOrganizeNew: false } });
-    await new Promise(r => setTimeout(r, 200));
-    await chrome.storage.local.remove(['markai.organize.log', 'markai.organize.optout']);
-    const batch = [];
-    for (let i = 0; i < 400; i++) {
-      batch.push(chrome.bookmarks.create({
-        parentId: bar.id, title: '取消测试 ' + i, url: 'https://cancel-test.example.com/p/' + i,
-      }));
-      if (batch.length >= 100) { await Promise.all(batch); batch.length = 0; }
-    }
-    await Promise.all(batch);
-    await chrome.storage.local.set({ 'markai.config': { ...cfg, providerId: 'deepseek', autoOrganizeNew: true } });
-    await new Promise(r => setTimeout(r, 200));
-    return { count: 400 };
-  })()`);
-  await reload();
-  await ev(`(() => { document.querySelector('button[title^="整理记录"]')?.click(); })()`);
-  await sleep(800);
-  const cancelFlow = await ev(`(async () => {
-    const dlg = document.querySelector('[role="dialog"]');
-    if (!dlg) return { ok: false, reason: 'no-dialog' };
-    const startBtn = [...dlg.querySelectorAll('button')].find((b) => (b.textContent || '').trim() === '开始');
-    if (!startBtn) return { ok: false, reason: 'no-start-button' };
-    startBtn.click();
-    // 等进度真的出现（最多 6 秒）
-    let sawProgress = false;
-    for (let i = 0; i < 60; i++) {
-      await new Promise(r => setTimeout(r, 100));
-      if ((dlg.innerText || '').includes('正在处理')) { sawProgress = true; break; }
-    }
-    if (!sawProgress) return { ok: false, reason: 'no-progress' };
-    const cancelBtn = [...dlg.querySelectorAll('button')].find((b) => (b.textContent || '').includes('取消'));
-    if (!cancelBtn) return { ok: false, reason: 'no-cancel-button' };
-    cancelBtn.click();
-    // 本地 bookmark API 的写入是毫秒级；700ms 足够让 React 重渲染
-    await new Promise(r => setTimeout(r, 700));
-    const text = document.body.innerText;
-    return {
-      ok: true,
-      cancelledToast: text.includes('补整理已取消'),
-      sweepingGone: !dlg.innerText.includes('正在处理'),
-    };
-  })()`);
-  check(
-    '补整理进行中点取消：真的停下，并如实说明已取消',
-    cancelFlow.ok === true && cancelFlow.cancelledToast === true && cancelFlow.sweepingGone === true,
-    JSON.stringify(cancelFlow),
-  );
-
-  // 清理：取消后剩下的书签
-  const cancelCleanup = await ev(`(async () => {
-    const bar = (await chrome.bookmarks.getTree())[0].children.find(c => c.id === '1');
-    const leftovers = (bar.children || []).filter((c) => (c.title || '').startsWith('取消测试 '));
-    for (const n of leftovers) await chrome.bookmarks.remove(n.id).catch(() => {});
-    for (const child of bar.children || []) {
-      if (!child.url && child.title === '自动整理') {
-        const kids = await chrome.bookmarks.getChildren(child.id).catch(() => []);
-        for (const k of kids) {
-          if (!k.url && /cancel-test[.]example[.]com$/.test(k.title || '')) {
-            await chrome.bookmarks.removeTree(k.id).catch(() => {});
-          }
-        }
-        const left = await chrome.bookmarks.getChildren(child.id).catch(() => []);
-        if (left.length === 0) await chrome.bookmarks.removeTree(child.id).catch(() => {});
-      }
-    }
-    return { cleaned: leftovers.length };
-  })()`);
-  check('取消测试的数据被清理干净', cancelCleanup.cleaned > 0, JSON.stringify(cancelCleanup));
-
-
-    }
-
-/* ── 汇总 ── */
+  /* ── 汇总 ── */
   const failed = results.filter((r) => !r.ok);
   const totalMs = Date.now() - RUN_START;
   console.log('\n— 分段耗时 —');

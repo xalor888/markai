@@ -84,6 +84,19 @@ export interface AIConfig {
    * 面向两类用户：在意 token 成本的，以及不想让收藏动作把网址发给服务商的。
    */
   autoOrganizeAi?: boolean;
+  /**
+   * 自定义请求头（多行 `Name: Value`）。
+   *
+   * 有些 OpenAI 兼容网关在标准协议之外要求额外请求头，缺了直接 400——
+   * 最典型的是 OpenCode Go 的 `x-opencode-session`（2026-09-06 起强制）。
+   * 解析与安全约束见 `lib/ai/request-headers.ts`（禁止覆盖 Authorization、拒绝 CRLF 注入）。
+   */
+  customHeaders?: string;
+  /**
+   * 预设要求的**会话头名**（如 `x-opencode-session`）。由 Provider 预设带入，用户不必手填。
+   * 值为稳定会话 ID，见 `getStableSessionId()`：必须稳定，否则服务端路由被打散、缓存全失效。
+   */
+  sessionHeader?: string;
 }
 
 /** ── UI ↔ background 长连接 Port 协议（聊天流式代理） ── */
@@ -146,11 +159,6 @@ export type OneShotInbound =
   | { type: 'organize:retry'; id: string }
   // 一次性重试所有「可重试」的失败记录（网络抖动后常有十几条）
   | { type: 'organize:retry:all' }
-  | { type: 'organize:sweep' }
-  // 补整理可能持续几分钟（逐条走判定），必须能中途停
-  | { type: 'organize:sweep:cancel' }
-  // 查当前进度：面板被关掉再打开时用它把进度条恢复回来
-  | { type: 'organize:sweep:status' }
   // 撤销某次自动整理（按日志条目的 runId 找对应撤销点）
   | { type: 'organize:undo'; id: string }
   // 自动整理的「站点免打扰」名单：查看 / 清空
@@ -173,16 +181,6 @@ export type OneShotOutbound =
   | { type: 'organize:clear:result'; ok: boolean }
   | { type: 'organize:retry:result'; ok: boolean; detail: string }
   | { type: 'organize:retry:all:result'; attempted: number; succeeded: number; failed: number; detail: string }
-  | { type: 'organize:sweep:result'; started: boolean; count: number; detail: string }
-  | { type: 'organize:sweep:cancel:result'; ok: boolean; detail: string }
-  | {
-      type: 'organize:sweep:status:result';
-      running: boolean;
-      done?: number;
-      total?: number;
-      moved?: number;
-      failed?: number;
-    }
   | { type: 'organize:undo:result'; ok: boolean; detail: string }
   | { type: 'organize:optout:list:result'; domains: OptOutEntry[] }
   | { type: 'organize:optout:clear:result'; ok: boolean }

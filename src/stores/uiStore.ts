@@ -12,14 +12,11 @@ export type BookmarkDialog =
   | { kind: 'move'; bookmarkIds: string[] };
 
 /** 中栏主视图：文件夹列表 / 时间线（纯时间排序，只有书签个体） */
-export type MainView = 'list' | 'timeline';
 
 interface UIState {
   dialog: BookmarkDialog | null;
   openDialog: (d: BookmarkDialog) => void;
   closeDialog: () => void;
-  mainView: MainView;
-  setMainView: (view: MainView) => void;
   /**
    * 紧凑工作区（侧边栏）里把书签树收起成图标条。
    * 侧边栏通常只有 400~500px：树占 176px 后中栏只剩两百多，标题都被截断。
@@ -69,8 +66,6 @@ export const useUIStore = create<UIState>((set, get) => ({
   dialog: null,
   openDialog: (d) => set({ dialog: d }),
   closeDialog: () => set({ dialog: null }),
-  mainView: 'list',
-  setMainView: (view) => set({ mainView: view }),
   confirmRequest: null,
   confirmQueue: [],
   requestConfirm: (req) => {
@@ -90,7 +85,12 @@ export const useUIStore = create<UIState>((set, get) => ({
   },
   deletionUnchecked: new Set<string>(),
   setDeletionUnchecked: (next) => set({ deletionUnchecked: next }),
-  treeCollapsed: false,
+  /*
+   * 默认**收起**。侧边栏通常只有 400~500px，树常驻 176px 时中栏只剩两百多，
+   * 标题全被截断——重做前用户看到的就是"一屏只有三行文件夹、其余全是空白"。
+   * 需要导航时点左侧图标条展开（浮层覆盖列表，不挤宽度）；full 模式不受影响。
+   */
+  treeCollapsed: true,
   setTreeCollapsed: (collapsed) => {
     set({ treeCollapsed: collapsed });
     // 持久化：下次打开侧边栏保持用户的布局选择（失败不影响本次收起）

@@ -795,6 +795,56 @@ async function run() {
     check('设置页打开即给出健康分与结论', health.hasSection && health.score !== null, JSON.stringify(health));
     check('诊断报告可一键复制（贴出来就能定位问题）', health.hasCopyReport === true, JSON.stringify(health));
 
+    /*
+     * 修复必须**真的修好**，而不只是"没动书签"。
+     * 0.2.37 的自修复是卖点，但 e2e 之前只断言了"书签数不变"——
+     * 那等于只证明了它没搞坏东西，没证明它修好了东西。
+     *
+     * 这里种一个写错的自定义请求头，确认：检测得到 → 点修复 → storage 里真的没了。
+     */
+    await ev(`(async () => {
+      const cfg = (await chrome.storage.local.get('markai.config'))['markai.config'] || {};
+      await chrome.storage.local.set({ 'markai.config': {
+        ...cfg,
+        providerId: 'deepseek',
+        baseUrl: 'https://api.deepseek.com',
+        model: 'm',
+        customHeaders: ['X-Keep: 1', '这一行没有冒号', 'X-Also: 2'].join(String.fromCharCode(10)),
+      } });
+      return true;
+    })()`);
+    await cdp.send('Page.reload', {}, sessionId);
+    await sleep(1200);
+    await waitFor(async () => (await ev(`/健康分/.test(document.body.innerText)`).catch(() => false)) === true, 8000);
+
+    const detected = await ev(`(() => {
+      const t = document.body.innerText;
+      return { saysBadHeaders: t.includes('自定义请求头'), hasFix: t.includes('删掉写错的行') };
+    })()`);
+    check('坏请求头被健康检查检测到', detected.saysBadHeaders === true, JSON.stringify(detected));
+
+    const fixed = await ev(`(async () => {
+      const btn = [...document.querySelectorAll('button')]
+        .find((b) => (b.textContent || '').includes('删掉写错的行'))
+        || [...document.querySelectorAll('button')].find((b) => /修复全部/.test(b.textContent || ''));
+      if (!btn) return { ok: false, reason: 'no-fix-button' };
+      btn.click();
+      await new Promise((r) => setTimeout(r, 1500));
+      const cfg = (await chrome.storage.local.get('markai.config'))['markai.config'] || {};
+      return {
+        ok: true,
+        headers: cfg.customHeaders || '',
+      };
+    })()`);
+    check(
+      '点修复后 storage 里写错的那行真的被删掉，合法的行保留',
+      fixed.ok === true &&
+        !(fixed.headers || '').includes('没有冒号') &&
+        (fixed.headers || '').includes('X-Keep: 1') &&
+        (fixed.headers || '').includes('X-Also: 2'),
+      JSON.stringify(fixed),
+    );
+
     const repaired = await ev(`(async () => {
       // 点「修复全部」：只应改动 MarkAI 自己的元数据，不碰书签
       const before = (await chrome.bookmarks.search({})).length;

@@ -12325,6 +12325,82 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T133: 已删行为不许回来（静态守卫） ══════════ */
+  console.log('\n[T133] 静态守卫');
+  {
+    /*
+     * 背景：用户明确表示过"不要按域名建文件夹"（0.2.35 整个移除）。
+     * 当时只在系统提示里加了一句软规则——软规则挡不住回归。
+     *
+     * 这里用**源码事实**来守，不靠措辞：
+     *   规则 1：`title: x.domain` 这种形状只能出现在受控模块里；
+     *   规则 2：提示词不能同时对同一件事既禁止又允许。
+     */
+    const guards = await import('../src/lib/guards/removed-behavior');
+    const { SYSTEM_PROMPT, TOOL_DEFINITIONS } = await import('../src/lib/ai/prompts');
+    const { readFileSync, readdirSync, statSync } = await import('node:fs');
+    const { join } = await import('node:path');
+
+    const walk = (dir: string, acc: string[] = []): string[] => {
+      for (const name of readdirSync(dir)) {
+        const p = join(dir, name);
+        const st = statSync(p);
+        if (st.isDirectory()) walk(p, acc);
+        else if (/\.tsx?$/.test(name) && !/\.test\.ts$/.test(name) && !p.includes('/guards/')) acc.push(p);
+      }
+      return acc;
+    };
+    const root = join(process.cwd(), 'src');
+    const files = walk(root).map((abs) => ({ path: abs.slice(root.length + 1), text: readFileSync(abs, 'utf8') }));
+
+    ok('规则 1：按域名命名文件夹的调用只出现在受控模块里', () => {
+      const findings = guards.findDomainFolderCreation(files);
+      assert.deepEqual(
+        findings,
+        [],
+        `发现不受控的"按域名建文件夹"：\n${findings.map((f) => `  ${f.file}:${f.line}  ${f.text}`).join('\n')}`,
+      );
+    });
+
+    ok('规则 2：提示词里"禁止"与"允许"不冲突', () => {
+      // 用**运行时会发给模型的内容**判定，不用源码（源码注释不会发给模型）
+      const findings = guards.findPromptSelfContradiction(
+        SYSTEM_PROMPT,
+        TOOL_DEFINITIONS.map((t) => t.function.description),
+      );
+      assert.deepEqual(
+        findings,
+        [],
+        `提示词自相矛盾：\n${findings.map((f) => `  ${f.file}:${f.line}  ${f.rule}  ${f.text}`).join('\n')}`,
+      );
+    });
+
+    ok('守卫本身有灵敏度（不是永远返回空）', () => {
+      // 造一个显然违规的输入：不受控模块里按域名建文件夹
+      const fake = [{ path: 'lib/ai/some-new-tool.ts', text: 'const f = await create({ parentId, title: g.domain });' }];
+      assert.equal(guards.findDomainFolderCreation(fake).length, 1, '应当能认出违规形状');
+      /*
+       * 两条分支要**分别**验证，否则一条会替另一条兜着：
+       *  - 提示词正文里提到 auto_categorize 却没前提；
+       *  - 工具描述里提到按域名建夹却没前提（提示词正文完全不提，逼它独立命中）。
+       */
+      const badPromptOnly = '不要按域名新建文件夹。\n用 auto_categorize 按域名聚类整理。';
+      assert.ok(
+        guards.findPromptSelfContradiction(badPromptOnly, ['一个完全没问题的工具描述。']).length >= 1,
+        '应当能认出提示词正文里缺前提的提及',
+      );
+      const badToolOnly = '不要按域名新建文件夹。';
+      const toolFindings = guards.findPromptSelfContradiction(badToolOnly, ['对某个文件夹执行自动分类：按域名聚类并建文件夹。']);
+      assert.ok(
+        toolFindings.some((f) => f.rule === 'tool-description-without-precondition'),
+        `应当能认出缺前提的工具描述：${JSON.stringify(toolFindings)}`,
+      );
+      // 正确形状不应误报
+      const good = [{ path: 'lib/ai/domain-group.ts', text: 'const f = await create({ parentId, title: g.domain });' }];
+      assert.equal(guards.findDomainFolderCreation(good).length, 0, '受控模块不应误报');
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

@@ -12642,3 +12642,108 @@ void okA('每个可修复的诊断，跑完修复后都不再出现（契约）'
   storageMap.delete('markai.undo');
   storageMap.delete('markai.organize.log');
 });
+
+/* ── 诊断可达性契约：每个诊断 id 都必须能被触发 ─────────────────────
+ *
+ * 0.2.101 抓到两条「用户永远看不到」的诊断：
+ *   - undo.corrupt / undo.overflow：readSnapshot 传了整个存储对象， diagnose 只认数组
+ *   - config.invalid-baseurl：resolveConfig 会 normalizeBaseUrl，归一化后一律合法
+ * 共同点：**单测各自绿着，但那条诊断在生产路径上根本不触发**。
+ *
+ * 这里把契约倒过来钉：从 diagnostics.ts 源码里抽出**全部**诊断 id，
+ * 要求每一个都在下表里有对应的触发种子。新增诊断却忘了验证可达性 → 直接红。
+ */
+void okA('每个诊断 id 都能被触发（可达性契约）', async () => {
+  const { diagnose } = await import('../src/lib/health/diagnostics');
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const src = readFileSync(resolve(root, 'src/lib/health/diagnostics.ts'), 'utf8');
+  const ids = [...src.matchAll(/^\s*id: '([a-z][a-z.-]+)',\s*$/gm)].map((m) => m[1]!);
+  assert.ok(ids.length >= 10, `从源码里只抽出 ${ids.length} 个诊断 id，正则可能失效了`);
+
+  const base = (): HealthSnapshot => ({
+    configError: null,
+    config: {
+      providerId: 'deepseek',
+      baseUrl: 'https://api.deepseek.com',
+      apiKey: 'sk-x',
+      model: 'deepseek-v4-flash',
+      customHeaders: '',
+      autoOrganizeNew: true,
+      autoOrganizeAi: true,
+      contextWindow: 128000,
+    },
+    providerNeedsKey: true,
+    permissions: ['bookmarks', 'storage', 'sidePanel', 'tabs'],
+    undoPoints: [],
+    logEntries: [],
+    bookmarks: { total: 10, folders: 3, emptyFolders: 0, maxDepth: 3, orphaned: 0, duplicateNameGroups: 0 },
+    storageBytes: 1024,
+    lastAiError: null,
+  });
+
+  /** 诊断 id → 能触发它的最小快照 */
+  const seeds: Record<string, () => HealthSnapshot> = {
+    'config.unreadable': () => ({ ...base(), configError: 'boom' }),
+    'config.incomplete': () => ({ ...base(), config: { ...base().config!, apiKey: '' } }),
+    'config.invalid-baseurl': () => ({ ...base(), config: { ...base().config!, baseUrlRaw: 'api.deepseek.com' } }),
+    'config.bad-headers': () => ({ ...base(), config: { ...base().config!, customHeaders: '坏行没有冒号' } }),
+    'permission.missing': () => ({ ...base(), permissions: ['storage'] }),
+    'undo.corrupt': () => ({ ...base(), undoPoints: [{ 不是: '点' }] }),
+    'undo.overflow': () => ({
+      ...base(),
+      undoPoints: Array.from({ length: 11 }, (_, i) => ({ id: `p${i}`, runId: `r${i}`, ops: [] })),
+    }),
+    'log.corrupt': () => ({ ...base(), logEntries: [{ 不是: '记录' }] }),
+    'log.overflow': () => ({
+      ...base(),
+      logEntries: Array.from({ length: 201 }, (_, i) => ({ id: `e${i}`, at: 1, title: 't' })),
+    }),
+    'log.orphan': () => ({
+      ...base(),
+      logEntries: [{ id: 'e1', at: Date.now(), title: 't', runId: 'run-gone' }],
+    }),
+    'bookmarks.orphaned': () => ({ ...base(), bookmarks: { ...base().bookmarks!, orphaned: 2 } }),
+    'bookmarks.duplicate-folders': () => ({ ...base(), bookmarks: { ...base().bookmarks!, duplicateNameGroups: 1 } }),
+    'bookmarks.too-deep': () => ({ ...base(), bookmarks: { ...base().bookmarks!, maxDepth: 99 } }),
+    'bookmarks.many-empty': () => ({ ...base(), bookmarks: { ...base().bookmarks!, emptyFolders: 99 } }),
+    'storage.near-quota': () => ({ ...base(), storageBytes: 9 * 1024 * 1024 }),
+    // diagnose 只看 snapshot.lastAiError；从日志桥接出它的是 readSnapshot 里的
+    // lastAiErrorOf——那条桥接单独在生产路径上验（见下一个用例），
+    // 因为 0.2.101 的两个死诊断正是"存储→快照"这一层断掉造成的。
+    'ai.last-error': () => ({ ...base(), lastAiError: '401 未授权' }),
+  };
+
+  const missing = ids.filter((id) => !seeds[id]);
+  assert.deepEqual(missing, [], `这些诊断没有可达性种子（新增诊断必须补一条）：${JSON.stringify(missing)}`);
+
+  const dead = ids.filter((id) => !diagnose(seeds[id]!()).issues.some((i) => i.id === id));
+  assert.deepEqual(dead, [], `这些诊断摆了种子也触发不了（生产路径上可能是死代码）：${JSON.stringify(dead)}`);
+});
+
+void okA('生产路径：整理记录里的失败要能桥接成「最近一次 AI 失败」', async () => {
+  const { readSnapshot } = await import('../src/lib/health');
+
+  /*
+   * `ai.last-error` 这条诊断看的是 snapshot.lastAiError，而它是 readSnapshot 里的
+   * lastAiErrorOf 从整理记录里抽的。0.2.101 已经证明：**"存储 → 快照"这一层断掉时，
+   * 单测各自绿着而诊断在生产路径上根本不触发**。所以这里走真实读取路径。
+   */
+  storageMap.set('markai.organize.log', [
+    { id: 'e-ok', at: Date.now(), title: '好的那条', url: 'https://a.example/', domain: 'a.example', action: 'moved', detail: '已归类' },
+    { id: 'e-bad', at: Date.now(), title: '失败那条', url: 'https://b.example/', domain: 'b.example', action: 'failed', detail: '401 未授权：API Key 过期' },
+  ]);
+  const snap = await readSnapshot();
+  assert.equal(snap.lastAiError, '401 未授权：API Key 过期', JSON.stringify(snap.lastAiError));
+
+  const report = await runHealthCheck();
+  assert.ok(
+    report.issues.some((i) => i.id === 'ai.last-error'),
+    `读了失败记录却报不出 ai.last-error：${JSON.stringify(report.issues.map((i) => i.id))}`,
+  );
+
+  storageMap.delete('markai.organize.log');
+});

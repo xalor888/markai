@@ -731,18 +731,36 @@ async function run() {
       },
       sid,
     );
-    await cdp.send(
-      'Runtime.evaluate',
-      { expression: `localStorage.setItem('markai.theme', 'light'); chrome.storage.local.remove('markai.theme')` },
-      sid,
-    );
-    await cdp.send('Page.reload', {}, sid);
-    await sleep(1200);
+    /*
+     * 等页面就绪再写 localStorage，并且**写完回读确认**。
+     *
+     * 原来的写法直接 `Runtime.evaluate(localStorage.setItem(...))` 就 reload。
+     * 刚 createTarget 出来的页面可能还没就绪，这次 evaluate 会静默失败
+     * （代码没看 exceptionDetails）——于是 localStorage 里留着**上一轮**的 'dark'，
+     * 首帧就成了深色。这正是那条偶发（近期约 20 次里 4 次）的真正来源。
+     */
+    await waitFor(async () => {
+      try {
+        const r = await cdp.send('Runtime.evaluate', { expression: `document.readyState` }, sid);
+        return r.result?.value === 'complete';
+      } catch {
+        return false; // 执行上下文还没就绪：CDP 会直接抛，不当成"已就绪"
+      }
+    }, 10000);
     const ev2 = async (expr) => {
       const r = await cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }, sid);
       if (r.exceptionDetails) return null;
       return r.result?.value;
     };
+    const seeded = await ev2(`(() => {
+      localStorage.setItem('markai.theme', 'light');
+      chrome.storage.local.remove('markai.theme');
+      return localStorage.getItem('markai.theme');
+    })()`);
+    check('测试前置：localStorage 里确实写进了 light', seeded === 'light', JSON.stringify({ seeded }));
+
+    await cdp.send('Page.reload', {}, sid);
+    await waitFor(async () => (await ev2(`typeof window.__firstFrame !== 'undefined'`)) === true, 10000);
     const cls = await ev2(`window.__firstFrame`);
     check(
       '系统深色但用户选了浅色时，首帧就是浅的（不被系统偏好带偏）',

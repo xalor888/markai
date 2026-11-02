@@ -11582,6 +11582,80 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T120: 撤销点读失败时写盘，不能冲掉已有撤销点 ══════════ */
+  console.log('\n[T120] 撤销记录的盲写');
+  {
+    /*
+     * `readUndoState` 读失败时返回 `points: []`——那是"我不知道"，不是"没有"。
+     * `endUndoTransaction` 拿它当基线写回，会把用户已有的撤销点全部冲掉，
+     * 之后他再也退不回之前任何一次整理。与 0.2.60 / 0.2.61 同一类。
+     */
+    const {
+      beginUndoTransaction,
+      endUndoTransaction,
+      readUndoState,
+      resetUndoTransactionForTest,
+      UNDO_STORAGE_KEY,
+    } = await import('../src/lib/undo/recorder');
+
+    await okA('读失败时放弃写入，磁盘上已有的撤销点一个不少', async () => {
+      resetUndoTransactionForTest();
+      const kept = [1, 2, 3].map((i) => ({
+        id: `p${i}`,
+        runId: `r${i}`,
+        createdAt: i,
+        ops: [],
+      }));
+      storageMap.set(UNDO_STORAGE_KEY, { points: kept, terminalRunIds: [] });
+
+      // 造一次真实改动，然后让"读撤销状态"失败
+      await beginUndoTransaction('run-t120');
+      await executeTool('create_bookmark', JSON.stringify({ parentId: '1', title: 'T120', url: 'https://t120.example/' }));
+
+      const orig = chrome.storage.local.get;
+      chrome.storage.local.get = (async (k: unknown) => {
+        const key = Array.isArray(k) ? k[0] : k;
+        if (key === UNDO_STORAGE_KEY) throw new Error('模拟：读撤销记录失败');
+        return orig(k as never);
+      }) as typeof chrome.storage.local.get;
+      let point = null;
+      try {
+        point = await endUndoTransaction();
+      } finally {
+        chrome.storage.local.get = orig;
+      }
+
+      assert.equal(point, null, '读失败时不应报告"已写入撤销点"');
+      const stored = storageMap.get(UNDO_STORAGE_KEY) as { points: { id: string }[] };
+      const ids = stored.points.map((p) => p.id);
+      assert.deepEqual(ids, ['p1', 'p2', 'p3'], `已有撤销点被冲掉了：${JSON.stringify(ids)}`);
+
+      // 还要能说明为什么没有记录
+      const st = await readUndoState();
+      assert.ok(st.notice, '必须给出可见说明');
+      assert.ok(
+        st.notice!.includes('没有写入撤销历史') || st.notice!.includes('读取撤销记录失败'),
+        `说明要讲清原因：${st.notice}`,
+      );
+      storageMap.delete(UNDO_STORAGE_KEY);
+      resetUndoTransactionForTest();
+    });
+
+    await okA('读正常时撤销点照常追加（没把功能改坏）', async () => {
+      resetUndoTransactionForTest();
+      storageMap.set(UNDO_STORAGE_KEY, { points: [{ id: 'old', runId: 'ro', createdAt: 1, ops: [] }], terminalRunIds: [] });
+      await beginUndoTransaction('run-t120-ok');
+      await executeTool('create_bookmark', JSON.stringify({ parentId: '1', title: 'T120b', url: 'https://t120b.example/' }));
+      const point = await endUndoTransaction();
+      assert.ok(point, '应当写入撤销点');
+      const stored = storageMap.get(UNDO_STORAGE_KEY) as { points: { id: string }[] };
+      assert.equal(stored.points.length, 2, `应保留旧点并追加新点：${JSON.stringify(stored.points.map((p) => p.id))}`);
+      assert.equal(stored.points[0]!.id, point!.id, '新点应在最前');
+      storageMap.delete(UNDO_STORAGE_KEY);
+      resetUndoTransactionForTest();
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

@@ -256,7 +256,31 @@ export async function endUndoTransaction(expectedRunId?: string): Promise<UndoPo
       : {}),
     containsDelete: tx.containsDelete,
   };
-  const state = await readUndoState();
+  let state = await readUndoState();
+  /*
+   * 读不到就**不能写**。
+   *
+   * `readUndoState` 读失败时返回 `points: []`，而这只是"我不知道"，不是"没有"。
+   * 直接拿它当基线写回，会把用户已有的撤销点全部冲掉——那之后他就再也退不回
+   * 之前任何一次整理（0.2.60 / 0.2.61 修的是同一类盲写）。
+   *
+   * 处理：先原样重试一次（读失败通常是瞬时的）；仍失败就放弃本次写入，
+   *         宁可少这一步撤销，也不能抹掉之前所有步骤。
+   */
+  if (state.readError) {
+    state = await readUndoState();
+    if (state.readError) {
+      /*
+       * 用现成的失败上报通道（lastWriteError → 下一次 readUndoState 会把它带成 notice，
+       * 界面据此提示），不新造一套。
+       */
+      lastWriteError = {
+        message: `读取撤销记录失败（${state.readError}），本次改动没有写入撤销历史（避免覆盖已有的撤销点）。`,
+        at: Date.now(),
+      };
+      return null;
+    }
+  }
   // 先按条数上限收敛，再按字节预算裁剪：超配额时**丢最旧的并如实告知**，
   // 而不是让整块写入失败、把「写不进去」显示成「没有可撤销的操作」。
   /*
@@ -324,6 +348,11 @@ export interface UndoState {
   noticeAt?: number;
   /** 已终结的 runId（有界）：恢复流程据此拒绝复活 */
   terminalRunIds: string[];
+  /**
+   * 读取失败的原因。有值就说明 `points` **不是**磁盘上的真实内容（而是空数组），
+   * 此时任何"读-改-写"都会把已有的撤销点冲掉——写之前必须检查它。
+   */
+  readError?: string;
 }
 
 /** 终态 runId 的条数上界：只留最近这么多条，避免无限增长 */
@@ -357,11 +386,14 @@ export async function readUndoState(): Promise<UndoState> {
   try {
     const data = await chrome.storage.local.get(UNDO_STORAGE_KEY);
     raw = data[UNDO_STORAGE_KEY] as StoredUndo | undefined;
-  } catch {
-    // 读不出来：既没有点，也不能假装一切正常
-    return lastWriteError
+  } catch (e) {
+    // 读不出来：既没有点，也不能假装一切正常。
+    // readError 会被写盘路径检查——否则"空 points"会被当成真实基线写回去，冲掉所有撤销点。
+    const reason = e instanceof Error ? e.message : String(e);
+    const base = lastWriteError
       ? { points: [], terminalRunIds: [], notice: lastWriteError.message, noticeAt: lastWriteError.at }
       : { points: [], terminalRunIds: [], notice: '读取撤销记录失败', noticeAt: 0 };
+    return { ...base, readError: reason };
   }
   const points = Array.isArray(raw?.points) ? raw.points : [];
   const terminalRunIds = Array.isArray(raw?.terminalRunIds) ? raw.terminalRunIds : [];
@@ -478,6 +510,12 @@ export async function recoverInterruptedTransaction(): Promise<UndoPoint | null>
   // 恢复前先等在途写入落定：否则清理之后可能又来一条旧写入
   await drainPendingWrites();
   const state = await readUndoState();
+  /*
+   * 读不到就不能提升这条 pending：下面的写盘会以 `state.points` 为基线，
+   * 而读失败时它是空数组——写下去等于把用户已有的撤销点全冲掉。
+   * pending 保留在原地，下次启动读取正常时再提升（不会丢这段改动）。
+   */
+  if (state.readError) return null;
 
   // **终态优先**：这个 runId 已经被消费过（或已终结），说明它的 pending 是陈旧残留
   // ——只清 pending，绝不生成新点。否则删除类逆操作会被重复回放，造出重复子树。

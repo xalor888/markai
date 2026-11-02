@@ -1234,6 +1234,70 @@ async function run() {
     check('按 Delete 弹出删除确认（不绕过确认直接删）', delDlg === true, JSON.stringify({ delDlg }));
     await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
     await sleep(300);
+
+    // ── PgDn / PgUp：整页翻动（说明里写"整页翻动"） ──
+    await focusList();
+    await key('Home');
+    await sleep(250);
+    const beforePg = await ev(`(() => {
+      const rows = [...document.querySelectorAll('[data-testid="row"]')];
+      const a = rows.find((r) => r.getAttribute('data-active') === 'true');
+      return a ? rows.indexOf(a) : -1;
+    })()`);
+    await key('PageDown');
+    await sleep(350);
+    const afterPg = await ev(`(() => {
+      const rows = [...document.querySelectorAll('[data-testid="row"]')];
+      const a = rows.find((r) => r.getAttribute('data-active') === 'true');
+      return a ? rows.indexOf(a) : -1;
+    })()`);
+    check(
+      'PgDn 把高亮往下翻（不是死键，也不是只动一行）',
+      afterPg > beforePg,
+      JSON.stringify({ beforePg, afterPg }),
+    );
+    await key('PageUp');
+    await sleep(350);
+    const afterPu = await ev(`(() => {
+      const rows = [...document.querySelectorAll('[data-testid="row"]')];
+      const a = rows.find((r) => r.getAttribute('data-active') === 'true');
+      return a ? rows.indexOf(a) : -1;
+    })()`);
+    check(
+      'PgUp 把高亮翻回去',
+      afterPu < afterPg,
+      JSON.stringify({ afterPg, afterPu }),
+    );
+
+    // ── ←：折叠已展开的文件夹 ──
+    const folded = await ev(`(async () => {
+      const tree = document.querySelector('[role="tree"]');
+      if (!tree) return { ok: false, reason: 'no-tree' };
+      // 找一个已展开的文件夹行（aria-expanded=true）
+      const rows = [...tree.querySelectorAll('[role="treeitem"]')];
+      const open = rows.find((r) => r.getAttribute('aria-expanded') === 'true');
+      if (!open) return { ok: false, reason: 'no-expanded-folder' };
+      const before = rows.filter((r) => r.getAttribute('aria-expanded') === 'true').length;
+      /*
+       * 树的键盘处理读的是 store 里的 activeId，**不是 DOM 焦点**。
+       * activeId 由 onMouseEnter 设定，而 React 的 enter 派生自 mouseover——
+       * 所以派发 mouseover（不是 mouseenter，那个 React 不认）。
+       */
+      open.dispatchEvent(new MouseEvent('mouseover', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 250));
+      const treeBox = tree.getBoundingClientRect();
+      void treeBox;
+      tree.focus();
+      open.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 400));
+      const after = [...tree.querySelectorAll('[role="treeitem"]')].filter((r) => r.getAttribute('aria-expanded') === 'true').length;
+      return { ok: true, before, after };
+    })()`);
+    check(
+      '← 折叠已展开的文件夹（不是死键）',
+      folded.ok === true && folded.after < folded.before,
+      JSON.stringify(folded),
+    );
   }
 
   /* ══════════ 9.2911 新建书签：从右键菜单到真的出现在列表 ══════════ */

@@ -11,6 +11,7 @@ import { ToastViewport } from '@/components/toast/toast';
 import { openUrl } from '@/lib/open-url';
 import { ORGANIZE_LOG_KEY, readOrganizeLog, summarizeOrganizeLog, type OrganizeStats } from '@/lib/ai/organize-log';
 import { appVersion } from '@/lib/version';
+import { saveTabToBar } from '@/lib/bookmarks/save-tab';
 import { BrandMark } from '@/components/theme/theme-provider';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -149,20 +150,20 @@ function PopupApp() {
   /** 收藏当前活动标签页（重复检测，存入书签栏）；失败时保留 popup 并显示原因 */
   const saveCurrentTab = async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    const url = tab?.url;
-    if (!url || !/^https?:\/\//i.test(url)) return;
     setSaveError('');
-    try {
-      const existing = await chrome.bookmarks.search(url).catch(() => []);
-      if (existing.some((n) => n.url === url)) {
-        setSaveError('该页面已在收藏夹中');
-        return;
-      }
-      await chrome.bookmarks.create({ title: tab.title || url, url });
+    /*
+     * 落盘逻辑抽到 lib 里（可被单测直接调用）。
+     * 原来的内联版本**漏了 parentId**，而 Chrome 的默认父级是「其他书签」——
+     * 按钮提示写的却是「收藏到书签栏」，用户点完去书签栏找不到。
+     * 实测：不传 parentId 创建出来的 parentId 是 "2"（其他书签）。
+     */
+    const res = await saveTabToBar({ title: tab?.title, url: tab?.url });
+    if (res.ok) {
       window.close();
-    } catch (e) {
-      setSaveError(e instanceof Error ? e.message : String(e));
+      return;
     }
+    if (res.reason === 'unsupported-url') return; // chrome:// 等本来就不该收藏
+    setSaveError(res.reason === 'duplicate' ? '该页面已在收藏夹中' : res.message);
   };
 
   return (
@@ -171,7 +172,7 @@ function PopupApp() {
       <div className="flex h-11 items-center gap-2 border-b border-border bg-card px-3">
         <BrandMark />
         <Badge variant="outline" className="ml-auto">
-          v{appVersion()}
+          <span data-testid="popup-version">v{appVersion()}</span>
         </Badge>
       </div>
 
@@ -185,7 +186,10 @@ function PopupApp() {
         )}
 
         {/* 待办卡片 */}
-        <div className="rounded-lg border border-border bg-card p-3.5 transition-colors hover:border-accent/30">
+        <div
+          data-testid="popup-pending"
+          className="rounded-lg border border-border bg-card p-3.5 transition-colors hover:border-accent/30"
+        >
           <div className="flex items-center gap-2">
             <Trash2 className="h-3.5 w-3.5 text-destructive" />
             <span className="text-xs font-medium text-foreground">待删除清单</span>
@@ -220,6 +224,7 @@ function PopupApp() {
         {/* 自动整理摘要：把后台行为摊到台面上 */}
         <button
           type="button"
+          data-testid="popup-organize"
           onClick={() => openFullPage('#organize')}
           className="w-full rounded-lg border border-border bg-card p-3.5 text-left transition-colors hover:border-accent/30 hover:bg-muted"
           title="查看整理记录（动了哪些书签、能否重试）"

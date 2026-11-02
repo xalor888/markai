@@ -606,6 +606,69 @@ async function run() {
     await sleep(200);
   }
 
+  /* ══════════ 9.43 弹出窗（此前零覆盖） ══════════ */
+  console.log('\n[9.43] 弹出窗');
+  {
+    /*
+     * popup 是用户点得最多的入口，但 e2e 里**一次都没打开过**。
+     * 它有独立入口、独立 ErrorBoundary、独立的数据读取路径
+     * （待办数 / 整理摘要 / 版本号），全都没被验证过。
+     *
+     * 这里覆盖三件最容易被改坏的事：
+     *  1. 能正常渲染（不是白屏、没掉进错误边界）；
+     *  2. 版本号与 manifests 一致（曾经手写过版本号，容易漂）；
+     *  3. 整理摘要读的是真实 storage 数据，不是写死的 0。
+     */
+    // 种一条"今天"的整理记录，用来验证摘要不是写死的
+    await ev(`(async () => {
+      const now = Date.now();
+      await chrome.storage.local.set({ 'markai.organize.log': [
+        { id: 'p1', at: now, title: '弹出窗测试站点', domain: 'popup-test.example', action: 'moved', target: '开发', detail: '已归入「开发」', via: 'local' },
+        { id: 'p2', at: now - 1000, title: '第二个', domain: 'popup2.example', action: 'moved', target: '开发', detail: '已归入「开发」', via: 'local' },
+      ] });
+      return true;
+    })()`);
+
+    const { targetId: popTarget } = await cdp.send('Target.createTarget', {
+      url: `chrome-extension://${EXT_ID}/popup.html`,
+    });
+    const { sessionId: popSession } = await cdp.send('Target.attachToTarget', { targetId: popTarget, flatten: true });
+    const popEv = async (expr) => {
+      const r = await cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }, popSession);
+      if (r.exceptionDetails) throw new Error(r.exceptionDetails.exception?.description || 'popup eval 失败');
+      return r.result?.value;
+    };
+
+    const mounted = await waitFor(async () => await popEv(`!!document.querySelector('[data-testid="popup-version"]')`), 6000);
+    check('弹出窗能正常渲染（不是白屏 / 没掉进错误边界）', mounted === true, JSON.stringify({ mounted }));
+
+    const info = await popEv(`(async () => {
+      const manifest = chrome.runtime.getManifest();
+      const ver = document.querySelector('[data-testid="popup-version"]');
+      const org = document.querySelector('[data-testid="popup-organize"]');
+      return {
+        manifestVersion: manifest.version,
+        shownVersion: (ver?.textContent || '').trim(),
+        hasPendingCard: !!document.querySelector('[data-testid="popup-pending"]'),
+        organizeText: (org?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 120),
+      };
+    })()`);
+    check(
+      '版本号与 manifest 一致',
+      info.shownVersion === `v${info.manifestVersion}`,
+      JSON.stringify(info),
+    );
+    check('待办卡片与整理卡片都在', info.hasPendingCard === true && info.organizeText.length > 0, JSON.stringify(info));
+    check(
+      '整理摘要读的是真实数据（种了 2 条今天记录 → 显示 2）',
+      info.organizeText.includes('2'),
+      JSON.stringify(info),
+    );
+
+    await cdp.send('Target.closeTarget', { targetId: popTarget });
+    await ev(`chrome.storage.local.remove('markai.organize.log')`);
+  }
+
   /* ══════════ 9.47 底部 toast 不能压住常驻条 ══════════ */
   console.log('\n[9.47] toast 与底部常驻条不重叠');
   {

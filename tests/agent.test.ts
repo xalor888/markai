@@ -298,7 +298,12 @@ const mockBookmarks = {
     const id = String(nextId++);
     const node: FNode = {
       id,
-      parentId: opt.parentId ?? '1',
+      /*
+       * Chrome 的真实默认值是「其他书签」(id '2')，不是书签栏 ('1')。
+       * mock 早先写成 '1' —— 正好把「不传 parentId 会存错地方」这个 bug 掩盖掉了，
+       * 于是 popup 里那句「收藏到书签栏」错了很久都没被测出来。这里改忠实。
+       */
+      parentId: opt.parentId ?? '2',
       title: opt.title,
       url: opt.url,
       dateAdded: Date.now(),
@@ -10931,6 +10936,61 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       const healthSrc = healthFiles.map((f) => readFileSync(join(healthDir, f), 'utf8')).join('\n');
       assert.equal(healthSrc.includes('crashCount'), false);
       assert.equal(healthSrc.includes('runtime.crashed'), false);
+    });
+  }
+
+  /* ══════════ T111: 「收藏到书签栏」必须真的进书签栏 ══════════ */
+  console.log('\n[T111] 收藏当前页面的落点');
+  {
+    /*
+     * 缺陷：popup 的「收藏当前页面」调用
+     *   chrome.bookmarks.create({ title, url })   // 没有 parentId
+     * 而 Chrome 不传 parentId 时默认落到「**其他书签**」(id '2')，
+     * 按钮提示却写着「收藏当前标签页到**书签栏**」——用户点完去书签栏找不到。
+     * 实测（headless）：创建后 parentId = "2"。
+     *
+     * 这个 bug 之所以一直没被测出来，是因为 mock 里把默认值写成了 '1'（书签栏），
+     * 与 Chrome 的真实行为相反。mock 已改忠实。
+     */
+    const { saveTabToBar } = await import('../src/lib/bookmarks/save-tab');
+
+    await okA('不带 parentId 的坑：saveTabToBar 必须显式指定书签栏', async () => {
+      const before = mockCalls.create;
+      const res = await saveTabToBar({ title: '示例', url: 'https://bar-target.example/page' });
+      assert.equal(res.ok, true, JSON.stringify(res));
+      assert.equal(mockCalls.create, before + 1);
+      const id = (res as { id: string }).id;
+      const node = nodeById(id);
+      assert.ok(node, '书签没创建出来');
+      assert.equal(node!.parentId, '1', `应进书签栏(id 1)，实际 ${node!.parentId}`);
+    });
+
+    await okA('重复的网址不重复创建', async () => {
+      const first = await saveTabToBar({ title: 'A', url: 'https://dup.example/x' });
+      assert.equal(first.ok, true);
+      const before = mockCalls.create;
+      const second = await saveTabToBar({ title: 'A 再来一次', url: 'https://dup.example/x' });
+      assert.equal(second.ok, false);
+      assert.equal((second as { reason: string }).reason, 'duplicate');
+      assert.equal(mockCalls.create, before, '重复时不该再创建');
+    });
+
+    await okA('子串相近但不同网址不算重复（search 是子串匹配，必须再比一次 url）', async () => {
+      const a = await saveTabToBar({ title: 'page', url: 'https://sub.example/page' });
+      assert.equal(a.ok, true);
+      // 这个 url 是上一个的前缀，search 会一起返回；不能因此判成重复
+      const b = await saveTabToBar({ title: 'page2', url: 'https://sub.example/page2' });
+      assert.equal(b.ok, true, `被误判为重复：${JSON.stringify(b)}`);
+    });
+
+    await okA('非 http(s) 页面不收藏', async () => {
+      const before = mockCalls.create;
+      for (const url of ['chrome://settings', 'about:blank', 'chrome-extension://abc/x.html', undefined]) {
+        const res = await saveTabToBar({ title: 't', url });
+        assert.equal(res.ok, false);
+        assert.equal((res as { reason: string }).reason, 'unsupported-url');
+      }
+      assert.equal(mockCalls.create, before, '非 http 页面不该创建书签');
     });
   }
 

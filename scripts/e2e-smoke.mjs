@@ -616,6 +616,78 @@ async function run() {
     await sleep(200);
   }
 
+  /* ══════════ 9.282 设置页能导出书签文件 ══════════ */
+  console.log('\n[9.282] 书签导出');
+  {
+    /*
+     * 以前只有「清空」，用户说"帮我把书签备份一下"时没有任何入口；
+     * AI 的 export_bookmarks 也只把清单交给模型、不产文件。
+     * 这条验证：点下去真的会触发一次下载，文件名与 MIME 都对。
+     */
+    const { targetId: t } = await cdp.send('Target.createTarget', {
+      url: `chrome-extension://${EXT_ID}/options.html`,
+    });
+    const { sessionId: sid } = await cdp.send('Target.attachToTarget', { targetId: t, flatten: true });
+    await cdp.send('Page.enable', {}, sid);
+    const ev2 = async (expr) => {
+      const r = await cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }, sid);
+      if (r.exceptionDetails) return null;
+      return r.result?.value;
+    };
+    await waitFor(async () => await ev2(`!!document.querySelector('[data-testid="export-html"]')`), 10000);
+
+    const counts = await ev2(`(() => {
+      const p = [...document.querySelectorAll('p')].find((x) => /将导出/.test(x.textContent || ''));
+      return p ? p.textContent.trim() : null;
+    })()`);
+    check('按钮旁说明"将导出 N 条"（读了真实书签数）', typeof counts === 'string' && /将导出 \d+ 条书签/.test(counts), JSON.stringify({ counts }));
+
+    // 拦截 a.click()：不真的落盘，但必须拿到文件名与内容类型
+    await ev2(`(() => {
+      window.__downloads = [];
+      const orig = window.URL.createObjectURL;
+      window.URL.createObjectURL = (blob) => {
+        window.__downloads.push({ size: blob.size, type: blob.type });
+        return orig(blob);
+      };
+      HTMLAnchorElement.prototype.click = function () {
+        window.__downloads.push({ name: this.download, href: String(this.href).slice(0, 20) });
+      };
+      return true;
+    })()`);
+
+    await ev2(`document.querySelector('[data-testid="export-html"]').click()`);
+    // 等下载记录真的出现，而不是固定 sleep：机器忙时 500ms 会不够，造成偶发假失败
+    await waitFor(async () => (await ev2(`(window.__downloads || []).length`)) >= 2, 6000);
+    const html = await ev2(`window.__downloads`);
+    // createObjectURL 与 a.click() 是两个不同的记录：一个带 type/size，一个带 name
+    check(
+      '点「书签 HTML」真的触发了下载（文件名 + 内容类型正确）',
+      Array.isArray(html) &&
+        html.some((d) => /MarkAI-书签-\d{4}-\d{2}-\d{2}\.html/.test(d.name || '')) &&
+        html.some((d) => /text\/html/.test(d.type || '')) &&
+        html.some((d) => typeof d.size === 'number' && d.size > 200),
+      JSON.stringify(html),
+    );
+
+    await ev2(`window.__downloads = []; document.querySelector('[data-testid="export-json"]').click()`);
+    await waitFor(async () => (await ev2(`(window.__downloads || []).length`)) >= 2, 6000);
+    const json = await ev2(`window.__downloads`);
+    check(
+      '点「JSON」也真的触发了下载',
+      Array.isArray(json) &&
+        json.some((d) => /MarkAI-书签-\d{4}-\d{2}-\d{2}\.json/.test(d.name || '')) &&
+        json.some((d) => /application\/json/.test(d.type || '')) &&
+        json.some((d) => typeof d.size === 'number' && d.size > 100),
+      JSON.stringify(json),
+    );
+
+    const noErr = await ev2(`!document.querySelector('[data-testid="export-error"]')`);
+    check('导出没有报错', noErr === true, JSON.stringify({ noErr }));
+
+    await cdp.send('Target.closeTarget', { targetId: t }).catch(() => {});
+  }
+
   /* ══════════ 9.283 命令面板：能搜文件夹、无结果有提示、Esc 能关 ══════════ */
   console.log('\n[9.283] 命令面板');
   {

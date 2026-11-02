@@ -12005,6 +12005,125 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T127: 书签导出文件的格式 ══════════ */
+  console.log('\n[T127] 书签导出（Netscape HTML / JSON）');
+  {
+    /*
+     * 新功能：把书签导出成文件。导出一份**格式错的文件**比不导出更糟——
+     * 用户会以为备份好了，等真要恢复时才发现导入不了。
+     * 所以格式必须靠纯函数的单测钉死，不依赖开浏览器。
+     */
+    const { toNetscapeHtml, toJsonExport, escapeHtml, countTree } = await import('../src/lib/bookmarks/export-file');
+
+    const mkRoot = (children: unknown[]) =>
+      [{ id: '0', title: '', children }] as never as chrome.bookmarks.BookmarkTreeNode[];
+
+    ok('HTML 转义：& < > " 都要转', () => {
+      assert.equal(escapeHtml('a&b<c>d"e'), 'a&amp;b&lt;c&gt;d&quot;e');
+      // 不能重复转义已转过的实体
+      assert.equal(escapeHtml('&amp;'), '&amp;amp;');
+    });
+
+    ok('Netscape 头与结构（能被浏览器导入的最小骨架）', () => {
+      const html = toNetscapeHtml(mkRoot([]));
+      assert.ok(html.startsWith('<!DOCTYPE NETSCAPE-Bookmark-file-1>'), html.slice(0, 60));
+      assert.ok(html.includes('<DL><p>'), '缺少 DL 容器');
+      assert.ok(html.includes('</DL><p>'), '缺少收尾');
+      assert.ok(html.includes('NETSCAPE-Bookmark-file-1'));
+    });
+
+    ok('虚拟根不输出，只输出它的子节点', () => {
+      const html = toNetscapeHtml(
+        mkRoot([
+          {
+            id: '1', title: '书签栏', dateAdded: 1_700_000_000_000, children: [
+              { id: '2', title: '示例', url: 'https://example.com/', dateAdded: 1_700_000_100_000 },
+            ],
+          },
+        ]),
+      );
+      assert.ok(html.includes('书签栏'), '应包含书签栏');
+      assert.ok(html.includes('HREF="https://example.com/"'), html);
+      // 虚拟根没有标题，不该出现 `>undefined<` 之类
+      assert.equal(html.includes('undefined'), false, html);
+    });
+
+    ok('时间戳按秒输出（Netscape 规范用秒，书签 API 用毫秒）', () => {
+      const html = toNetscapeHtml(
+        mkRoot([{ id: '1', title: '栏', children: [{ id: '2', title: 'x', url: 'https://a/', dateAdded: 1_700_000_123_456 }] }]),
+      );
+      assert.ok(html.includes('ADD_DATE="1700000123"'), `应取秒级：${html}`);
+    });
+
+    ok('空文件夹也要输出（否则导入后结构变了）', () => {
+      const html = toNetscapeHtml(mkRoot([{ id: '1', title: '空文件夹', children: [] }]));
+      assert.ok(html.includes('空文件夹'), html);
+      // 名字之后应当是 </H3> → <DL><p> → 紧接着 </DL><p>（中间没有内容 = 真的是空文件夹）
+      const tail = (html.split('空文件夹')[1] ?? '')
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
+      assert.ok(tail[0] === '</H3>', `标题应闭合：${tail[0]}`);
+      assert.ok(tail[1] === '<DL><p>', `空文件夹也应有 DL：${tail[1]}`);
+      assert.ok(tail[2] === '</DL><p>', `DL 必须立刻闭合（否则导入层级会错）：${tail[2]}`);
+    });
+
+    ok('嵌套层级：子文件夹缩进递增', () => {
+      const html = toNetscapeHtml(
+        mkRoot([
+          {
+            id: '1', title: '外层', children: [
+              { id: '2', title: '内层', children: [{ id: '3', title: '深', url: 'https://deep/' }] },
+            ],
+          },
+        ]),
+      );
+      const outer = html.split('\n').find((l) => l.includes('外层'))!;
+      const inner = html.split('\n').find((l) => l.includes('内层'))!;
+      const indent = (l: string) => l.length - l.trimStart().length;
+      assert.ok(indent(inner) > indent(outer), `内层应更缩进：${indent(outer)} vs ${indent(inner)}`);
+    });
+
+    ok('标题与 URL 里的特殊字符不会破坏文件', () => {
+      const html = toNetscapeHtml(
+        mkRoot([{ id: '1', title: 'a<b', children: [{ id: '2', title: 'x&y', url: 'https://e/?a=1&b=2' }] }]),
+      );
+      assert.ok(html.includes('a&lt;b'), html);
+      assert.ok(html.includes('x&amp;y'), html);
+      assert.ok(html.includes('a=1&amp;b=2'), 'URL 里的 & 也必须转义');
+    });
+
+    ok('JSON 备份：保留层级、时间戳用 ISO、不泄漏 parentId', () => {
+      const json = toJsonExport(
+        mkRoot([
+          {
+            id: '1', title: '栏', parentId: '0', children: [
+              { id: '2', title: '文档', url: 'https://doc/', dateAdded: 1_700_000_000_000, parentId: '1' },
+            ],
+          },
+        ]),
+        new Date('2026-11-02T00:00:00.000Z'),
+      );
+      const parsed = JSON.parse(json);
+      assert.equal(parsed.version, 1);
+      assert.equal(parsed.exportedAt, '2026-11-02T00:00:00.000Z');
+      assert.equal(parsed.bookmarks[0].title, '栏');
+      assert.equal(parsed.bookmarks[0].children[0].url, 'https://doc/');
+      assert.equal(parsed.bookmarks[0].children[0].dateAdded, '2023-11-14T22:13:20.000Z');
+      assert.equal(json.includes('parentId'), false, '不该导出 parentId');
+    });
+
+    ok('countTree 不把虚拟根算成文件夹', () => {
+      const c = countTree(
+        mkRoot([
+          { id: '1', title: '栏', children: [{ id: '2', title: 'a', url: 'https://a/' }, { id: '3', title: '子', children: [] }] },
+        ]),
+      );
+      assert.equal(c.bookmarks, 1);
+      assert.equal(c.folders, 2, `应只算子节点里的文件夹：${JSON.stringify(c)}`);
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

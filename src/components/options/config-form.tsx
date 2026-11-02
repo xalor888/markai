@@ -1,10 +1,11 @@
-import { AlertTriangle, Brain, CheckCircle2, ChevronRight, Database, Eye, EyeOff, Loader2, Monitor, Moon, Palette, Plug, Plus, RefreshCw, ShieldCheck, SlidersHorizontal, Sun, Sparkles, Trash2, Zap } from 'lucide-react';
+import { AlertTriangle, Brain, CheckCircle2, ChevronRight, Database, Download, Eye, EyeOff, Loader2, Monitor, Moon, Palette, Plug, Plus, RefreshCw, ShieldCheck, SlidersHorizontal, Sun, Sparkles, Trash2, Zap } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useConfigStore } from '@/stores/configStore';
 import { useAIStore, AI_STORAGE_KEY } from '@/stores/aiStore';
 import { useMemoryStore, initMemorySync } from '@/stores/memoryStore';
 import { CATEGORY_LABELS, type MemoryCategory } from '@/lib/ai/memory';
 import { clearUndoPoints } from '@/lib/undo/recorder';
+import { countTree, toJsonExport, toNetscapeHtml } from '@/lib/bookmarks/export-file';
 import { useThemeStore, type Theme } from '@/stores/themeStore';
 import { PROVIDERS, getPreset, getModelContextWindow } from '@/lib/providers';
 import { parseCustomHeaders } from '@/lib/ai/request-headers';
@@ -164,6 +165,50 @@ export function ConfigForm() {
    */
   const [headersInput, setHeadersInput] = useState('');
   const [headerErrors, setHeaderErrors] = useState<string[]>([]);
+  /** 书签导出的统计（按钮旁显示"将导出 N 条"；读不到时为 null，按钮禁用） */
+  const [exportCounts, setExportCounts] = useState<{ bookmarks: number; folders: number } | null>(null);
+  /** 导出失败的原因（读不到书签树 / 生成内容失败），不静默 */
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  // 统计书签数量：读不到就不给数（按钮禁用），不要把"读不到"显示成 0 条
+  useEffect(() => {
+    void chrome.bookmarks
+      .getTree()
+      .then((roots) => setExportCounts(countTree(roots)))
+      .catch((e: unknown) => {
+        setExportCounts(null);
+        setExportError(e instanceof Error ? e.message : String(e));
+      });
+  }, []);
+
+  /**
+   * 导出书签到本地文件。
+   *
+   * 失败必须可见：按钮点了没反应，比不给这个功能更糟。
+   */
+  const exportBookmarksNow = async (format: 'html' | 'json'): Promise<void> => {
+    try {
+      setExportError(null);
+      const roots = await chrome.bookmarks.getTree();
+      const content = format === 'html' ? toNetscapeHtml(roots) : toJsonExport(roots);
+      const stamp = new Date().toISOString().slice(0, 10);
+      const name = format === 'html' ? `MarkAI-书签-${stamp}.html` : `MarkAI-书签-${stamp}.json`;
+      const blob = new Blob([content], {
+        type: format === 'html' ? 'text/html;charset=utf-8' : 'application/json;charset=utf-8',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      a.click();
+      URL.revokeObjectURL(url);
+      pushToast('已导出书签', { description: name });
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setExportError(msg);
+      pushToast('导出失败', { variant: 'destructive', description: msg });
+    }
+  };
   const [remoteModels, setRemoteModels] = useState<string[]>([]);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
@@ -916,6 +961,52 @@ export function ConfigForm() {
 
       {/* ── 数据管理 ── */}
       <Section icon={Database} title="数据管理" anchor="data">
+        {/*
+         * 书签导出：浏览器通用的 Netscape HTML（可再导入 Chrome/Edge/Firefox/Safari）
+         * 与 JSON（保留结构与时间戳）。
+         *
+         * 以前这里只能"清空"——用户说"帮我把书签备份一下"时没有任何入口，
+         * 而 AI 的 export_bookmarks 只把清单交给模型分析、不产出文件。
+         */}
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <p className="text-xs text-foreground">书签导出</p>
+            <p className="mt-0.5 text-2xs text-muted-foreground">
+              {exportCounts
+                ? `将导出 ${exportCounts.bookmarks} 条书签 · ${exportCounts.folders} 个文件夹`
+                : '正在统计书签数量…'}
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-1.5">
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={!exportCounts}
+              onClick={() => void exportBookmarksNow('html')}
+              data-testid="export-html"
+              title="导出为浏览器通用的书签文件（可再导入）"
+            >
+              <Download className="h-3 w-3" />
+              书签 HTML
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              disabled={!exportCounts}
+              onClick={() => void exportBookmarksNow('json')}
+              data-testid="export-json"
+              title="导出为 JSON（保留完整结构与时间戳）"
+            >
+              <Download className="h-3 w-3" />
+              JSON
+            </Button>
+          </div>
+        </div>
+        {exportError && (
+          <p className="mt-2 text-2xs text-destructive" data-testid="export-error">
+            导出失败：{exportError}
+          </p>
+        )}
         <div className="flex items-center justify-between gap-3">
           <div className="min-w-0">
             <p className="text-xs text-foreground">对话记录与待删除清单</p>

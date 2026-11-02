@@ -12401,6 +12401,108 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+
+
+  /* ══════════ T134: 补 lib 下未被触达的导出 ══════════ */
+  console.log('\n[T134] 补充导出覆盖');
+  {
+    /* 台账里这一项挂了很久：188 个导出函数，19 个没被任何用例引用。逐个看风险，取高价值的补上。 */
+
+    await okA('deleteMemoryItem：删得掉、删错了有话说', async () => {
+      const mem = await import('../src/lib/ai/memory');
+      storageMap.set('markai.memories', [
+        { id: 'm1', text: '技术类按语言分', category: 'rule', enabled: true },
+        { id: 'm2', text: '别动设计资料', category: 'preference', enabled: true },
+      ]);
+      assert.equal(await mem.deleteMemoryItem('m1'), true, '删除存在的应返回 true');
+      const left = (storageMap.get('markai.memories') as { id: string }[]).map((m) => m.id);
+      assert.deepEqual(left, ['m2'], '只删指定的那一条');
+      assert.equal(await mem.deleteMemoryItem('nope'), false, '删不存在的应返回 false 而不是假装成功');
+      const after = storageMap.get('markai.memories') as { id: string }[];
+      assert.deepEqual(after.map((m) => m.id), ['m2'], '删失败不该改动数据');
+      storageMap.delete('markai.memories');
+    });
+
+    await okA('clearAllMemories：清空后是空数组（不是 undefined）', async () => {
+      const mem = await import('../src/lib/ai/memory');
+      storageMap.set('markai.memories', [{ id: 'm1', text: 'x', category: 'custom', enabled: true }]);
+      await mem.clearAllMemories();
+      assert.deepEqual(storageMap.get('markai.memories'), []);
+      storageMap.delete('markai.memories');
+    });
+
+    await okA('unrestorableOps：只认「没有快照的删除」', async () => {
+      const j = await import('../src/lib/undo/journal');
+      const ops = [
+        { kind: 'move', id: 'a', from: '1', to: '2' },
+        { kind: 'delete', id: 'b', snapshot: { id: 'b', title: 't', parentId: '1', index: 0 } },
+        { kind: 'delete', id: 'c' },
+        { kind: 'create', id: 'd', parentId: '1', index: 0 },
+      ] as never;
+      const bad = j.unrestorableOps(ops) as { id: string }[];
+      assert.equal(bad.length, 1, `只该有一条不可恢复：${JSON.stringify(bad)}`);
+      assert.equal(bad[0]!.id, 'c');
+      assert.deepEqual(j.unrestorableOps([]), []);
+    });
+
+    await okA('describeUndoPoint：给的是人话，不是 JSON', async () => {
+      const j = await import('../src/lib/undo/journal');
+      const text = j.describeUndoPoint({
+        id: 'p1',
+        at: Date.now(),
+        ops: [
+          { kind: 'move', id: 'a', from: '1', to: '2' },
+          { kind: 'delete', id: 'b', snapshot: { id: 'b', title: '死链', parentId: '1', index: 0 } },
+        ],
+      } as never);
+      assert.equal(typeof text, 'string');
+      assert.ok(text.length > 0, '不能是空串');
+      assert.equal(text.includes('{'), false, `不该把 JSON 结构直接丢给用户：${text}`);
+    });
+
+    await okA('isKnownOpKind：白名单之外的 Kind 一律不认', async () => {
+      const v = await import('../src/lib/undo/validate');
+      // 白名单与 UndoOp['kind'] 一致：move / moveBatch / update / create / delete
+      for (const k of ['move', 'moveBatch', 'update', 'create', 'delete']) {
+        assert.equal(v.isKnownOpKind(k), true, `应认识 ${k}`);
+      }
+      for (const k of ['copy', 'rename', 'drop', 'truncate', 'purge', '', 'MOVE']) {
+        assert.equal(v.isKnownOpKind(k), false, `不该认识 ${JSON.stringify(k)}`);
+      }
+    });
+
+    await okA('finalizeToolCalls：补齐 OpenAI 要求的形状', async () => {
+      const st = await import('../src/lib/ai/stream');
+      const out = st.finalizeToolCalls([
+        { id: 'call_1', name: 'move', args: '{"id":"a"}' },
+        { index: 1, name: 'create', args: '' },
+      ] as never) as { id: string; type: string; function: { name: string; arguments: string } }[];
+      assert.equal(out.length, 2);
+      assert.equal(out[0]!.type, 'function');
+      assert.equal(out[0]!.function.arguments, '{"id":"a"}');
+      // 空参数必须补成 '{}'：模型侧 JSON.parse('') 会直接抛
+      assert.equal(out[1]!.function.arguments, '{}');
+      assert.ok(out[1]!.id.length > 0, '缺 id 时要补一个，不能留空');
+    });
+
+    await okA('cn：同类名合并、冲突时后者胜', async () => {
+      const u = await import('../src/lib/utils');
+      assert.equal(u.cn('a', 'b'), 'a b');
+      // 同一组的类名冲突时后者胜（twMerge 的职责）
+      assert.equal(u.cn('p-2', 'p-4'), 'p-4');
+      assert.equal(u.cn('text-red', 'text-blue'), 'text-blue');
+      // falsy 值要被丢掉，不能变成字符串 "false"
+      assert.equal(u.cn('hidden', false && 'flex', undefined, null, ''), 'hidden');
+      assert.equal(u.cn(), '');
+    });
+
+    await okA('copyText：空文本直接拒绝（不弹「已复制」）', async () => {
+      const c = await import('../src/lib/clipboard');
+      assert.equal(await c.copyText(''), false);
+      assert.equal(await c.copyText('   '), false, '纯空白也不该复制');
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

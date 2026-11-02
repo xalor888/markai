@@ -259,9 +259,24 @@ export async function endUndoTransaction(expectedRunId?: string): Promise<UndoPo
   const state = await readUndoState();
   // 先按条数上限收敛，再按字节预算裁剪：超配额时**丢最旧的并如实告知**，
   // 而不是让整块写入失败、把「写不进去」显示成「没有可撤销的操作」。
-  const candidates = [point, ...state.points].slice(0, MAX_UNDO_POINTS);
+  /*
+   * 条数上限的丢弃必须说出来。
+   *
+   * `slice(0, MAX_UNDO_POINTS)` 会把最旧的挤掉，而 `trimPointsToBudget` 只描述**字节**预算，
+   * 于是超出 10 步之后最早那步是**静默消失**的——用户以为"最近 10 次都能撤"，
+   * 实际到第 11 次就悄悄丢了第 1 次，等真要用时才发现。
+   * 这和"删除类操作丢了撤销"是同一个性质的问题：不是不报错就算没事。
+   */
+  const all = [point, ...state.points];
+  const candidates = all.slice(0, MAX_UNDO_POINTS);
+  const droppedByCount = all.length - candidates.length;
   const trim = trimPointsToBudget(candidates, budgetBytes);
-  const notice = describeUndoTrim(trim) ?? state.notice;
+  const trimNotice = describeUndoTrim(trim);
+  const countNotice =
+    droppedByCount > 0
+      ? `撤销记录最多保留 ${MAX_UNDO_POINTS} 步，更早的 ${droppedByCount} 步已被丢弃`
+      : undefined;
+  const notice = [countNotice, trimNotice].filter(Boolean).join('；') || state.notice;
   const written = await writeUndoPoints(trim.kept, notice, state.terminalRunIds);
   if (!written.ok) {
     // 正式点没落盘：**保留（并补全）pending**，让下次启动仍能把它恢复出来。
@@ -489,10 +504,17 @@ export async function recoverInterruptedTransaction(): Promise<UndoPoint | null>
     ...(pending.orderCheckpoints?.length ? { orderCheckpoints: pending.orderCheckpoints } : {}),
     containsDelete: !!pending.containsDelete,
   };
-  const trim = trimPointsToBudget([point, ...state.points].slice(0, MAX_UNDO_POINTS), budgetBytes);
+  const allRecovered = [point, ...state.points];
+  const cappedRecovered = allRecovered.slice(0, MAX_UNDO_POINTS);
+  const droppedRecovered = allRecovered.length - cappedRecovered.length;
+  const trim = trimPointsToBudget(cappedRecovered, budgetBytes);
+  const recoveredNote =
+    droppedRecovered > 0
+      ? `；撤销记录最多保留 ${MAX_UNDO_POINTS} 步，更早的 ${droppedRecovered} 步已被丢弃`
+      : '';
   const written = await writeUndoPoints(
     trim.kept,
-    `上一轮被中断，已把当时已完成的改动保留为可撤销记录（${summarizeOps(point.ops)}）`,
+    `上一轮被中断，已把当时已完成的改动保留为可撤销记录（${summarizeOps(point.ops)}）${recoveredNote}`,
     state.terminalRunIds,
   );
   // 写失败时**保留 pending**，下次启动重试——绝不能在正式点落盘前就把它删掉

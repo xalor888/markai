@@ -11207,6 +11207,66 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T114: 超出撤销步数上限必须说出来 ══════════ */
+  console.log('\n[T114] 撤销步数上限的丢弃提示');
+  {
+    /*
+     * 缺陷：`endUndoTransaction` 里 `slice(0, MAX_UNDO_POINTS)` 会把最旧的点挤掉，
+     * 而 `describeUndoTrim` 只描述**字节预算**溢出 → 超出 10 步后最早那步**静默消失**。
+     *
+     * 用户以为"最近 10 次都能撤"，实际到第 11 次就悄悄丢了第 1 次，
+     * 等真要用时才发现——和"删除类操作没有撤销点"是同一性质的伤害。
+     */
+    const { beginUndoTransaction, endUndoTransaction, readUndoState, resetUndoTransactionForTest, UNDO_STORAGE_KEY } =
+      await import('../src/lib/undo/recorder');
+
+    await okA(`做到第 ${MAX_UNDO_POINTS + 2} 步时，提示里要点名丢了几步`, async () => {
+      storageMap.delete(UNDO_STORAGE_KEY);
+      resetUndoTransactionForTest();
+      const bar = '1';
+
+      let lastNotice = null;
+      for (let i = 0; i < MAX_UNDO_POINTS + 2; i++) {
+        await beginUndoTransaction(`run-t114-${i}`);
+        await mockBookmarks.create({ parentId: bar, title: `T114-${i}`, url: `https://t114.example/${i}` });
+        await executeTool('create_bookmark', JSON.stringify({ parentId: bar, title: `T114-${i}`, url: `https://t114.example/${i}` }));
+        await endUndoTransaction();
+        const st = await readUndoState();
+        lastNotice = st.notice;
+      }
+
+      const state = await readUndoState();
+      assert.equal(state.points.length, MAX_UNDO_POINTS, `应保留 ${MAX_UNDO_POINTS} 步`);
+      assert.ok(lastNotice, '超出上限时必须给出提示，而不是静默丢弃');
+      assert.ok(
+        String(lastNotice).includes('丢弃'),
+        `提示要点明"丢弃"，实际：${lastNotice}`,
+      );
+      assert.ok(
+        String(lastNotice).includes(String(MAX_UNDO_POINTS)),
+        `提示要说明上限是多少，实际：${lastNotice}`,
+      );
+      storageMap.delete(UNDO_STORAGE_KEY);
+      resetUndoTransactionForTest();
+    });
+
+    await okA('没超上限时不打扰（不产生多余提示）', async () => {
+      storageMap.delete(UNDO_STORAGE_KEY);
+      resetUndoTransactionForTest();
+      await beginUndoTransaction('run-t114-few');
+      await executeTool('create_bookmark', JSON.stringify({ parentId: '1', title: 'T114-单步', url: 'https://t114.example/one' }));
+      await endUndoTransaction();
+      const st = await readUndoState();
+      assert.equal(st.points.length, 1);
+      assert.ok(
+        !st.notice || !String(st.notice).includes('丢弃'),
+        `只有 1 步就不该提示丢弃，实际：${st.notice}`,
+      );
+      storageMap.delete(UNDO_STORAGE_KEY);
+      resetUndoTransactionForTest();
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

@@ -607,6 +607,71 @@ async function run() {
     await sleep(200);
   }
 
+  /* ══════════ 9.33 撤销上限提示要出现在界面上 ══════════ */
+  console.log('\n[9.33] 撤销上限提示');
+  {
+    /*
+     * 单测只证明"notice 字段写对了"，不证明用户看得到。
+     * 这里种一条上限提示，确认聊天面板真的把它显示出来。
+     */
+    /*
+     * 种子要贴近真实：修剪发生后，**点数仍有 10 个**，同时带一条提示。
+     * 我第一版只种 notice、points 留空 —— 那样「撤销历史」按钮是禁用的
+     * （`disabled={undoHistory.length === 0}`），面板根本打不开，
+     * 测的就不是真实场景。
+     */
+    await ev(`(async () => {
+      const points = Array.from({ length: 3 }, (_, i) => ({
+        id: 'seed-p' + i,
+        runId: 'seed-r' + i,
+        createdAt: Date.now() - i * 1000,
+        ops: [{ kind: 'move', id: 'x', title: 't', fromParentId: '1', fromIndex: 0, toParentId: '1', toIndex: 1 }],
+      }));
+      await chrome.storage.local.set({ 'markai.undo': {
+        points,
+        terminalRunIds: [],
+        notice: '撤销记录最多保留 10 步，更早的 2 步已被丢弃',
+        noticeAt: Date.now(),
+      } });
+      return true;
+    })()`);
+    await cdp.send('Page.reload', {}, sessionId);
+    await sleep(1000);
+
+    /*
+     * 断言要落在**常驻横幅**上，不是 toast。
+     * toast 也会带这段文字（refreshUndo 在 noticeAt 变化时弹一条），
+     * 但它是几秒就消失的；真正让用户事后还能看到的是横幅。
+     * 第一版只查 body 文本 → 去掉横幅后依然绿（toast 顶着），证伪没打中。
+     */
+    // 打开「撤销历史」面板——提示就挂在这个面板里
+    await ev(`(() => {
+      const b = [...document.querySelectorAll('button')].find(
+        (x) => (x.getAttribute('aria-label') || '') === '撤销历史',
+      );
+      if (!b) return false;
+      b.click();
+      return true;
+    })()`);
+    await sleep(500);
+
+    const shown = await waitFor(
+      async () =>
+        await ev(`(() => {
+          const el = document.querySelector('[data-testid="undo-notice"]');
+          return !!el && el.textContent.includes('更早的 2 步已被丢弃');
+        })()`),
+      8000,
+    );
+    check(
+      '撤销上限的丢弃提示以**常驻横幅**形式显示（不是只弹一条 toast）',
+      shown === true,
+      JSON.stringify({ shown }),
+    );
+
+    await ev(`chrome.storage.local.remove('markai.undo')`);
+  }
+
   /* ══════════ 9.35 时间线：看的是**全库**，不是一个文件夹 ══════════ */
   console.log('\n[9.35] 时间线语义');
   {

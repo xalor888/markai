@@ -521,7 +521,10 @@ export function ChatPanel({
               )}
             </div>
             {undoNotice && (
-              <p className="shrink-0 border-t border-border px-2.5 py-1.5 text-2xs text-muted-foreground">
+              <p
+                data-testid="undo-notice"
+                className="shrink-0 border-t border-border px-2.5 py-1.5 text-2xs text-muted-foreground"
+              >
                 {undoNotice}
               </p>
             )}

@@ -1935,6 +1935,109 @@ async function run() {
     await sleep(300);
   }
 
+  /* ══════════ 9.341 Ctrl+C 复制网址：快捷键说明里承诺了它 ══════════ */
+  console.log('\n[9.341] Ctrl+C 复制网址');
+  {
+    /*
+     * 快捷键说明里写着「Ctrl+C 复制选中项的网址」，而 e2e 里**一次都没验过**。
+     * 用户照说明按下去，剪贴板里没东西、也没有任何提示——那说明就成了谎言。
+     *
+     * 判据分两层：**界面上有反馈**（toast）+ **剪贴板里真有内容**。
+     * 只验 toast 不够：复制失败了也可能弹 toast。
+     */
+    await ev(`(() => { const el = document.querySelector('[data-testid="list"]'); if (el) el.focus(); return !!el; })()`);
+    await sleep(200);
+
+    const COPY_URL = 'https://copy-me.example/page';
+    await ev(`(async () => {
+      const bar = (await chrome.bookmarks.getTree())[0].children.find((c) => c.id === '1');
+      for (const h of await chrome.bookmarks.search(${JSON.stringify(COPY_URL)})) await chrome.bookmarks.remove(h.id).catch(() => {});
+      await chrome.bookmarks.create({ parentId: bar.id, title: '待复制书签', url: ${JSON.stringify(COPY_URL)} });
+      return true;
+    })()`);
+    await sleep(800);
+
+    /*
+     * headless 下 `navigator.clipboard.readText()` 会被拒
+     * （实测 NotAllowedError: Read permission denied），读不回来。
+     * 改成**间谍式劫持 writeText**：记录应用实际传进去的内容。
+     * 验的正是"应用用剪贴板 API 复制了这条网址"这件事本身。
+     */
+    await ev(`(() => {
+      window.__copied = [];
+      const orig = navigator.clipboard.writeText.bind(navigator.clipboard);
+      navigator.clipboard.writeText = (t) => { window.__copied.push(String(t)); return orig(t); };
+      return true;
+    })()`);
+
+    /*
+     * Ctrl+C 复制的目标是「多选项，否则高亮行」。高亮由**键盘导航**设定
+     * （点行是打开书签，不会把 activeIndex 移到那一行——实测点完复制到的是另一条）。
+     * 所以先按 Home 把高亮固定到第一行，再从 title 属性读出那一行的网址当预期值。
+     */
+    await ev(`(() => { const el = document.querySelector('[data-testid="list"]'); if (el) el.focus(); return !!el; })()`);
+    await sleep(200);
+    /*
+     * 先按 Esc 清掉多选。
+     * Ctrl+C 的规则是「复制**选中项**的网址，无多选时复制高亮行」
+     * （代码：selectedIds.length > 0 ? 选中项 : 高亮行）。
+     * 前面的键盘段落留下了多选，不清的话复制到的是选中项，
+     * 与"高亮行"这个预期对不上——实测 copiedAll 是另一条书签。
+     */
+    await ev(`(() => {
+      const el = document.querySelector('[data-testid="list"]');
+      el?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+      return true;
+    })()`);
+    await sleep(300);
+    const selCleared = await ev(`[...document.querySelectorAll('[data-testid="row"][aria-selected="true"]')].length`);
+    check('按 Esc 之后多选已清空（否则 Ctrl+C 复制的不是高亮行）', selCleared === 0, JSON.stringify({ selCleared }));
+
+    await ev(`(() => {
+      const el = document.querySelector('[data-testid="list"]');
+      el?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }));
+      return true;
+    })()`);
+    await sleep(400);
+    /*
+     * 预期值要从**高亮行**读，不是 DOM 里第一行：
+     * Ctrl+C 复制的就是 items[activeIndex]，而 activeIndex 由 data-active 标记。
+     * 第一版读 DOM 第一行，实测与真正被复制的那条不一致。
+     */
+    const EXPECT_URL = await ev(`(() => {
+      const row = document.querySelector('[data-testid="row"][data-active="true"]')
+        || document.querySelector('[data-testid="row"]');
+      if (!row) return null;
+      const t = row.getAttribute('title') || '';
+      const parts = t.split(String.fromCharCode(10));
+      return parts.length > 1 ? parts[1] : null;
+    })()`);
+    check('能读出高亮行的网址（否则没有预期值可比）', typeof EXPECT_URL === 'string' && /^https?:\/\//.test(EXPECT_URL), JSON.stringify({ EXPECT_URL }));
+
+    await ev(`(() => {
+      const el = document.querySelector('[data-testid="list"]');
+      el?.dispatchEvent(new KeyboardEvent('keydown', { key: 'c', ctrlKey: true, bubbles: true, cancelable: true }));
+      return true;
+    })()`);
+
+    const toastShown = await waitFor(
+      async () => (await ev(`document.body.innerText.includes('已复制')`)) === true,
+      6000,
+    );
+    check('按 Ctrl+C 后界面上给出「已复制」反馈', toastShown === true, JSON.stringify({ toastShown }));
+
+    const copied = await waitFor(
+      async () => (await ev(`(window.__copied || []).includes(${JSON.stringify(EXPECT_URL)})`)) === true,
+      6000,
+    );
+    const copiedAll = await ev(`window.__copied || []`);
+    check(
+      '剪贴板里真的是高亮行的网址（不是空、也不是别的）',
+      copied === true,
+      JSON.stringify({ copied, copiedAll, EXPECT_URL }),
+    );
+  }
+
   /* ══════════ 9.33 撤销上限提示要出现在界面上 ══════════ */
   console.log('\n[9.33] 撤销上限提示');
   {

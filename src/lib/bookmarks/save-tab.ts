@@ -20,8 +20,23 @@ export type SaveResult =
   | { ok: false; reason: 'error'; message: string };
 
 /** 只接受 http/https：chrome://、扩展页、about: 之类不该进书签 */
+/**
+ * 这个 URL 能不能收藏成书签。
+ *
+ * 早先只放行 `http(s)`。但 **Chrome 自己允许收藏 `file://`**——
+ * 用本地 HTML 文档 / 离线资料的人会发现「收藏当前页」是灰的，
+ * 而浏览器地址栏那颗星却能点。同样能收藏的东西，这里不该拒绝。
+ *
+ * 仍然拒绝的是浏览器自身页面：`chrome://`、`chrome-extension://`、`about:`、
+ * `devtools://`、`view-source:`、`javascript:` —— 这些 Chrome 也不允许收藏成普通书签。
+ */
 export function isSavableUrl(url: string | undefined): url is string {
-  return !!url && /^https?:\/\//i.test(url);
+  if (!url) return false;
+  const u = url.trim();
+  if (/^(https?|file):\/\//i.test(u)) return true;
+  // file:// 在部分平台写成三斜杠（file:///C:/...），上面已覆盖；
+  // 这里兜住大小写与不带斜杠的边缘写法
+  return /^https?:/i.test(u) || /^file:/i.test(u);
 }
 
 /**

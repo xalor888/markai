@@ -49,7 +49,7 @@ function PopupApp() {
   /** 整理记录的读取状态：null 统计 + 失败 ≠ 今天没整理过 */
   const [organizeState, setOrganizeState] = useState<OrganizeLoadState>('loading');
 
-  // 当前活动标签页是否可收藏（http/https 才可）
+  // 当前活动标签页是否可收藏（http(s) 与本地 file:// 都可以，浏览器自身页面不行）
   useEffect(() => {
     void chrome.tabs
       .query({ active: true, currentWindow: true })
@@ -305,7 +305,7 @@ function PopupApp() {
             variant="outline"
             disabled={!canSave}
             onClick={() => void saveCurrentTab()}
-            title={canSave ? '收藏当前标签页到书签栏' : '当前页面无法收藏（仅支持 http/https）'}
+            title={canSave ? '收藏当前标签页到书签栏' : '当前页面无法收藏（支持网页与本地文件；浏览器自身页面不行）'}
           >
             <BookmarkPlus className="h-3.5 w-3.5" />
             收藏当前页面

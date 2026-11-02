@@ -616,6 +616,34 @@ async function run() {
     await sleep(200);
   }
 
+  /* ══════════ 9.285 本地文件能不能真的存成书签 ══════════ */
+  console.log('\n[9.285] file:// 书签');
+  {
+    /*
+     * 0.2.70 把「收藏当前页」的判据从"只放行 http(s)"放宽到"也放行 file://"，
+     * 理由是 Chrome 自己允许收藏本地文件。
+     * 但放宽判据之后必须确认**下游真的接得住**——否则按钮会从"灰的"变成"点了报错"。
+     */
+    const made = await ev(`(async () => {
+      const bar = (await chrome.bookmarks.getTree())[0].children.find((c) => c.id === '1');
+      try {
+        const n = await chrome.bookmarks.create({
+          parentId: bar.id, title: 'E2E 本地文件', url: 'file:///tmp/markai-e2e-local.html',
+        });
+        const found = await chrome.bookmarks.search('file:///tmp/markai-e2e-local.html');
+        await chrome.bookmarks.remove(n.id).catch(() => {});
+        return { ok: true, created: !!n.id, searchable: found.length >= 1 };
+      } catch (e) {
+        return { ok: false, error: String(e && e.message ? e.message : e) };
+      }
+    })()`);
+    check(
+      'Chrome 真的接受 file:// 书签（放宽判据后下游接得住）',
+      made.ok === true && made.created === true && made.searchable === true,
+      JSON.stringify(made),
+    );
+  }
+
   /* ══════════ 9.29 更多菜单的自动整理开关：读失败时不能覆盖整份配置 ══════════ */
   console.log('\n[9.29] 自动整理开关的盲写');
   {

@@ -11961,6 +11961,50 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T126: 能不能收藏，要和浏览器一致 ══════════ */
+  console.log('\n[T126] isSavableUrl 的判据');
+  {
+    /*
+     * 缺陷：只放行 http(s)。但 **Chrome 自己允许收藏 `file://`**——
+     * 用本地 HTML 文档 / 离线资料的人会发现「收藏当前页」是灰的，
+     * 而地址栏那颗星却能点。同样能收藏的东西，这里不该拒绝。
+     */
+    const { isSavableUrl } = await import('../src/lib/bookmarks/save-tab');
+
+    ok('网页与本地文件都可以收藏', () => {
+      for (const u of [
+        'https://example.com/a',
+        'http://localhost:3000/',
+        'file:///Users/me/doc.html',
+        'file:///C:/Users/me/doc.html',
+        'FILE:///Users/me/doc.html',
+      ]) {
+        assert.equal(isSavableUrl(u), true, `应当可以收藏：${u}`);
+      }
+    });
+
+    ok('浏览器自身页面不能收藏', () => {
+      for (const u of [
+        'chrome://extensions',
+        'chrome-extension://abc/page.html',
+        'about:blank',
+        'devtools://devtools/bundled/x.html',
+        'view-source:https://example.com',
+        'javascript:void(0)',
+        'data:text/html,<b>x</b>',
+        '',
+        undefined,
+      ]) {
+        assert.equal(isSavableUrl(u as never), false, `不该允许收藏：${String(u)}`);
+      }
+    });
+
+    ok('不是"什么都放行"（判据仍然有边界）', () => {
+      assert.equal(isSavableUrl('example.com/no-scheme'), false);
+      assert.equal(isSavableUrl('ftp://example.com/f'), false);
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

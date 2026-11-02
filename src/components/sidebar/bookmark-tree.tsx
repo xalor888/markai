@@ -37,6 +37,7 @@ import { moveManyWithToast } from '@/lib/bookmarks/bulk';
 import { cn } from '@/lib/utils';
 import { Favicon } from '@/components/common/favicon';
 import { Separator } from '@/components/ui/separator';
+import { ORGANIZE_LABEL } from '@/lib/ui/labels';
 
 type BNode = chrome.bookmarks.BookmarkTreeNode;
 
@@ -1138,7 +1139,7 @@ export function ContextMenuOverlay() {
         { icon: LocateFixed, label: '在树中显示', disabled: isRootNode || multiSelected, onClick: () => { close(); useBookmarkStore.getState().revealInTree(node?.id ?? ''); } },
         ...moveRows,
         'sep',
-        { icon: ScanSearch, label: multiSelected ? `让 MarkAI 整理所选（${selectedIds.length}）` : '让 MarkAI 分析', onClick: analyzeAction },
+        { icon: ScanSearch, label: multiSelected ? ORGANIZE_LABEL.selection(selectedIds.length) : ORGANIZE_LABEL.analyze, onClick: analyzeAction },
         { icon: Pencil, label: '重命名', onClick: () => { close(); openDialog({ kind: 'rename', bookmarkId: node?.id ?? '' }); } },
         { icon: Trash2, label: multiSelected ? `删除所选（${selectedIds.length}）` : '删除', danger: true, onClick: deleteAction },
       ];

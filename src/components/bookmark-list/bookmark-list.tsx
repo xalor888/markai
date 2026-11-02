@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Favicon } from '@/components/common/favicon';
 import { Input } from '@/components/ui/input';
+import { ORGANIZE_LABEL } from '@/lib/ui/labels';
 
 type BNode = chrome.bookmarks.BookmarkTreeNode;
 
@@ -854,7 +855,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
           <div className="ml-auto flex items-center gap-1.5">
             {compact ? (
               <>
-                <Button size="icon" onClick={organizeSelected} title="让 MarkAI 整理选中项" className="h-6 w-6">
+                <Button size="icon" onClick={organizeSelected} title={ORGANIZE_LABEL.selection(selectedIds.length)} className="h-6 w-6">
                   <Sparkles className="h-3 w-3" />
                 </Button>
                 <Button size="icon" variant="secondary" onClick={openSelected} title="打开所选" className="h-6 w-6">

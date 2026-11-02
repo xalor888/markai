@@ -12223,6 +12223,40 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T131: 同一动作只能有一个名字 ══════════ */
+  console.log('\n[T131] 动作文案的单一来源');
+  {
+    /*
+     * 缺陷：同一个动作在多个入口各写一遍字符串，于是出现了
+     *   工具栏：「让 MarkAI 整理**选中项**」
+     *   树右键：「让 MarkAI 整理**所选**（N）」
+     * 用户在两处看到同一个动作的两个名字，会以为是两个功能。
+     */
+    const { ORGANIZE_LABEL, organizeHint } = await import('../src/lib/ui/labels');
+
+    ok('选中项的名字只有一种写法（带数量）', () => {
+      assert.equal(ORGANIZE_LABEL.selection(3), '让 MarkAI 整理所选（3）');
+      assert.equal(ORGANIZE_LABEL.selection(0), '让 MarkAI 整理所选（0）');
+      // 不能再出现另一种叫法
+      assert.equal(ORGANIZE_LABEL.selection(1).includes('选中项'), false);
+    });
+
+    ok('各个 scope 的名字互不串味', () => {
+      assert.equal(ORGANIZE_LABEL.folder, '让 MarkAI 整理');
+      assert.equal(ORGANIZE_LABEL.all, '让 MarkAI 整理全部书签');
+      assert.equal(ORGANIZE_LABEL.analyze, '让 MarkAI 分析');
+      const all = Object.values(ORGANIZE_LABEL).filter((v) => typeof v === 'string');
+      assert.equal(new Set(all).size, all.length, '名字不能重复');
+    });
+
+    ok('提示文案里引用的就是按钮上的名字（不会写死后对不上）', () => {
+      assert.ok(organizeHint('folder').includes(ORGANIZE_LABEL.folder));
+      assert.ok(organizeHint('all').includes(ORGANIZE_LABEL.all));
+      assert.ok(organizeHint('selection').includes('所选'));
+      assert.equal(organizeHint('selection').includes('（0）'), false, '提示里不该出现"（0）"');
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

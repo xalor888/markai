@@ -679,6 +679,28 @@ async function run() {
     await cdp.send('Target.closeTarget', { targetId: t }).catch(() => {});
   }
 
+  /* ══════════ 9.2835 同一个动作在界面里只有一个名字 ══════════ */
+  console.log('\n[9.2835] 文案一致性');
+  {
+    /*
+     * 缺陷：工具栏叫「让 MarkAI 整理**选中项**」，侧边栏右键叫「让 MarkAI 整理**所选**（N）」。
+     * 同一个动作两个名字，用户会以为是两个功能。0.2.79 收敂到 src/lib/ui/labels.ts。
+     */
+    const found = await ev(`(() => {
+      const t = document.body.innerText;
+      return {
+        // 旧叫法不该再出现在任何界面文案里
+        hasOldName: /整理选中项/.test(t),
+        hasNewName: /整理所选/.test(t),
+      };
+    })()`);
+    check(
+      '界面里不再出现旧叫法「整理选中项」',
+      found?.hasOldName === false,
+      JSON.stringify(found),
+    );
+  }
+
   /* ══════════ 9.284 设置页每一节都有错误边界 ══════════ */
   console.log('\n[9.284] 设置页错误边界');
   {

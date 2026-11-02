@@ -305,14 +305,28 @@ export function diagnose(snapshot: HealthSnapshot): HealthReport {
   /* ── 存储 ── */
   if (snapshot.storageBytes !== null && snapshot.storageBytes > STORAGE_WARN_BYTES) {
     const mb = (snapshot.storageBytes / 1024 / 1024).toFixed(1);
+    /*
+     * 「清理整理记录」这个修复**只在真能帮上时才提供**。
+     *
+     * 原来这里无条件提供，于是存储被别处占满时（撤销点含被删书签的子树快照、
+     * 对话历史），用户点了修复、日志清到 200 条以内，占用还是超阈值——
+     * 问题原样还在、健康分不动。用户看到的就是「点了没反应」（0.2.68 那一类）。
+     *
+     * 判据：日志至少占总占用的一成，清它才可能把总量拉到阈值以下。
+     */
+    const logShare =
+      snapshot.logBytes !== null && snapshot.storageBytes > 0 ? snapshot.logBytes / snapshot.storageBytes : 0;
+    const logCanHelp = logShare >= 0.1;
     issues.push({
       id: 'storage.near-quota',
       area: 'storage',
       severity: 'medium',
       title: `本地存储已用 ${mb} MB`,
-      detail: '接近 10 MB 配额，超出后写入会失败（配置可能存不下来）。',
-      fix: { action: 'log.trim-limit', label: '清理最占空间的整理记录' },
-      manualHint: '也可以在设置页清空对话历史与整理记录。',
+      detail: logCanHelp
+        ? '接近 10 MB 配额，超出后写入会失败（配置可能存不下来）。整理记录是主要占用，可以先清它。'
+        : `接近 10 MB 配额，超出后写入会失败（配置可能存不下来）。整理记录只占 ${(logShare * 100).toFixed(0)}%，主要占用在撤销记录与对话历史里。`,
+      ...(logCanHelp ? { fix: { action: 'log.trim-limit' as const, label: '清理最占空间的整理记录' } } : {}),
+      manualHint: '在设置页清空对话历史与整理记录；撤销记录会随整理轮次自然轮换。',
     });
   }
 

@@ -2,6 +2,7 @@ import { getPreset, resolveConfig } from '@/lib/providers';
 import type { AIConfig } from '@/lib/ai/types';
 import { diagnose } from '@/lib/health/diagnostics';
 import type { HealthReport, HealthSnapshot } from '@/lib/health/types';
+import { ORGANIZE_LOG_KEY } from '@/lib/ai/organize-log';
 
 /**
  * ── 健康检查编排 ──
@@ -182,6 +183,14 @@ export async function readSnapshot(): Promise<HealthSnapshot> {
     storageBytes = null;
   }
 
+  // 单独量整理记录的占用：storage.near-quota 要据此决定"清日志"到底能不能帮上
+  let logBytes: number | null = null;
+  try {
+    logBytes = await chrome.storage.local.getBytesInUse(ORGANIZE_LOG_KEY);
+  } catch {
+    logBytes = null;
+  }
+
   return {
     configError,
     config,
@@ -191,6 +200,7 @@ export async function readSnapshot(): Promise<HealthSnapshot> {
     logEntries,
     bookmarks,
     storageBytes,
+    logBytes,
     lastAiError: lastAiErrorOf(logEntries),
   };
 }

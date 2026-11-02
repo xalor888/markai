@@ -10117,6 +10117,7 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       logEntries: [],
       bookmarks: { total: 10, folders: 3, emptyFolders: 0, maxDepth: 3, orphaned: 0, duplicateNameGroups: 0 },
       storageBytes: 1024,
+      logBytes: 1024,
       lastAiError: null,
       ...patch,
     });
@@ -10846,6 +10847,7 @@ async function okA(name: string, fn: () => Promise<void> | void) {
         config: { providerId: 'deepseek', baseUrl: 'https://x', apiKey: 'k', model: 'm', customHeaders: '' },
         providerNeedsKey: true,
         permissions: ['bookmarks', 'storage', 'sidePanel'],
+        logBytes: null,
         undoPoints: [
           { id: 'a', runId: 'r1', ops: [{ kind: 'moveBatch', ids: ['x'] }] },
           { id: 'b', runId: 'r2', ops: [{ kind: 'delete', id: 'd', snapshot: {} }] },
@@ -11829,6 +11831,7 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       logEntries: [],
       bookmarks: { total: 10, folders: 3, emptyFolders: 0, maxDepth: 3, orphaned: 0, duplicateNameGroups: 0 },
       storageBytes: 1024,
+      logBytes: 1024,
       lastAiError: null,
       ...patch,
     } as HealthSnapshot);
@@ -12503,19 +12506,13 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
-  console.log(`\n全部通过：${passed} 项 ✔`);
-})().catch((e) => {
-  console.error('\n❌ 测试失败:', e);
-  process.exit(1);
-});
-
 /* ── 快捷键说明 vs 真实处理器 的契约守卫 ─────────────────────────────
  *
  * 速查表注释写着「只列代码里真实绑定过的键，不写"应该支持"的键」，
  * 但没有任何东西守着它。Ctrl+D 那次（0.2.98）已经证明：
  * 界面承诺了、代码里没有，用户按下去什么都没发生。
  */
-void okA('快捷键说明里列的键，处理器里都接得住', async () => {
+await okA('快捷键说明里列的键，处理器里都接得住', async () => {
   const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
   const { SHORTCUT_GROUPS } = await import('../src/components/common/shortcuts-dialog');
   const {
@@ -12540,7 +12537,7 @@ void okA('快捷键说明里列的键，处理器里都接得住', async () => {
   );
 });
 
-void okA('契约守卫对"说明里有、代码里没有"敏感（证伪）', async () => {
+await okA('契约守卫对"说明里有、代码里没有"敏感（证伪）', async () => {
   const { extractHandledKeys, findShortcutGaps } = await import('../src/lib/guards/shortcut-contract');
 
   // 处理器只接了方向键，说明里却列了 F2 —— 必须被抓出来
@@ -12576,7 +12573,7 @@ void okA('契约守卫对"说明里有、代码里没有"敏感（证伪）', as
  *
  * 所以这里把契约钉住：**每个带 fix 的诊断，跑完对应修复后不得再出现。**
  */
-void okA('每个可修复的诊断，跑完修复后都不再出现（契约）', async () => {
+await okA('每个可修复的诊断，跑完修复后都不再出现（契约）', async () => {
   const { runFix } = await import('../src/lib/health/fixes');
   const { runHealthCheck } = await import('../src/lib/health');
 
@@ -12653,7 +12650,7 @@ void okA('每个可修复的诊断，跑完修复后都不再出现（契约）'
  * 这里把契约倒过来钉：从 diagnostics.ts 源码里抽出**全部**诊断 id，
  * 要求每一个都在下表里有对应的触发种子。新增诊断却忘了验证可达性 → 直接红。
  */
-void okA('每个诊断 id 都能被触发（可达性契约）', async () => {
+await okA('每个诊断 id 都能被触发（可达性契约）', async () => {
   const { diagnose } = await import('../src/lib/health/diagnostics');
   const { readFileSync } = await import('node:fs');
   const { resolve } = await import('node:path');
@@ -12682,6 +12679,7 @@ void okA('每个诊断 id 都能被触发（可达性契约）', async () => {
     logEntries: [],
     bookmarks: { total: 10, folders: 3, emptyFolders: 0, maxDepth: 3, orphaned: 0, duplicateNameGroups: 0 },
     storageBytes: 1024,
+    logBytes: 1024,
     lastAiError: null,
   });
 
@@ -12724,7 +12722,7 @@ void okA('每个诊断 id 都能被触发（可达性契约）', async () => {
   assert.deepEqual(dead, [], `这些诊断摆了种子也触发不了（生产路径上可能是死代码）：${JSON.stringify(dead)}`);
 });
 
-void okA('生产路径：整理记录里的失败要能桥接成「最近一次 AI 失败」', async () => {
+await okA('生产路径：整理记录里的失败要能桥接成「最近一次 AI 失败」', async () => {
   const { readSnapshot } = await import('../src/lib/health');
 
   /*
@@ -12746,4 +12744,64 @@ void okA('生产路径：整理记录里的失败要能桥接成「最近一次 
   );
 
   storageMap.delete('markai.organize.log');
+});
+
+await okA('存储接近配额：日志是主因才给修复，不是主因就不给（否则「点了没反应」）', async () => {
+  const { runFix } = await import('../src/lib/health/fixes');
+  const { runHealthCheck } = await import('../src/lib/health');
+
+  /*
+   * `storage.near-quota` 原来无条件把「清理整理记录」当修复动作。但存储不止这一块：
+   * 撤销点（含被删书签的子树快照）、对话历史都算在内。占用来自别处时，
+   * 用户点了修复、日志清到 200 条以内，占用还是超阈值——问题原样还在、健康分不动，
+   * 用户看到的就是「点了没反应」（0.2.68 那一类）。
+   *
+   * 0.2.103 改成：先量日志实际占多少，至少占总占用一成时才提供这个修复。
+   * 这里两面都验。
+   */
+  storageMap.delete('markai.config');
+  storageMap.delete('markai.undo');
+  const origBytes = chrome.storage.local.getBytesInUse;
+  const setBytes = (total: number, log: number) => {
+    (chrome.storage.local as unknown as { getBytesInUse: (k: unknown) => Promise<number> }).getBytesInUse =
+      async (k: unknown) => (k === null || k === undefined ? total : k === 'markai.organize.log' ? log : 0);
+  };
+
+  try {
+    /* ── A. 日志就是主因：给修复，且修完问题真的消失 ── */
+    setBytes(9 * 1024 * 1024, 8 * 1024 * 1024); // 日志占 8/9 MB
+    storageMap.set('markai.organize.log', [
+      { id: 'e1', at: Date.now(), title: 't', url: 'https://a.example/', domain: 'a.example', action: 'moved', detail: 'd' },
+    ]);
+    let issue = (await runHealthCheck()).issues.find((i) => i.id === 'storage.near-quota');
+    assert.ok(issue, 'A 前置：应报 near-quota');
+    assert.ok(issue!.fix, 'A 前置：日志是主因时应提供修复');
+    await runFix('log.trim-limit');
+    // 清完之后日志变小，总量随之降到阈值以下
+    setBytes(1024, 512);
+    issue = (await runHealthCheck()).issues.find((i) => i.id === 'storage.near-quota');
+    assert.ok(!issue, `A：修完不该再报 near-quota，实际 ${JSON.stringify(issue)}`);
+
+    /* ── B. 日志只占零头：**不**给修复，别给一个点了没用的按钮 ── */
+    setBytes(9 * 1024 * 1024, 4 * 1024); // 日志只占 4 KB
+    issue = (await runHealthCheck()).issues.find((i) => i.id === 'storage.near-quota');
+    assert.ok(issue, 'B 前置：仍应报 near-quota（存储确实接近配额）');
+    assert.ok(
+      !issue!.fix,
+      `B：日志不是主因时不该提供「清理整理记录」——那是一个点了没反应的按钮，实际 fix=${JSON.stringify(issue!.fix)}`,
+    );
+    assert.ok(
+      (issue!.manualHint || '').includes('撤销记录'),
+      `B：没有修复按钮时必须告诉用户真正的占用在哪，实际 hint=${issue!.manualHint}`,
+    );
+  } finally {
+    (chrome.storage.local as unknown as { getBytesInUse: typeof origBytes }).getBytesInUse = origBytes;
+    storageMap.delete('markai.organize.log');
+  }
+});
+
+  console.log(`\n全部通过：${passed} 项 ✔`);
+})().catch((e) => {
+  console.error('\n❌ 测试失败:', e);
+  process.exit(1);
 });

@@ -87,6 +87,16 @@ export interface HealthSnapshot {
   undoPoints: unknown;
   /** 整理记录原始数据 */
   logEntries: unknown;
+  /**
+   * 整理记录自己占用的字节数（null = 量不到）。
+   *
+   * `storage.near-quota` 原来无条件把「清理整理记录」当作修复动作，
+   * 但存储不止这一块：撤销点（含被删书签的子树快照）、对话历史都算在内。
+   * 占用来自别处时，清日志根本降不到阈值以下——用户看到的是
+   * 「点了修复，问题还在、分数不动」（0.2.68 那一类）。
+   * 所以必须先知道日志到底占多少，只在真能帮上时才提供这个修复。
+   */
+  logBytes: number | null;
   /** 书签统计（由调用方遍历一次树算出） */
   bookmarks: {
     total: number;

@@ -892,6 +892,184 @@ async function run() {
     mock.server.close();
   }
 
+  /* ══════════ 9.44 接口报错 + 重新生成拦截（真浏览器） ══════════ */
+  console.log('\n[9.44] 接口报错与重新生成安全');
+  {
+    const state = { mode: 'error' };
+    const TOOL_URL = 'https://retry-safety.example/created';
+    const server = await new Promise((resolve) => {
+      const srv = createServer((req, res) => {
+        if (!req.url || !req.url.includes('/chat/completions')) {
+          res.writeHead(404).end();
+          return;
+        }
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', async () => {
+          if (state.mode === 'error') {
+            res.writeHead(500, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: '模拟上游 500：服务暂时不可用' } }));
+            return;
+          }
+          if (state.mode === 'auth') {
+            // 401 属于不可重试错误：应当立刻告诉用户，而不是进入重试退避
+            res.writeHead(401, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ error: { message: 'Invalid API key' } }));
+            return;
+          }
+          // mode === 'tool-then-empty'
+          let isFollowUp = false;
+          try {
+            isFollowUp = (JSON.parse(body).messages || []).some((m) => m.role === 'tool');
+          } catch {
+            /* 当首轮 */
+          }
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache',
+            Connection: 'keep-alive',
+          });
+          const send = (o) => res.write(`data: ${JSON.stringify(o)}\n\n`);
+          if (!isFollowUp) {
+            send({
+              choices: [
+                {
+                  delta: {
+                    role: 'assistant',
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'call_rs_1',
+                        type: 'function',
+                        function: {
+                          name: 'create_bookmark',
+                          arguments: JSON.stringify({ title: '再次生成靶子', url: TOOL_URL }),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            });
+            send({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] });
+          } else {
+            // 关键：工具执行完，模型**一个字都不回**
+            send({ choices: [{ delta: {}, finish_reason: 'stop' }] });
+          }
+          res.write('data: [DONE]\n\n');
+          res.end();
+        });
+      });
+      srv.listen(0, '127.0.0.1', () => resolve({ srv, port: srv.address().port }));
+    });
+
+    await ev(`(async () => {
+      await chrome.storage.local.set({ 'markai.config': {
+        providerId: 'deepseek', baseUrl: 'http://127.0.0.1:${server.port}/v1',
+        apiKey: 'mock-key', model: 'mock-model', temperature: 0.4, customHeaders: '',
+      } });
+      return true;
+    })()`);
+    await cdp.send('Page.reload', {}, sessionId);
+    await sleep(900);
+    await waitFor(async () => await ev(`!!document.querySelector('[data-testid="chat-input"]')`), 6000);
+
+    const say = async (text) => {
+      await ev(`(() => {
+        const ta = document.querySelector('[data-testid="chat-input"]');
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(ta, ${JSON.stringify(text)});
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()`);
+      await sleep(120);
+      await ev(`(() => {
+        [...document.querySelectorAll('button')].find((x) => x.getAttribute('aria-label') === '发送')?.click();
+        return true;
+      })()`);
+    };
+
+    // ── A1. 上游 500（可重试错误）：必须给出"正在自动重试"的进度反馈 ──
+    await say('触发报错');
+    const retrying = await waitFor(
+      async () => await ev(`document.body.innerText.includes('正在自动重试')`),
+      15000,
+    );
+    check('上游 500 时给出"正在自动重试 N/5"的进度（不是静默卡住）', retrying === true, JSON.stringify({ retrying }));
+
+    // 重试是设计好的行为，这里不再等它耗尽；直接换一个**不可重试**的错误验证最终提示
+    state.mode = 'auth';
+    await cdp.send('Page.reload', {}, sessionId);
+    await sleep(900);
+    await waitFor(async () => await ev(`!!document.querySelector('[data-testid="chat-input"]')`), 6000);
+    await say('触发鉴权失败');
+    const errShown = await waitFor(
+      async () => await ev(`document.body.innerText.includes('⚠')`),
+      15000,
+    );
+    // 不用正则：这段写在模板字符串里，反斜杠转义会被吞掉（本项目已踩过三次）
+    const errText = await ev(`(() => {
+      const line = document.body.innerText
+        .split(String.fromCharCode(10))
+        .find((l) => l.includes('⚠'));
+      return line ? line.trim().slice(0, 120) : null;
+    })()`);
+    check('不可重试的错误（401）给出可见错误，而不是一直重试', errShown === true && !!errText, JSON.stringify({ errShown, errText }));
+
+    const notStuck = await waitFor(
+      async () =>
+        await ev(`(() => {
+          const ta = document.querySelector('[data-testid="chat-input"]');
+          return ta && ta.getAttribute('placeholder') !== 'Agent 正在回复…';
+        })()`),
+      8000,
+    );
+    check('报错后不会一直卡在「正在回复」', notStuck === true, JSON.stringify({ notStuck }));
+
+    // ── B. 工具执行了但模型不回话：不能给「重新生成」 ──
+    state.mode = 'tool-then-empty';
+    await say('建一个书签');
+    const made = await waitFor(
+      async () =>
+        await ev(`(async () => (await chrome.bookmarks.search(${JSON.stringify(TOOL_URL)})).length === 1)()`),
+      20000,
+    );
+    check('这一轮确实执行了写操作（书签已创建）', made === true, JSON.stringify({ made }));
+
+    await sleep(1500);
+    const safety = await ev(`(() => {
+      const t = document.body.innerText;
+      const retryBtn = [...document.querySelectorAll('button')].find(
+        (b) => (b.getAttribute('aria-label') || '') === '重新生成回复',
+      );
+      // 只看最后一条 assistant：用「本轮是否有改动」文案判断
+      return {
+        hasRetryButton: !!retryBtn,
+        saysMutated: t.includes('已经执行了') && t.includes('撤销'),
+        saysPlainEmpty: t.includes('Agent 未返回内容'),
+      };
+    })()`);
+    check(
+      '已执行写操作但模型没回话时，不提供「重新生成」（否则会重复执行）',
+      safety.hasRetryButton === false,
+      JSON.stringify(safety),
+    );
+    check(
+      '给出的文案说明"已执行改动 + 可撤销"，而不是笼统的"未返回内容"',
+      safety.saysMutated === true && safety.saysPlainEmpty === false,
+      JSON.stringify(safety),
+    );
+
+    await ev(`(async () => {
+      const hits = await chrome.bookmarks.search(${JSON.stringify(TOOL_URL)});
+      for (const h of hits) await chrome.bookmarks.remove(h.id).catch(() => {});
+      const cfg = (await chrome.storage.local.get('markai.config'))['markai.config'] || {};
+      await chrome.storage.local.set({ 'markai.config': { ...cfg, baseUrl: '', apiKey: '', model: '' } });
+      return true;
+    })()`);
+    server.srv.close();
+  }
+
   /* ══════════ 9.43 弹出窗（此前零覆盖） ══════════ */
   console.log('\n[9.43] 弹出窗');
   {

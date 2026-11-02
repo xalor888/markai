@@ -228,6 +228,12 @@ export const MessageView = memo(function MessageView({
    * 移动类幂等看不出来，但 create/copy 会造出重复书签，所以必须拦掉。
    */
   const safety = retrySafety(message.blocks);
+  /*
+   * 有"实质文字"才算模型回复过。空白块（例如只有换行）不算。
+   * 工具记录单独算一类：它证明"执行过东西"，但用户没读到任何说明。
+   */
+  const hasText = message.blocks.some((b) => b.kind === 'text' && b.text.trim().length > 0);
+  const hasToolBlocks = message.blocks.some((b) => b.kind === 'tool');
 
   return (
     <div className="group" title={formatRelativeTime(message.createdAt)}>
@@ -240,8 +246,16 @@ export const MessageView = memo(function MessageView({
          * 早先一律写成"Agent 未返回内容"，把第一种伪装成第二种，
          * 于是用户会以为"一退出就废了"——虽然内容确实丢了，但说法也是错的。
          */}
-        {message.blocks.length === 0 && !streaming && (
-          <p className="text-md text-muted-foreground">
+        {/*
+         * 判据是「有没有**文字**」，不是「有没有块」。
+         *
+         * 早先写的是 `blocks.length === 0`：只要 Agent 调过工具，blocks 里就有 tool 记录、
+         * 长度不为 0，于是这段话**永远不会显示**。用户看到几个工具卡片之后就没有下文了，
+         * 既不知道发生了什么，也（因为 0.2.48 的安全拦截）没有重新生成按钮可点。
+         * e2e 在真实浏览器里跑这条路径时才暴露出来。
+         */}
+        {!hasText && !streaming && (
+          <p className={hasToolBlocks ? 'text-2xs text-muted-foreground/80' : 'text-md text-muted-foreground'}>
             {message.interrupted
               ? '（生成被打断了，还没收到内容。可点击 ↻ 重新生成）'
               : safety.safeToRegenerate

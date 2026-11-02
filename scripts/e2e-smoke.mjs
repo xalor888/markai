@@ -616,6 +616,75 @@ async function run() {
     await sleep(200);
   }
 
+  /* ══════════ 9.30 搜索失败不能永远转圈 ══════════ */
+  console.log('\n[9.30] 搜索失败态');
+  {
+    /*
+     * 缺陷：搜索的 `.catch(() => {})` 吞掉错误后 `searchResults` 仍是 null，
+     * 而 `loading = searchResults === null` —— 列表**永远停在「加载中…」**，
+     * 没有错误、没有重试。搜索框打字像卡死。
+     */
+    const { targetId: t } = await cdp.send('Target.createTarget', {
+      url: `chrome-extension://${EXT_ID}/page.html`,
+    });
+    const { sessionId: sid } = await cdp.send('Target.attachToTarget', { targetId: t, flatten: true });
+    await cdp.send('Page.enable', {}, sid);
+    const { identifier } = await cdp.send(
+      'Page.addScriptToEvaluateOnNewDocument',
+      {
+        source: `(() => {
+          window.__breakSearch = true;
+          const orig = chrome.bookmarks.search.bind(chrome.bookmarks);
+          chrome.bookmarks.search = (...a) => {
+            if (window.__breakSearch) return Promise.reject(new Error('模拟：搜索通道异常'));
+            return orig(...a);
+          };
+        })();`,
+      },
+      sid,
+    );
+    await cdp.send('Page.reload', {}, sid);
+    await sleep(1300);
+    const ev2 = async (expr) => {
+      const r = await cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }, sid);
+      if (r.exceptionDetails) return null;
+      return r.result?.value;
+    };
+    // 搜索框的 testid 是 "search"（id 才是 markai-search）；写错会拿到 null 而静默什么都不做
+    await waitFor(async () => await ev2(`!!document.querySelector('[data-testid="search"]')`), 8000);
+    await ev2(`(() => {
+      const el = document.querySelector('[data-testid="search"]');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      setter.call(el, '一些搜不到的东西');
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+
+    const shown = await waitFor(
+      async () => await ev2(`!!document.querySelector('[data-testid="search-error-banner"]')`),
+      8000,
+    );
+    check('搜索失败时给出「搜索失败 + 原因」', shown === true, JSON.stringify({ shown }));
+
+    const noSpinner = await ev2(`!document.body.innerText.includes('加载中')`);
+    check('搜索失败时列表不会永远停在「加载中…」', noSpinner === true, JSON.stringify({ noSpinner }));
+
+    const hasRetry = await ev2(`!!document.querySelector('[data-testid="search-retry"]')`);
+    check('搜索失败时给出可点的「重试」', hasRetry === true, JSON.stringify({ hasRetry }));
+
+    // 恢复后点重试：错误消失、结果回来
+    await ev2(`(() => { window.__breakSearch = false; return true; })()`);
+    await ev2(`(() => { document.querySelector('[data-testid="search-retry"]')?.click(); return true; })()`);
+    const recovered = await waitFor(
+      async () => await ev2(`!document.querySelector('[data-testid="search-error-banner"]')`),
+      8000,
+    );
+    check('点重试后错误消失（真的重新搜了）', recovered === true, JSON.stringify({ recovered }));
+
+    await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sid).catch(() => {});
+    await cdp.send('Target.closeTarget', { targetId: t }).catch(() => {});
+  }
+
   /* ══════════ 9.305 对话没保存成功时必须有重试 ══════════ */
   console.log('\n[9.305] 对话保存失败的重试');
   {

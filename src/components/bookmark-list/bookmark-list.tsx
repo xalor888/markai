@@ -73,6 +73,16 @@ export function BookmarkList({ className, compact = false }: { className?: strin
   /** 子项加载失败的原因（真失败，不是删除/移动竞态） */
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [searchResults, setSearchResults] = useState<BNode[] | null>(null);
+  /**
+   * 搜索失败的原因。
+   *
+   * 原先这里是 `.catch(() => {})`：失败后 `searchResults` 仍为 null，
+   * 而 `loading = searchResults === null` —— **列表会永远停在「加载中…」**，
+   * 既没有错误也没有重试。搜索框打字不响应，看起来像卡死。
+   */
+  const [searchErr, setSearchErr] = useState<string | null>(null);
+  /** 搜索重试计数：变化时重新触发防抖 effect */
+  const [searchTick, setSearchTick] = useState(0);
   /*
    * 搜索词只有一个来源：`bookmarkStore.searchQuery`（顶栏那个唯一的搜索框写入）。
    * 重做前列表自己维护一份 state、树再维护一份，两边各搜一半——用户永远搜不全。
@@ -135,19 +145,27 @@ export function BookmarkList({ className, compact = false }: { className?: strin
       return;
     }
     let cancelled = false;
+    setSearchErr(null);
     const timer = setTimeout(() => {
       void chrome.bookmarks
         .search(query.trim())
         .then((r) => {
-          if (!cancelled) setSearchResults(r.slice(0, 100));
+          if (cancelled) return;
+          setSearchResults(r.slice(0, 100));
+          setSearchErr(null);
         })
-        .catch(() => {});
+        .catch((e: unknown) => {
+          if (cancelled) return;
+          // 必须退出「加载中」：给空结果 + 明确的错误，而不是让它一直转
+          setSearchResults([]);
+          setSearchErr(e instanceof Error ? e.message : String(e));
+        });
     }, 250);
     return () => {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [query]);
+  }, [query, searchTick]);
 
   /*
    * 「按收藏时间」是**跨文件夹的全部书签**。此时用户点树里某个文件夹，
@@ -725,9 +743,14 @@ export function BookmarkList({ className, compact = false }: { className?: strin
           <div className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
             <Search className="h-3 w-3 shrink-0" />
             <span className="truncate">搜索「{query}」</span>
-            {searchResults && (
-              <span className="shrink-0 text-2xs text-muted-foreground/70">
+            {searchResults && !searchErr && (
+              <span className="shrink-0 text-2xs text-muted-foreground/70" data-testid="search-count">
                 · {searchResults.length}{searchResults.length >= 100 ? '+' : ''} 条
+              </span>
+            )}
+            {searchErr && (
+              <span className="shrink-0 text-2xs text-destructive" data-testid="search-error">
+                · 搜索失败
               </span>
             )}
           </div>
@@ -969,6 +992,25 @@ export function BookmarkList({ className, compact = false }: { className?: strin
             >
               重试
             </Button>
+          </div>
+        ) : searchErr ? (
+          /* 搜索失败：说清原因 + 可重试，而不是让列表永远停在「加载中…」 */
+          <div
+            data-testid="search-error-banner"
+            className="flex flex-col items-center gap-2 px-3 py-6 text-center"
+          >
+            <p className="text-xs text-destructive">搜索失败：{searchErr}</p>
+            <p className="text-2xs text-muted-foreground">
+              这不代表没有匹配的书签，只是这一次没搜到。
+            </p>
+            <button
+              type="button"
+              data-testid="search-retry"
+              className="rounded-sm border border-border px-2 py-1 text-2xs transition-colors hover:bg-muted"
+              onClick={() => setSearchTick((n) => n + 1)}
+            >
+              重试
+            </button>
           </div>
         ) : loading ? (
           <p className="px-2 py-4 text-center text-xs text-muted-foreground">加载中…</p>

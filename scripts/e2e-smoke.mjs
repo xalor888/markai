@@ -30,6 +30,7 @@
  */
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { createServer } from 'node:http';
 
 const CDP_PORT = process.env.MARKAI_CDP_PORT || 9333;
 const CDP = `http://127.0.0.1:${CDP_PORT}`;
@@ -604,6 +605,166 @@ async function run() {
     );
     await ev(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
     await sleep(200);
+  }
+
+  /* ══════════ 9.41 真·流式对话（本地假 AI 服务） ══════════ */
+  console.log('\n[9.41] 流式对话与中断恢复');
+  {
+    /*
+     * 这一节第一次让 AI 路径跑在**真实浏览器**里：起一个本地 OpenAI 兼容端点，
+     * 返回真 SSE 流。之前所有 AI 相关路径（流式渲染、中断恢复、空回复）
+     * 都只有单测，没有一条在浏览器里跑过。
+     *
+     * 重点验证用户最痛的那件事：**流到一半进程没了，回来还能看到已收到的内容**，
+     * 而不是「模型未返回任何内容」。
+     */
+    const mock = await new Promise((resolve) => {
+      const state = { chunks: ['第一段', '，第二段', '，第三段'], delayMs: 120, hang: false };
+      const server = createServer((req, res) => {
+        if (!req.url || !req.url.includes('/chat/completions')) {
+          res.writeHead(404).end();
+          return;
+        }
+        req.on('data', () => {});
+        req.on('end', async () => {
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache',
+            Connection: 'keep-alive',
+          });
+          const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+          for (const c of state.chunks) {
+            send({ choices: [{ delta: { content: c } }] });
+            await new Promise((r) => setTimeout(r, state.delayMs));
+          }
+          if (!state.hang) {
+            send({ choices: [{ delta: {}, finish_reason: 'stop' }] });
+            res.write('data: [DONE]\n\n');
+            res.end();
+          }
+          // hang=true 时故意不结束：模拟"正在生成时进程被杀"
+        });
+      });
+      server.listen(0, '127.0.0.1', () => resolve({ server, state, port: server.address().port }));
+    });
+
+    const baseUrl = `http://127.0.0.1:${mock.port}/v1`;
+    await ev(`(async () => {
+      await chrome.storage.local.set({ 'markai.config': {
+        providerId: 'deepseek', baseUrl: ${JSON.stringify(baseUrl)}, apiKey: 'mock-key', model: 'mock-model',
+        temperature: 0.4, customHeaders: '',
+      } });
+      return true;
+    })()`);
+    await cdp.send('Page.reload', {}, sessionId);
+    await sleep(900);
+    await waitFor(async () => await ev(`!!document.querySelector('[data-testid="chat-input"]')`), 6000);
+
+    /** 在输入框里写一句话并发送（React 受控组件要走原生 setter） */
+    const sendMessage = async (text) => {
+      await ev(`(() => {
+        const ta = document.querySelector('[data-testid="chat-input"]');
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+        setter.call(ta, ${JSON.stringify(text)});
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()`);
+      await sleep(120);
+      await ev(`(() => {
+        const b = [...document.querySelectorAll('button')].find((x) => x.getAttribute('aria-label') === '发送');
+        if (!b) return false;
+        b.click();
+        return true;
+      })()`);
+    };
+
+    // ── A. 正常流式：三段都得出现，并最终完成 ──
+    await sendMessage('测试流式');
+    const streamed = await waitFor(
+      async () => await ev(`document.body.innerText.includes('，第三段')`),
+      12000,
+    );
+    check('正常流式：模型的分段内容全部渲染出来', streamed === true, JSON.stringify({ streamed }));
+    const doneState = await waitFor(
+      async () =>
+        await ev(`(() => {
+          const ta = document.querySelector('[data-testid="chat-input"]');
+          return ta && ta.getAttribute('placeholder') !== 'Agent 正在回复…';
+        })()`),
+      10000,
+    );
+    check('流结束后回到可输入状态（不是一直转圈）', doneState === true, JSON.stringify({ doneState }));
+
+    // ── B. 流到一半杀掉 service worker：已收到的内容必须留下 ──
+    mock.state.chunks = ['这段会被', '打断'];
+    mock.state.delayMs = 900;
+    mock.state.hang = true;
+    await sendMessage('测试中断');
+    const partial = await waitFor(
+      async () => await ev(`document.body.innerText.includes('这段会被')`),
+      12000,
+    );
+    check('中断前：已收到第一段', partial === true, JSON.stringify({ partial }));
+
+    /*
+     * 单独验证**后台草稿**这一层。
+     *
+     * 上面那条"重开后内容还在"其实是 UI 自己的 800ms 落盘 + pagehide flush 兜住的
+     * （证伪时把后台 appendDraft 去掉，它照样绿 —— 说明它没测到草稿）。
+     * 后台草稿覆盖的是更狠的一种：页面被直接杀掉、pagehide 根本没机会跑。
+     * 这里直接去 storage 里看草稿有没有在流式过程中持续写入。
+     */
+    // 草稿是 300ms 节流的，给足时间再断言（否则测的是时序而不是机制）
+    await waitFor(
+      async () =>
+        await ev(`(async () => {
+          const d = (await chrome.storage.local.get('markai.ai.draft'))['markai.ai.draft'];
+          return !!(d && typeof d.text === 'string' && d.text.includes('这段会被'));
+        })()`),
+      3000,
+    );
+    const draft = await ev(`(async () => {
+      const d = (await chrome.storage.local.get('markai.ai.draft'))['markai.ai.draft'];
+      return { has: !!d, text: d && typeof d.text === 'string' ? d.text : '' };
+    })()`);
+    check(
+      '流式过程中后台草稿在持续落盘（页面被直接杀掉时的唯一保底）',
+      draft.has === true && draft.text.includes('这段会被'),
+      JSON.stringify(draft),
+    );
+
+    // 杀掉扩展的 service worker（MV3 会按需重新拉起）
+    const targets = await (await fetch(`${CDP}/json/list`)).json();
+    const sw = targets.find((t) => t.type === 'service_worker' && (t.url || '').includes(EXT_ID));
+    if (sw) await cdp.send('Target.closeTarget', { targetId: sw.id }).catch(() => {});
+    await sleep(600);
+
+    // 重新打开页面：这就是用户"退出再回来"
+    await cdp.send('Page.reload', {}, sessionId);
+    await sleep(1200);
+    await waitFor(async () => await ev(`!!document.querySelector('[data-testid="chat-input"]')`), 8000);
+
+    const recovered = await ev(`(() => {
+      const t = document.body.innerText;
+      return {
+        keepsPartial: t.includes('这段会被'),
+        saysEmpty: t.includes('未返回内容'),
+        saysInterrupted: t.includes('被打断'),
+        excerpt: t.slice(0, 260),
+      };
+    })()`);
+    check(
+      '进程被杀后重开：已收到的内容还在（不是"未返回任何内容"）',
+      recovered.keepsPartial === true && recovered.saysEmpty === false,
+      JSON.stringify(recovered),
+    );
+
+    mock.server.close();
+    await ev(`(async () => {
+      const cfg = (await chrome.storage.local.get('markai.config'))['markai.config'] || {};
+      await chrome.storage.local.set({ 'markai.config': { ...cfg, baseUrl: '', apiKey: '', model: '' } });
+      return true;
+    })()`);
   }
 
   /* ══════════ 9.43 弹出窗（此前零覆盖） ══════════ */

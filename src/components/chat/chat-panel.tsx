@@ -872,6 +872,7 @@ export function ChatPanel({
         )}
         <div className="flex items-end gap-2">
           <Textarea
+            data-testid="chat-input"
             ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}

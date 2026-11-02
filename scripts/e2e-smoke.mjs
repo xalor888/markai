@@ -2363,6 +2363,49 @@ async function run() {
     );
     check('用户点了之后，书签真的被删掉', gone === true, JSON.stringify({ gone }));
 
+    /*
+     * **删除的安全网**：删除是整个产品里唯一不可逆的动作，而"不可逆"是靠撤销兜底的。
+     * 如果删完之后撤不回来，那前面整套"AI 只能提议、用户点了才删"的设计就白做了——
+     * 用户点错一次就永久失去那条书签。
+     *
+     * 时序注意：书签删掉之后后台还在收尾事务，撤销点要等一等才落盘
+     * （0.2.86 踩过同一个坑：查得太早会误判成"没有撤销点"）。
+     */
+    const delPoint = await waitFor(
+      async () =>
+        (await ev(`(async () => {
+          const d = await chrome.storage.local.get('markai.undo');
+          const pts = d['markai.undo']?.points;
+          return Array.isArray(pts) && pts.length >= 1;
+        })()`)) === true,
+      10000,
+    );
+    check('删除也落成了撤销点（不可逆动作有安全网）', delPoint === true, JSON.stringify({ delPoint }));
+
+    await ev(`[...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || '') === '撤销历史')?.click()`);
+    await sleep(400);
+    await ev(`[...document.querySelectorAll('button')]
+      .filter((b) => (b.getAttribute('title') || '').includes('撤销最新的一步'))[0]?.click()`);
+    /*
+     * 判据不能按**旧 id** 查：撤销是用删除时抓的子树快照**重建**，
+     * Chrome 会给新节点发新 id。按旧 id 查会永远查不到，把"撤回来了"误判成"没撤回来"。
+     * 按 URL 查才是用户视角："我那条书签回来了没有"。
+     */
+    const back = await waitFor(
+      async () =>
+        (await ev(`(async () => (await chrome.bookmarks.search(${JSON.stringify(VICTIM_URL)})).length)()`)) === 1,
+      10000,
+    );
+    const backInfo = await ev(`(async () => {
+      const hits = await chrome.bookmarks.search(${JSON.stringify(VICTIM_URL)});
+      return { count: hits.length, title: hits[0]?.title ?? null, newId: hits[0]?.id ?? null, oldId: ${JSON.stringify(victimId)} };
+    })()`);
+    check(
+      '删掉的书签能通过撤销找回来（安全网真的兜得住）',
+      back === true,
+      JSON.stringify({ back, backInfo }),
+    );
+
     await ev(`(async () => {
       const cfg = (await chrome.storage.local.get('markai.config'))['markai.config'] || {};
       await chrome.storage.local.set({ 'markai.config': { ...cfg, baseUrl: '', apiKey: '', model: '' } });

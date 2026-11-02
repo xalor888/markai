@@ -12847,3 +12847,31 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
   console.error('\n❌ 测试失败:', e);
   process.exit(1);
 });
+await okA('命令面板派发的自定义事件，都有人接', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { resolve } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const read = (rel: string) => readFileSync(resolve(root, rel), 'utf8');
+
+  /*
+   * 命令面板里有三个动作是靠 `document.dispatchEvent(new CustomEvent('markai:xxx'))`
+   * 转交给 workspace 的。**事件名拼错就是静默失败**：面板项点了、看起来有反应，
+   * 但什么都没有打开。这类缺口此前在快捷键上已经发生过一次（Ctrl+D）。
+   *
+   * 所以把「派发的」和「监听的」两组事件名对起来，差集必须为空。
+   */
+  const palette = read('src/components/command/command-palette.tsx');
+  const workspace = read('src/components/workspace/workspace.tsx');
+
+  const dispatched = [...palette.matchAll(/new CustomEvent\('([^']+)'\)/g)].map((m) => m[1]!);
+  assert.ok(dispatched.length >= 3, `只派发了 ${dispatched.length} 个事件，正则可能失效了`);
+
+  const listened = [...workspace.matchAll(/addEventListener\('([^']+)'/g)].map((m) => m[1]!);
+  const missing = dispatched.filter((e) => !listened.includes(e));
+  assert.deepEqual(missing, [], `命令面板派发了但没人监听的事件：${JSON.stringify(missing)}`);
+
+  // 反向：workspace 监听的 markai:* 事件，面板里至少要有一个在派发
+  const orphanListeners = listened.filter((e) => e.startsWith('markai:') && !dispatched.includes(e));
+  assert.deepEqual(orphanListeners, [], `workspace 监听了但没人派发的事件：${JSON.stringify(orphanListeners)}`);
+});

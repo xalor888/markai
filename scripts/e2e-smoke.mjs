@@ -1218,6 +1218,87 @@ async function run() {
     await sleep(300);
   }
 
+  /* ══════════ 9.2911 新建书签：从右键菜单到真的出现在列表 ══════════ */
+  console.log('\n[9.2911] 新建书签（最基础的 CRUD）');
+  {
+    /*
+     * 「新建书签」是最基础的一次写操作，但 e2e 从没走过对话框——
+     * bookmark-dialogs.tsx 里连一个 data-testid 都没有，全靠文案和 id 定位。
+     * 这条路径上任何一环接错（右键菜单不开、表单不提交、书签没落库），用户都直接卡住。
+     */
+    const NEW_URL = 'https://new-from-dialog.example/page';
+    await ev(`(async () => {
+      const hits = await chrome.bookmarks.search(${JSON.stringify(NEW_URL)});
+      for (const h of hits) await chrome.bookmarks.remove(h.id).catch(() => {});
+      return hits.length;
+    })()`);
+
+    // 1) 右键树里的「书签栏」→ 新建书签
+    const opened = await ev(`(() => {
+      const row = [...document.querySelectorAll('[role="treeitem"]')]
+        .find((r) => (r.textContent || '').includes('书签栏'));
+      if (!row) return false;
+      row.dispatchEvent(new MouseEvent('contextmenu', { bubbles: true, cancelable: true, clientX: 10, clientY: 10 }));
+      return true;
+    })()`);
+    await sleep(500);
+    const menuHasNew = await ev(`[...document.querySelectorAll('[role="menu"] [role="menuitem"], button')]
+      .some((b) => (b.textContent || '').trim() === '新建书签')`);
+    check('右键树文件夹出现「新建书签」菜单项', opened === true && menuHasNew === true, JSON.stringify({ opened, menuHasNew }));
+
+    await ev(`(() => {
+      const b = [...document.querySelectorAll('[role="menu"] [role="menuitem"], button')]
+        .find((x) => (x.textContent || '').trim() === '新建书签');
+      if (b) b.click();
+      return !!b;
+    })()`);
+    await sleep(500);
+
+    // 2) 填表并提交
+    const dlgOpen = await waitFor(async () => await ev(`!!document.querySelector('#bookmark-title')`), 5000);
+    check('点「新建书签」后弹出表单（有名称和地址两个输入框）', dlgOpen === true, JSON.stringify({ dlgOpen }));
+
+    const filled = await ev(`(() => {
+      const t = document.querySelector('#bookmark-title');
+      const u = document.querySelector('#bookmark-url');
+      if (!t || !u) return false;
+      const ts = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      ts.call(t, '对话框建的书签');
+      t.dispatchEvent(new Event('input', { bubbles: true }));
+      ts.call(u, ${JSON.stringify(NEW_URL)});
+      u.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    check('名称和地址两个框都能填', filled === true, JSON.stringify({ filled }));
+
+    const submitEnabled = await ev(`(() => {
+      const btns = [...document.querySelectorAll('button')];
+      const ok = btns.find((b) => (b.textContent || '').trim() === '确定');
+      return { found: !!ok, disabled: ok ? ok.disabled : null };
+    })()`);
+    check('填满之后「确定」变成可点', submitEnabled.found === true && submitEnabled.disabled === false, JSON.stringify(submitEnabled));
+
+    await ev(`(() => {
+      const b = [...document.querySelectorAll('button')].find((x) => (x.textContent || '').trim() === '确定');
+      if (b) b.click();
+      return !!b;
+    })()`);
+    await sleep(900);
+
+    // 3) 真的落到书签栏，且列表里看得见
+    const created = await waitFor(
+      async () => (await ev(`(async () => (await chrome.bookmarks.search(${JSON.stringify(NEW_URL)})).length)()`)) === 1,
+      8000,
+    );
+    check('提交之后书签真的建出来了（落到书签栏）', created === true, JSON.stringify({ created }));
+
+    const inList = await waitFor(
+      async () => (await ev(`document.body.innerText.includes('对话框建的书签')`)) === true,
+      8000,
+    );
+    check('新建的书签出现在界面上（不用手动刷新）', inList === true, JSON.stringify({ inList }));
+  }
+
   /* ══════════ 9.289 多窗口同步：一个窗口的改动，另一个窗口看得见 ══════════ */
   console.log('\n[9.289] 多窗口同步');
   {

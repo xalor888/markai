@@ -12842,6 +12842,79 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
   }
 });
 
+  /*
+   * 最棘手的一种轮次：三条路径同时上场——
+   *   delete  → 撤销时按快照**重建**，拿到的是**新 id**
+   *   move    → 还原到源父目录，下标要按 Chromium 的「移除前坐标」换算
+   *   create  → 撤销时删掉
+   * 顺序检查点里存的是**动手前的旧 id**，必须靠 idMap 翻译成重建后的新 id，
+   * 否则顺序还原会静默错位——树"看起来对"，但兄弟顺序变了。
+   *
+   * 以前只分别测过纯删除、纯并发删除、删文件夹带子树，没有这条混合路径。
+   *
+   * 断言只覆盖**自己新建的那棵子树**：bookmark store 是模块级共享数组、
+   * 跨用例累积且不重置，比整棵树会被别处的状态干扰（实测踩过）。
+   * 操作集合也只校验**落在自己节点上**的那几条：recorder 的 active 事务是模块级状态，
+   * 别处迟到的写入可能落进同一轮（实测有个迟到的 jCreate 混进来），不替它背书。
+   */
+  await okA('同一轮里删除 + 移动 + 新建混着来，撤销后该子树（含顺序）复原', async () => {
+    const { beginUndoTransaction, endUndoTransaction, ensureOrderCheckpoint, resetUndoTransactionForTest } =
+      await import('../src/lib/undo/recorder');
+    const { applyUndo } = await import('../src/lib/undo/apply');
+    const { jRemove, jMove, jCreate } = await import('../src/lib/undo/mutations');
+
+    storageMap.delete('markai.undo');
+    resetUndoTransactionForTest();
+
+    const parent = (await mockBookmarks.create({ parentId: '1', title: 'T28-PARENT' })).id;
+    const other = (await mockBookmarks.create({ parentId: '1', title: 'T28-OTHER' })).id;
+    const ids: string[] = [];
+    for (const t of ['a', 'b', 'c', 'd']) {
+      ids.push((await mockBookmarks.create({ parentId: parent, title: `T28-${t}`, url: `https://t28.test/${t}` })).id);
+    }
+    const sub = async () => (await mockBookmarks.getChildren(parent)).map((n) => `${n.title}|${n.url ?? ''}`);
+    const before = await sub();
+    assert.deepEqual(before, [
+      'T28-a|https://t28.test/a',
+      'T28-b|https://t28.test/b',
+      'T28-c|https://t28.test/c',
+      'T28-d|https://t28.test/d',
+    ]);
+
+    await beginUndoTransaction('run-t28-mixed');
+    await ensureOrderCheckpoint(parent);
+    await jRemove(ids[1]!);                       // 删 b
+    await jMove(ids[3]!, { parentId: other });    // d 搬到别的文件夹
+    await jCreate({ title: 'T28-new', url: 'https://t28.test/new', parentId: parent });
+    const point = await endUndoTransaction();
+
+    const ops = point?.ops ?? [];
+    const myIds = new Set([...ids, parent, other]);
+    for (const o of ops) {
+      if (!('id' in o) || !myIds.has(o.id)) continue;
+      if (o.kind === 'delete') assert.equal(o.id, ids[1]!, 'delete 应针对 T28-b');
+      if (o.kind === 'move') assert.equal(o.id, ids[3]!, 'move 应针对 T28-d');
+      if (o.kind === 'create') assert.ok(o.title.startsWith('T28-'), `create 应是我的，实际 ${o.title}`);
+    }
+    assert.ok(ops.some((o) => o.kind === 'delete'), '应有 delete');
+    assert.ok(ops.some((o) => o.kind === 'move'), '应有 move');
+    assert.ok(ops.some((o) => o.kind === 'create' && o.title === 'T28-new'), '应有我那条 create');
+    assert.ok(
+      (point?.orderCheckpoints ?? []).some((cp) => cp.parentId === parent),
+      '混合轮次也必须取父目录顺序检查点，否则撤销后兄弟顺序不可靠',
+    );
+    assert.notDeepEqual(await sub(), before, '这一轮确实改动了子树');
+
+    const undone = await applyUndo();
+    assert.ok(undone.ok, `撤销应成功，实际 ${JSON.stringify(undone)}`);
+    assert.deepEqual(undone.failures, [], `撤销不应有失败项，实际 ${JSON.stringify(undone.failures)}`);
+    assert.deepEqual(await sub(), before, '撤销后该子树的内容与顺序应与动手前一致');
+
+    // 被搬走的那条也要真的回来
+    const left = await mockBookmarks.getChildren(other);
+    assert.deepEqual(left.map((n) => n.title), [], `搬走的书签应已回来，却还剩 ${JSON.stringify(left.map((n) => n.title))}`);
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

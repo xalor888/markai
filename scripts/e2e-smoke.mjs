@@ -1878,6 +1878,59 @@ async function run() {
       return !!d && /重命名/.test(d.innerText);
     })()`);
     check('「F2」打开重命名（说明里写的那样）', renameOpen === true, JSON.stringify({ renameOpen }));
+
+    /*
+     * 原来只验到"对话框打开了"——**改名有没有真的落库，一次都没验过**。
+     * 用户按 F2、填新名字、点确定，如果 chrome.bookmarks.update 没被调用，
+     * 他看到的就是"改了但没变"，而测试全绿。
+     */
+    /*
+     * F2 的目标是「高亮行，没有高亮就第一行」（代码：`items[activeIndex >= 0 ? activeIndex : 0]`）。
+     * 所以前置条件不是"有高亮行"，而是"列表里至少有行可改"。
+     * 第一版写成必须有高亮行，实测为 null 但改名照样成功——是我判据写严了。
+     */
+    const rowInfo = await ev(`(() => {
+      const rows = [...document.querySelectorAll('[data-testid="row"]')];
+      const active = rows.find((r) => r.getAttribute('data-active') === 'true');
+      return {
+        count: rows.length,
+        activeTitle: active ? (active.getAttribute('title') || '').split(String.fromCharCode(10))[0] : null,
+        firstTitle: rows[0] ? (rows[0].getAttribute('title') || '').split(String.fromCharCode(10))[0] : null,
+      };
+    })()`);
+    check('F2 之前列表里至少有行可改', rowInfo.count > 0, JSON.stringify(rowInfo));
+
+    const RENAME_TO = '改名后的标题';
+    const filled = await ev(`(() => {
+      const t = document.querySelector('#bookmark-title');
+      if (!t) return false;
+      const ts = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      ts.call(t, ${JSON.stringify(RENAME_TO)});
+      t.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    check('重命名框里能填新名字', filled === true, JSON.stringify({ filled }));
+
+    await ev(`(() => {
+      const b = [...document.querySelectorAll('button')].find((x) => (x.textContent || '').trim() === '确定');
+      if (b) b.click();
+      return !!b;
+    })()`);
+    await sleep(900);
+
+    const renamed = await waitFor(
+      async () =>
+        (await ev(`(async () => (await chrome.bookmarks.search({ title: ${JSON.stringify(RENAME_TO)} })).length)()`)) === 1,
+      8000,
+    );
+    check('按 F2 改的名字真的落库了（不只是关掉对话框）', renamed === true, JSON.stringify({ renamed }));
+
+    const shown = await waitFor(
+      async () => (await ev(`document.body.innerText.includes(${JSON.stringify(RENAME_TO)})`)) === true,
+      8000,
+    );
+    check('改完的名字界面上立刻看得见（不用手动刷新）', shown === true, JSON.stringify({ shown }));
+
     await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
     await sleep(300);
   }

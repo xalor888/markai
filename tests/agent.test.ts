@@ -12875,3 +12875,25 @@ await okA('命令面板派发的自定义事件，都有人接', async () => {
   const orphanListeners = listened.filter((e) => e.startsWith('markai:') && !dispatched.includes(e));
   assert.deepEqual(orphanListeners, [], `workspace 监听了但没人派发的事件：${JSON.stringify(orphanListeners)}`);
 });
+
+await okA('TOOL_DEFINITIONS 里声明的每个工具都有实现（不多不少）', async () => {
+  const { TOOL_DEFINITIONS } = await import('../src/lib/ai/prompts');
+  const { IMPLEMENTED_TOOL_NAMES } = await import('../src/lib/ai/tools');
+
+  /*
+   * 「声明了但没实现」是最难自查的一类漂移：模型在 TOOL_DEFINITIONS 里看得见这个工具，
+   * 会理直气壮地调用，然后执行器抛「未知工具：xxx」——用户在聊天里看到一次莫名报错，
+   * 而单测里没有任何一条会红（每条工具都是单独测自己的 handler）。
+   *
+   * 所以把两边对起来：差集必须为空，反向也必须为空
+   * （实现了却没声明的工具，模型根本不知道它的存在，也是腐烂）。
+   */
+  const declared = TOOL_DEFINITIONS.map((t) => t.function.name);
+  assert.ok(declared.length >= 20, `只声明了 ${declared.length} 个工具，正则/解析可能失效了`);
+
+  const noImpl = declared.filter((n) => !IMPLEMENTED_TOOL_NAMES.has(n));
+  assert.deepEqual(noImpl, [], `声明了但没有实现的工具：${JSON.stringify(noImpl)}`);
+
+  const noDecl = [...IMPLEMENTED_TOOL_NAMES].filter((n) => !declared.includes(n));
+  assert.deepEqual(noDecl, [], `实现了但没有声明（模型看不到）的工具：${JSON.stringify(noDecl)}`);
+});

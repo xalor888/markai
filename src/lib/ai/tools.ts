@@ -1991,6 +1991,15 @@ const TOOL_MAP: Record<string, ToolEntry> = {
   forget_memory: { name: 'forget_memory', handler: forgetMemoryTool },
 };
 
+/**
+ * 已实现工具的名字集合。
+ *
+ * 导出来给契约测试用：`TOOL_DEFINITIONS` 里声明了但这里没有的工具，
+ * 模型看得见、会调用，然后执行器抛「未知工具」——用户在聊天里看到一次莫名报错。
+ * 这种"声明了但没实现"的漂移必须有测试守着。
+ */
+export const IMPLEMENTED_TOOL_NAMES: ReadonlySet<string> = new Set(Object.keys(TOOL_MAP));
+
 /** 智能参数规范化：容忍模型传参时常见的类型微差（字符串布尔、字符串数字、单字符串转数组等） */
 function normalizeToolArgs(args: unknown): unknown {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return args;

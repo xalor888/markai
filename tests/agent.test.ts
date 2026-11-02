@@ -13110,6 +13110,60 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     );
   });
 
+  /*
+   * 健康检查的安全承诺必须由代码保证，不能只写在注释里。
+   *
+   * types.ts 的原文：「自动修复只允许改动 MarkAI 自己的元数据（配置 / 撤销点 /
+   * 整理记录 / 运行时标记），**永远不会移动、删除、重命名用户的任何书签或文件夹**。
+   * 书签层面的异常一律只报告——用户已经被"自动批量搬书签"坑过一次，不能再来第二次。」
+   *
+   * 目前 `fixes.ts` 一个 `chrome.bookmarks` 都没引用，承诺是真的。但 `chrome` 是全局，
+   * 谁加一行 `chrome.bookmarks.remove(...)` 也不会有任何东西报警——
+   * 而这条承诺崩掉的代价是用户的收藏夹。所以用源码契约把它钉住。
+   */
+  await okA('自动修复碰不到用户书签（安全边界由源码契约保证）', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const src = readFileSync(resolve(root, 'src/lib/health/fixes.ts'), 'utf8');
+
+    // 去掉注释后再查：注释里提到 bookmarks 是在解释为什么不碰，不该算违规
+    const code = src
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('*') && !l.trim().startsWith('//') && !l.trim().startsWith('/*'))
+      .join('\n');
+
+    const forbidden = [
+      /chrome\s*\.\s*bookmarks/,
+      /bookmarks\s*\.\s*(create|move|remove|removeTree|update|reorder)/,
+      /from '@\/lib\/ai\/tools'/,
+    ];
+    for (const re of forbidden) {
+      const hit = code.match(re);
+      assert.ok(!hit, `自动修复里出现了书签写入口（${re}）：${JSON.stringify(hit?.[0])}。安全承诺要求只改 MarkAI 自己的元数据。`);
+    }
+
+    /*
+     * 写入必须走**单一收口**：`writeDict(key, value)` 是 fixes.ts 里唯一的
+     * `storage.local.set`。这样审计范围就是"writeDict 被传了哪些键"，
+     * 而不是去追每一处 set——新增一个修复动作时也只有一个地方需要看。
+     */
+    const setSites = [...code.matchAll(/storage\.local\.set\(/g)];
+    assert.equal(setSites.length, 1, `storage.local.set 应只有一处（writeDict 收口），实际 ${setSites.length} 处`);
+
+    const writeKeys = [...src.matchAll(/writeDict\(\s*([A-Za-z0-9_]+)\s*,/g)].map((m) => m[1]!);
+    assert.ok(writeKeys.length >= 5, `没解析到足够的 writeDict 调用（${writeKeys.length}），正则可能失效了`);
+    const allowed = new Set(['CONFIG_KEY', 'UNDO_KEY', 'LOG_KEY']);
+    for (const k of writeKeys) {
+      assert.ok(allowed.has(k), `自动修复写入了白名单之外的键：${k}`);
+    }
+    // 这三个键必须都真的出现过，否则说明有修复动作根本没落盘
+    for (const k of allowed) {
+      assert.ok(writeKeys.includes(k), `白名单里的 ${k} 没有被任何修复动作写入——正则可能失效了`);
+    }
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

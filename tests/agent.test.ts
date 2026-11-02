@@ -2564,13 +2564,13 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     // 部分失败：必须上报失败明细而不是全绿
     useToastStore.setState({ toasts: [] });
     points = [successPoint];
-    applyResult = { ok: false, restored: 1, failures: [{ op: 'move', title: 'x', error: '节点已不存在' }] };
+    applyResult = { ok: false, restored: 1, restoredOps: 1, failures: [{ op: 'move', title: 'x', error: '节点已不存在' }] };
     await useAIStore.getState().undoLast();
     points = [];
     const partialToasts = useToastStore.getState().toasts;
     ok('部分失败时上报明细，不谎报全部成功', () => {
       assert.ok(
-        partialToasts.some((t) => /已还原 1 项，1 项失败/.test(t.title) && /节点已不存在/.test(t.description ?? '')),
+        partialToasts.some((t) => /已还原 1 项书签，1 个操作失败/.test(t.title) && /节点已不存在/.test(t.description ?? '')),
         `应上报失败明细，实际 ${JSON.stringify(partialToasts)}`,
       );
     });
@@ -12913,6 +12913,60 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     // 被搬走的那条也要真的回来
     const left = await mockBookmarks.getChildren(other);
     assert.deepEqual(left.map((n) => n.title), [], `搬走的书签应已回来，却还剩 ${JSON.stringify(left.map((n) => n.title))}`);
+  });
+
+  /*
+   * 「会还原多少条书签」这个数字必须在两处一致。
+   *
+   * 按钮角标和「还原 N 项」用的是 `undoReadiness().count`，它数的是**书签条数**
+   * （批次按条数、删除按子树节点数）。而 `applyUndo()` 的 `restored` 曾经数的是
+   * **操作条数**——于是删一个含 4 节点的文件夹时，按钮说「还原 4 项」、
+   * toast 说「已还原 1 项」，用户以为只还原了一部分。
+   *
+   * 这里钉住：两者必须相等，且都按书签条数计。
+   */
+  await okA('撤销结果报的条数与按钮承诺的条数同单位（书签条数）', async () => {
+    const { beginUndoTransaction, endUndoTransaction, resetUndoTransactionForTest } =
+      await import('../src/lib/undo/recorder');
+    const { applyUndo } = await import('../src/lib/undo/apply');
+    const { jRemove } = await import('../src/lib/undo/mutations');
+    const { undoReadiness } = await import('../src/lib/undo/journal');
+
+    storageMap.delete('markai.undo');
+    resetUndoTransactionForTest();
+
+    // 一个含 3 个子书签的文件夹：删除它 = 1 个操作、4 个节点
+    const folder = (await mockBookmarks.create({ parentId: '1', title: 'T30-FOLDER' })).id;
+    for (const t of ['s1', 's2', 's3']) {
+      await mockBookmarks.create({ parentId: folder, title: `T30-${t}`, url: `https://t30.test/${t}` });
+    }
+
+    await beginUndoTransaction('run-t30');
+    await jRemove(folder, { tree: true });
+    const point = await endUndoTransaction();
+    assert.ok(point, '应产生撤销点');
+
+    const ready = undoReadiness(point);
+    assert.equal(ready.undoable, true, JSON.stringify(ready));
+    assert.equal(ready.count, 4, `按钮承诺的是**书签条数**：文件夹 1 + 子书签 3，实际 ${ready.count}`);
+
+    const r = await applyUndo();
+    assert.ok(r.ok, `撤销应成功，实际 ${JSON.stringify(r)}`);
+    assert.equal(
+      r.restored,
+      ready.count,
+      `撤销结果报的条数必须与按钮承诺的一致（都按书签条数计）：按钮 ${ready.count}，结果 ${r.restored}`,
+    );
+    assert.equal(r.restoredOps, 1, `操作条数是 1（一次删除），实际 ${r.restoredOps}`);
+
+    /*
+     * 还原出来的确实是 4 个节点。
+     * 注意：删除的撤销是**按快照重建**，Chrome 会发**新 id**，
+     * 所以只能按标题找，不能按旧 id 查（API 不允许指定 id）。
+     */
+    const restoredFolder = store.find((n) => n.title === 'T30-FOLDER');
+    assert.ok(restoredFolder, '文件夹应被还原');
+    assert.equal((await mockBookmarks.getChildren(restoredFolder.id)).length, 3, '3 个子书签应被还原');
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

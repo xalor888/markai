@@ -913,7 +913,9 @@ export const useAIStore = create<AIState>((set, get) => ({
       // 若按 failures 分支判断就会掉进成功提示，把"记录没更新、别再点"说成"已撤销"。
       if (!r.ok) {
         if (r.failures.length > 0) {
-          if (!opts.silent) pushToast(`已还原 ${r.restored} 项，${r.failures.length} 项失败`, {
+          // 两个数的单位不同，必须写清楚：restored 是**书签条数**（与按钮角标同单位），
+          // failures.length 是**操作条数**。混着说"已还原 4 项，1 项失败"会让人以为总数对不上。
+          if (!opts.silent) pushToast(`已还原 ${r.restored} 项书签，${r.failures.length} 个操作失败`, {
             description: r.failures.map((f) => `${f.title}：${f.error}`).join('；'),
             variant: 'destructive',
           });
@@ -924,7 +926,7 @@ export const useAIStore = create<AIState>((set, get) => ({
           // 已还原一部分、但记录没能更新（消费写失败）：必须说清现状并警告不要重复点击
           if (!opts.silent) {
             pushToast('撤销未完成', {
-              description: `已还原 ${r.restored} 项，但${r.reason ?? '本地记录未更新'}`,
+              description: `已还原 ${r.restored} 项书签，但${r.reason ?? '本地记录未更新'}`,
               variant: 'destructive',
             });
           }
@@ -932,7 +934,7 @@ export const useAIStore = create<AIState>((set, get) => ({
       } else if (r.failures.length > 0) {
         // ok 但仍有条目失败：如实上报明细
         if (!opts.silent) {
-          pushToast(`已还原 ${r.restored} 项，${r.failures.length} 项失败`, {
+          pushToast(`已还原 ${r.restored} 项书签，${r.failures.length} 个操作失败`, {
             description: r.failures.map((f) => `${f.title}：${f.error}`).join('；'),
             variant: 'destructive',
           });

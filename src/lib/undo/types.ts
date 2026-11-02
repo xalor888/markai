@@ -115,7 +115,16 @@ export interface UndoApplyResult {
   ok: boolean;
   /** 无法撤销时的原因（含删除、点不存在、点已消费等） */
   reason?: string;
-  /** 真正还原成功的操作数 */
+  /**
+   * 真正还原成功的**书签条数**（批次按条数、删除按子树节点数）。
+   *
+   * 必须和 `undoReadiness().count` 同一单位：那个数显示在按钮角标和
+   * 「还原 N 项」上，用户看到的是"会动多少条书签"。曾经这里数的是**操作条数**，
+   * 于是删一个含 4 节点的文件夹时，按钮说「还原 4 项」、toast 说「已还原 1 项」——
+   * 用户以为只还原了一部分。
+   */
   restored: number;
+  /** 真正还原成功的操作数（失败明细按操作计，用这个） */
+  restoredOps: number;
   failures: { op: UndoOpKind; title: string; error: string }[];
 }

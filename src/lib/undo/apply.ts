@@ -7,7 +7,7 @@
  * 逆序执行是正确性的关键：撤销第 k 步时，书签库的状态等于第 k 步刚执行完的状态，
  * 于是「移回原父目录的原子下标」才是准确的（Chromium 的 index 语义见 bookmark-dnd.ts）。
  */
-import { reverseOps, undoReadiness } from './journal';
+import { opWeight, reverseOps, undoReadiness } from './journal';
 import { readUndoPoints, takeUndoPoint } from './recorder';
 import type { BookmarkSnapshot, UndoApplyResult, UndoOp, UndoPoint } from './types';
 
@@ -222,12 +222,13 @@ export async function applyUndo(id?: string): Promise<UndoApplyResult> {
         ? '这条撤销刚刚已经执行过，但本地记录没能更新；重复执行会造成重复改动，已拒绝。'
         : '该操作已不存在（可能已在另一个窗口撤销过，或已被更新的一轮挤出保留范围）',
       restored: 0,
+      restoredOps: 0,
       failures: [],
     };
   }
   const ready = undoReadiness(target);
   if (!target || !ready.undoable) {
-    return { ok: false, ...(ready.reason ? { reason: ready.reason } : {}), restored: 0, failures: [] };
+    return { ok: false, ...(ready.reason ? { reason: ready.reason } : {}), restored: 0, restoredOps: 0, failures: [] };
   }
   // 同一 SW 会话内已经执行过、但消费失败的点：再执行一次会重复改动，直接拒绝
   if (appliedThisSession.has(target.id)) {
@@ -235,6 +236,7 @@ export async function applyUndo(id?: string): Promise<UndoApplyResult> {
       ok: false,
       reason: '这条撤销刚刚已经执行过，但本地记录没能更新；重复执行会造成重复改动，已拒绝。',
       restored: 0,
+      restoredOps: 0,
       failures: [],
     };
   }
@@ -251,6 +253,7 @@ export async function applyUndo(id?: string): Promise<UndoApplyResult> {
       ok: false,
       reason: '请先撤销较新的操作（撤销只能从最新一步开始，按时间从新到旧依次回退）',
       restored: 0,
+      restoredOps: 0,
       failures: [],
     };
   }
@@ -268,6 +271,7 @@ export async function applyUndo(id?: string): Promise<UndoApplyResult> {
       ok: false,
       reason: `${detail}。自动撤销不会连带删除这些内容，请先把它们移到别处再撤销。`,
       restored: 0,
+      restoredOps: 0,
       failures: [],
     };
   }
@@ -278,6 +282,7 @@ export async function applyUndo(id?: string): Promise<UndoApplyResult> {
     return {
       ok: false,
       restored: 0,
+      restoredOps: 0,
       failures: [],
       reason: '这条撤销正在执行中，请稍候（重复执行会造成重复改动）。',
     };
@@ -286,11 +291,13 @@ export async function applyUndo(id?: string): Promise<UndoApplyResult> {
   try {
   const failures: UndoApplyResult['failures'] = [];
   const idMap = new Map<string, string>(); // 删除还原后的 old→new id 映射（供顺序检查点使用）
-  let restored = 0;
+  let restored = 0;      // 书签条数（与 undoReadiness.count 同单位）
+  let restoredOps = 0;   // 操作条数（失败明细按操作计）
   for (const op of reverseOps(target.ops)) {
     try {
       await applyOne(op, idMap);
-      restored++;
+      restored += opWeight(op);
+      restoredOps++;
     } catch (e) {
       failures.push({ op: op.kind, title: op.title, error: e instanceof Error ? e.message : String(e) });
     }
@@ -328,11 +335,12 @@ export async function applyUndo(id?: string): Promise<UndoApplyResult> {
       reason:
         '撤销已执行，但本地记录没能更新（存储写入失败）：请不要重复点击这条撤销，重复执行会造成重复改动。刷新后该记录可能仍在，届时可再次尝试。',
       restored,
+      restoredOps,
       failures,
     };
   }
   appliedThisSession.delete(target.id); // 正常消费：解除本会话的重复保护
-  return { ok: failures.length === 0, restored, failures };
+  return { ok: failures.length === 0, restored, restoredOps, failures };
   } finally {
     // 无论成功、失败还是抛错都要释放，否则该点会被永久锁住
     inFlight.delete(target.id);

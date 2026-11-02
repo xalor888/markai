@@ -159,7 +159,7 @@ export default defineBackground(() => {
             // 撤销抛错必须如实上报，不能假装成功
             sendResponse({
               type: 'undo:apply:result',
-              result: { ok: false, reason: errMsg, restored: 0, failures: [] },
+              result: { ok: false, reason: errMsg, restored: 0, restoredOps: 0, failures: [] },
             } satisfies OneShotOutbound);
             return;
           }

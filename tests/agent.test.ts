@@ -10127,12 +10127,18 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.equal(r.score, 100);
     });
 
-    ok('配置缺 Key → 指出缺哪项，并给出可执行的修复动作', () => {
+    ok('配置缺 Key → 指出缺哪项并说明该怎么做（不提供点了无效的按钮）', () => {
       const r = diagnose(healthy({ config: { ...healthy().config!, apiKey: '' } }));
       const issue = r.issues.find((i) => i.id === 'config.incomplete');
       assert.ok(issue, '应报 config.incomplete');
       assert.ok(issue!.detail.includes('API Key'), issue!.detail);
-      assert.equal(issue!.fix?.action, 'config.fill-defaults');
+      /*
+       * 行为变更（0.2.68）：只缺 API Key 时不再挂「填入默认值」——
+       * 那个动作补不了 Key，点了只会弹"没有可自动填的字段"，
+       * 却还被计进「N 个可一键修复」。给按钮就必须真的能修。
+       */
+      assert.equal(issue!.fix, undefined, `只缺 Key 时不该给 fix：${JSON.stringify(issue!.fix)}`);
+      assert.ok(issue!.manualHint?.includes('Key') === true, String(issue!.manualHint));
       assert.ok(r.score < 100);
     });
 
@@ -11791,6 +11797,73 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     ok('时区不可用时不会崩（退回本地时间）', () => {
       const t = buildTimeContext(new Date('2026-11-02T09:05:00+08:00'), 'Not/AZone');
       assert.ok(t.includes('当前时间'), t);
+    });
+  }
+
+  /* ══════════ T124: 健康检查不要给"点了没事干"的修复按钮 ══════════ */
+  console.log('\n[T124] 健康检查的修复动作要名副其实');
+  {
+    /*
+     * 缺陷：`config.incomplete` 永远挂一个「填入该服务商的默认值」。
+     * 但当唯一缺的是 API Key 时，那个动作**什么也做不了**（Key 必须用户自己拿），
+     * 点下去只会弹一句"没有可自动填的字段"；而且它还被计进「N 个可一键修复」，
+     * 让健康分看起来有救、实际没有。
+     */
+    const { diagnose } = await import('../src/lib/health/diagnostics');
+    type HealthSnapshot = Parameters<typeof diagnose>[0];
+    const healthy = (patch: Partial<HealthSnapshot> = {}): HealthSnapshot => ({
+      configError: null,
+      config: {
+        providerId: 'deepseek',
+        baseUrl: 'https://api.deepseek.com',
+        apiKey: 'sk-x',
+        model: 'deepseek-v4-flash',
+        customHeaders: '',
+        autoOrganizeNew: true,
+        autoOrganizeAi: true,
+        contextWindow: 128000,
+      },
+      providerNeedsKey: true,
+      permissions: ['bookmarks', 'storage', 'sidePanel', 'tabs'],
+      undoPoints: [],
+      logEntries: [],
+      bookmarks: { total: 10, folders: 3, emptyFolders: 0, maxDepth: 3, orphaned: 0, duplicateNameGroups: 0 },
+      storageBytes: 1024,
+      lastAiError: null,
+      ...patch,
+    } as HealthSnapshot);
+
+    ok('只缺 Key：不给按钮，但要有明确的手动提示', () => {
+      const r = diagnose(healthy({ config: { ...healthy().config!, apiKey: '' } }));
+      const iss = r.issues.find((i) => i.id === 'config.incomplete');
+      assert.ok(iss, '应当报出"没配完"');
+      assert.equal(iss!.fix, undefined, `只缺 Key 时不该给 fix：${JSON.stringify(iss!.fix)}`);
+      assert.ok(iss!.manualHint?.includes('Key') === true, `应提示去拿 Key：${iss!.manualHint}`);
+    });
+
+    ok('缺 Base URL / 模型：给按钮（确实补得了）', () => {
+      const r = diagnose(healthy({ config: { ...healthy().config!, baseUrl: '', model: '' } }));
+      const iss = r.issues.find((i) => i.id === 'config.incomplete');
+      assert.ok(iss);
+      assert.ok(iss!.fix, '缺 baseUrl/model 时应当能一键补');
+      assert.equal(iss!.fix!.action, 'config.fill-defaults');
+    });
+
+    ok('三者都缺：也要给按钮（Key 之外还有可补的）', () => {
+      const r = diagnose(healthy({ config: { ...healthy().config!, baseUrl: '', model: '', apiKey: '' } }));
+      const iss = r.issues.find((i) => i.id === 'config.incomplete');
+      assert.ok(iss!.fix, '有可补字段时应当给按钮');
+    });
+
+    ok('可一键修复的计数不再把"补不了"的问题算进去', () => {
+      const keyOnly = diagnose(healthy({ config: { ...healthy().config!, apiKey: '' } }));
+      const fillable = diagnose(healthy({ config: { ...healthy().config!, baseUrl: '', model: '' } }));
+      const countFixable = (rep: ReturnType<typeof diagnose>) => rep.issues.filter((i) => !!i.fix).length;
+      assert.equal(
+        countFixable(keyOnly) < countFixable(fillable) || countFixable(keyOnly) === 0,
+        true,
+        `只缺 Key 的可修数不应多于可补字段的情形：${countFixable(keyOnly)} vs ${countFixable(fillable)}`,
+      );
     });
   }
 

@@ -89,7 +89,17 @@ export function diagnose(snapshot: HealthSnapshot): HealthReport {
         severity: 'high',
         title: 'AI 服务还没配完',
         detail: `缺少：${missing.join(' / ')}。在此之前，自动整理只会用本地规则，对话功能会直接失败。`,
-        fix: { action: 'config.fill-defaults', label: '填入该服务商的默认值' },
+        /*
+         * 只有在**确实有字段可自动补**时才给修复按钮。
+         *
+         * 若唯一缺的是 API Key，`fill-config-defaults` 什么也做不了
+         * （Key 必须用户自己去服务商后台拿），点了只会弹一句"没有可自动填的字段"——
+         * 而且它还会被计进「N 个可一键修复」，让健康分看起来有救其实没有。
+         * 与其给一个点了不动的按钮，不如只留那句该怎么做。
+         */
+        ...(missing.some((m) => m !== 'API Key')
+          ? { fix: { action: 'config.fill-defaults' as const, label: '填入该服务商的默认值' } }
+          : {}),
         manualHint: missing.includes('API Key')
           ? '到服务商后台复制一个 Key 填进来。'
           : '在设置页把这两项补齐即可。',

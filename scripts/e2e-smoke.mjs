@@ -2325,6 +2325,24 @@ async function run() {
       JSON.stringify(fixed),
     );
 
+    /*
+     * 先造一个**确实可修**的问题，否则「修复全部」按钮不会出现——
+     * 而 `!btn → clicked:false` 会让这条用例静默空转（它之前是靠"缺 API Key"
+     * 那个点了也没用的按钮撑着的；0.2.68 去掉那个按钮后必须自己造）。
+     */
+    await ev(`(async () => {
+      const d = await chrome.storage.local.get('markai.config');
+      const cfg = d['markai.config'] || {};
+      await chrome.storage.local.set({ 'markai.config': { ...cfg, customHeaders: '这一行没有冒号' } });
+      return true;
+    })()`);
+    await ev(`(() => {
+      [...document.querySelectorAll('button')]
+        .find((b) => /重新检查/.test(b.textContent || ''))?.click();
+      return true;
+    })()`);
+    await sleep(1500);
+
     const repaired = await ev(`(async () => {
       // 点「修复全部」：只应改动 MarkAI 自己的元数据，不碰书签
       const before = (await chrome.bookmarks.search({})).length;

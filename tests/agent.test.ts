@@ -12897,3 +12897,21 @@ await okA('TOOL_DEFINITIONS 里声明的每个工具都有实现（不多不少�
   const noDecl = [...IMPLEMENTED_TOOL_NAMES].filter((n) => !declared.includes(n));
   assert.deepEqual(noDecl, [], `实现了但没有声明（模型看不到）的工具：${JSON.stringify(noDecl)}`);
 });
+
+await okA('每个已实现的工具都有中文标签（不让裸工具名漏到界面上）', async () => {
+  const { IMPLEMENTED_TOOL_NAMES, TOOL_META } = await import('../src/lib/ai/tools');
+
+  /*
+   * 聊天里的工具 chip 渲染是 `{meta?.label ?? record.name}`。
+   * 没有标签时就回退到裸工具名——`create_bookmark` 这种英文蛇形
+   * 会直接漏进全中文的界面，看起来像没做完。
+   *
+   * 每条工具都是单独测自己的 handler，没有一条会为"忘了加标签"而红。
+   */
+  const unlabeled = [...IMPLEMENTED_TOOL_NAMES].filter((n) => !TOOL_META[n]?.label?.trim());
+  assert.deepEqual(unlabeled, [], `这些工具没有中文标签：${JSON.stringify(unlabeled)}`);
+
+  // 反向：标签表里多出来的键也是腐烂（工具已不存在）
+  const stale = Object.keys(TOOL_META).filter((n) => !IMPLEMENTED_TOOL_NAMES.has(n));
+  assert.deepEqual(stale, [], `标签表里这些工具已经不存在了：${JSON.stringify(stale)}`);
+});

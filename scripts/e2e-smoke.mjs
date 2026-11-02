@@ -607,6 +607,88 @@ async function run() {
     await sleep(200);
   }
 
+  /* ══════════ 9.35 时间线：看的是**全库**，不是一个文件夹 ══════════ */
+  console.log('\n[9.35] 时间线语义');
+  {
+    /*
+     * 时间线的卖点是"按收藏时间看全部书签"。如果它其实只渲染当前文件夹，
+     * 那这个入口就是骗人的——而单测里测的是纯函数，看不出这个接线对不对。
+     */
+    const seed = await ev(`(async () => {
+      const bar = (await chrome.bookmarks.getTree())[0].children.find((c) => c.id === '1');
+      const f = await chrome.bookmarks.create({ parentId: bar.id, title: 'TL-文件夹' });
+      const a = await chrome.bookmarks.create({ parentId: bar.id, title: 'TL-根级书签', url: 'https://tl-root.example/' });
+      const b = await chrome.bookmarks.create({ parentId: f.id, title: 'TL-子文件夹书签', url: 'https://tl-sub.example/' });
+      return { folderId: f.id, a: a.id, b: b.id };
+    })()`);
+    await sleep(1500);
+
+    // 切到时间线
+    await ev(`(() => {
+      const b = document.querySelector('[data-testid="timeline-toggle"]');
+      if (!b) return false;
+      b.click();
+      return true;
+    })()`);
+    await sleep(700);
+
+    /*
+     * 断言必须**限定在时间线容器内**。
+     * 第一版直接查 document.body.innerText —— 左侧书签树里也可能出现这些标题，
+     * 那样测的是"树里有没有"，不是"时间线里有没有"，等于白过。
+     */
+    const view = await ev(`(() => {
+      const panel = document.querySelector('[data-testid="timeline-panel"]');
+      if (!panel) return { noPanel: true };
+      const t = panel.innerText;
+      return {
+        root: t.includes('TL-根级书签'),
+        sub: t.includes('TL-子文件夹书签'),
+        itemCount: panel.querySelectorAll('[role="listitem"]').length,
+        headerLine: t.split(String.fromCharCode(10)).find((l) => l.includes('条书签')) || '',
+      };
+    })()`);
+    check(
+      '时间线面板里同时有「书签栏根级」与「子文件夹里」的书签（看的是全库）',
+      view.root === true && view.sub === true && view.itemCount >= 2,
+      JSON.stringify(view),
+    );
+
+    // 切回来，确认真能回到文件夹视图（不然用户会卡在时间线里）
+    await ev(`(() => {
+      const b = document.querySelector('[data-testid="timeline-toggle"]');
+      if (!b) return false;
+      b.click();
+      return true;
+    })()`);
+    await sleep(600);
+    /*
+     * 判据要硬：时间线面板必须**消失**，且文件夹视图的排序控件必须在。
+     * 第一版写成 `!包含某标题 || 有排序控件`——两个条件任一成立就过，
+     * 而"有排序控件"在时间线模式下也成立，等于永远绿。
+     */
+    const back = await ev(`(() => {
+      const panel = document.querySelector('[data-testid="timeline-panel"]');
+      return {
+        panelGone: !panel,
+        hasSortSelect: !!document.querySelector('[data-testid="sort"]'),
+        stillShowsSub: document.body.innerText.includes('TL-子文件夹书签'),
+      };
+    })()`);
+    check(
+      '再点一次能回到文件夹视图（时间线面板消失 + 排序控件回来）',
+      back.panelGone === true && back.hasSortSelect === true,
+      JSON.stringify(back),
+    );
+
+    await ev(`(async () => {
+      await chrome.bookmarks.remove(${JSON.stringify(seed.a)}).catch(() => {});
+      await chrome.bookmarks.removeTree(${JSON.stringify(seed.folderId)}).catch(() => {});
+      return true;
+    })()`);
+    await sleep(400);
+  }
+
   /* ══════════ 9.41 真·流式对话（本地假 AI 服务） ══════════ */
   console.log('\n[9.41] 流式对话与中断恢复');
   {

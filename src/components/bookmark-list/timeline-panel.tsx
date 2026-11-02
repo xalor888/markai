@@ -99,7 +99,10 @@ export function TimelinePanel({ className }: { className?: string }) {
   );
 
   return (
-    <div className={cn('animate-fade-in flex h-full min-h-0 min-w-0 flex-col bg-background', className)}>
+    <div
+      data-testid="timeline-panel"
+      className={cn('animate-fade-in flex h-full min-h-0 min-w-0 flex-col bg-background', className)}
+    >
       {/* 工具栏：入口说明 + 排序 + 过滤 */}
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-2.5">
         <Clock className="h-3.5 w-3.5 shrink-0 text-accent/70" />

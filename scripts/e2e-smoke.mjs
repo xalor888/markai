@@ -1716,6 +1716,69 @@ async function run() {
     );
     check('流结束后回到可输入状态（不是一直转圈）', doneState === true, JSON.stringify({ doneState }));
 
+    /*
+     * ── A2. 用户最初的抱怨：「我只是把标签页放后台罢了，切个标签页就没」 ──
+     *
+     * 实测（chrome.storage.onChanged 精确计时）：内容从「出现在 DOM」到「进入存储」
+     * 只要 **104ms**——不是代码注释里写的 800ms 节流。所以"切走就丢"在当前构建里
+     * **不复现**：内容几乎在出现的同时就落盘了，后台节流根本来不及吃掉它。
+     *
+     * 这里把这个真实保证钉住：流式内容必须及时落盘。真删掉落盘调用它会立刻转红。
+     */
+    mock.state.chunks = ['响应段落甲', '响应段落乙'];
+    mock.state.delayMs = 700;
+    mock.state.hang = true;
+    await sendMessage('测试落盘延迟');
+    const latency = await ev(`(async () => {
+      /*
+       * 关键词必须**只出现在模型回复里**：第一版用了「落盘延迟」，
+       * 而它也出现在用户消息中——结果测到的是用户消息的落盘（delta=1ms），
+       * 根本不是流式内容的落盘。
+       */
+      const KEY = '响应段落甲';
+      const domSeen = { at: 0 };
+      const storageSeen = { at: 0 };
+      const onChanged = (changes, area) => {
+        if (area !== 'local' || !changes['markai.ai'] || storageSeen.at) return;
+        if (JSON.stringify(changes['markai.ai'].newValue || '').includes(KEY)) storageSeen.at = performance.now();
+      };
+      chrome.storage.onChanged.addListener(onChanged);
+      for (let i = 0; i < 300; i++) {
+        if (document.body.innerText.includes(KEY)) { domSeen.at = performance.now(); break; }
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      for (let i = 0; i < 300; i++) {
+        if (storageSeen.at) break;
+        await new Promise((r) => setTimeout(r, 10));
+      }
+      chrome.storage.onChanged.removeListener(onChanged);
+      return { saw: domSeen.at > 0 && storageSeen.at > 0, delta: Math.round(storageSeen.at - domSeen.at) };
+    })()`);
+    check(
+      '流式内容及时落盘（DOM 出现后 2s 内进入存储；实测约 104ms）',
+      latency.saw === true && latency.delta >= 0 && latency.delta < 2000,
+      JSON.stringify(latency),
+    );
+
+    /*
+     * 收尾：这一轮的流是挂着的（hang=true），UI 会一直停在"正在回复"，
+     * 下一条消息根本发不出去。点「停止生成」让它回到可输入状态——
+     * 这也是用户在真实场景下的动作。
+     */
+    await ev(`[...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || '') === '停止生成')?.click()`);
+    await waitFor(
+      async () =>
+        await ev(`(() => {
+          const ta = document.querySelector('[data-testid="chat-input"]');
+          return ta && ta.getAttribute('placeholder') !== 'Agent 正在回复…';
+        })()`),
+      8000,
+    );
+    // 恢复流式设置，供下一段使用
+    mock.state.hang = false;
+    mock.state.chunks = ['第一段', '，第二段', '，第三段'];
+    mock.state.delayMs = 60;
+
     // ── B. 流到一半杀掉 service worker：已收到的内容必须留下 ──
     mock.state.chunks = ['这段会被', '打断'];
     mock.state.delayMs = 900;

@@ -681,3 +681,58 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     },
   },
 ];
+
+/**
+ * 给模型的「现在几点」上下文。
+ *
+ * 为什么必须有：工具回填的 `dateAdded` / `dateLastUsed` 是**原始毫秒时间戳**，
+ * 而系统提示词原先没有任何"今天是什么时候"的信息——模型只能拿自己的训练截止日
+ * 当"现在"。于是「找出超过 2 年没访问的书签」「上周收藏的」这类**明确的时间判断会算错**，
+ * 而且错得很自信。
+ *
+ * 这一句成本极低（几十 token），却是所有时间相关判断的前提。
+ */
+export function buildTimeContext(now: Date = new Date(), timeZone = resolveTimeZone()): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  // 用本地时间构造"人类可读"的那一行（模型读的是本地时间，不是 UTC）
+  let human = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  let isoDate = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+  let offsetHint = '';
+  try {
+    const parts = new Intl.DateTimeFormat('en-CA', {
+      timeZone,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: false,
+    }).formatToParts(now);
+    const get = (t: string) => parts.find((p) => p.type === t)?.value ?? '';
+    const y = get('year');
+    const mo = get('month');
+    const d = get('day');
+    const h = get('hour');
+    const mi = get('minute');
+    if (y && mo && d) {
+      isoDate = `${y}-${mo}-${d}`;
+      human = `${y}-${mo}-${d} ${h}:${mi}`;
+    }
+    const offsetMinutes = -now.getTimezoneOffset();
+    const sign = offsetMinutes >= 0 ? '+' : '-';
+    const oh = pad(Math.floor(Math.abs(offsetMinutes) / 60));
+    const om = pad(Math.abs(offsetMinutes) % 60);
+    offsetHint = `，UTC${sign}${oh}:${om}`;
+  } catch {
+    // 时区不可用时退回本地时间，功能不受影响
+  }
+  return `\n\n## 当前时间\n现在是 ${human}（${timeZone}${offsetHint}），今天是 ${isoDate}。\n工具返回的 \`dateAdded\` / \`dateLastUsed\` 是 Unix 毫秒时间戳。判断「多久以前」「是否超过 N 年」「最近/上周」时，一律以上面这个当前时间为基准换算，不要用你的训练数据里的日期。`;
+}
+
+function resolveTimeZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  } catch {
+    return 'UTC';
+  }
+}

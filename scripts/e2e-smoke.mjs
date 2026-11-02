@@ -1398,7 +1398,7 @@ async function run() {
      */
     const TARGET_URL = 'https://agent-loop.example/created-by-tool';
     const mock = await new Promise((resolve) => {
-      const state = { requests: 0 };
+      const state = { requests: 0, systemContent: '' };
       const server = createServer((req, res) => {
         if (!req.url || !req.url.includes('/chat/completions')) {
           res.writeHead(404).end();
@@ -1412,6 +1412,9 @@ async function run() {
           try {
             const parsed = JSON.parse(body);
             isFollowUp = (parsed.messages || []).some((m) => m.role === 'tool');
+            // 记录系统消息，用于验证"当前时间"真的被发给了模型
+            const sys = (parsed.messages || []).find((m) => m.role === 'system');
+            if (sys && !state.systemContent) state.systemContent = String(sys.content || '');
           } catch {
             /* 解析不了就当首轮 */
           }
@@ -1505,6 +1508,22 @@ async function run() {
 
     const turns = mock.state.requests;
     check('确实发生了两轮请求（工具结果被回填给模型）', turns >= 2, JSON.stringify({ turns }));
+
+    /*
+     * 系统提示必须把"今天"告诉模型。
+     * 工具回填的是原始毫秒时间戳，没有"现在"模型只能拿训练截止日当今天——
+     * 「超过 2 年没访问的书签」这类判断会算错，而且错得很自信。
+     */
+    const todayIso = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD
+    check(
+      '发给模型的系统消息里带当前日期（时间判断的前提）',
+      typeof mock.state.systemContent === 'string' && mock.state.systemContent.includes(todayIso),
+      JSON.stringify({
+        today: todayIso,
+        hasTimeSection: mock.state.systemContent.includes('当前时间'),
+        len: mock.state.systemContent.length,
+      }),
+    );
 
     // 收尾：删掉这条书签，避免影响后面的用例
     await ev(`(async () => {

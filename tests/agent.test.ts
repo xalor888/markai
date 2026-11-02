@@ -11759,6 +11759,41 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T123: 系统提示必须带"现在是什么时候" ══════════ */
+  console.log('\n[T123] 时间上下文');
+  {
+    /*
+     * 缺陷：工具回填的 `dateAdded` / `dateLastUsed` 是原始毫秒时间戳，
+     * 而系统提示词**没有任何"今天"的信息**——模型只能拿训练截止日当"现在"。
+     * 于是「找出超过 2 年没访问的书签」「上周收藏的」这类时间判断会算错，而且错得很自信。
+     */
+    const { buildTimeContext } = await import('../src/lib/ai/prompts');
+
+    ok('包含明确的"今天"日期与时刻', () => {
+      const t = buildTimeContext(new Date('2026-11-02T09:05:00+08:00'), 'Asia/Shanghai');
+      assert.ok(t.includes('2026-11-02'), `缺少日期：${t}`);
+      assert.ok(t.includes('今天是 2026-11-02'), `缺少"今天是"：${t}`);
+    });
+
+    ok('指明时间戳单位与换算基准（否则模型仍会猜）', () => {
+      const t = buildTimeContext(new Date('2026-11-02T09:05:00+08:00'), 'Asia/Shanghai');
+      assert.ok(t.includes('毫秒时间戳'), t);
+      assert.ok(t.includes('以'), t);
+      assert.ok(t.includes('不要用你的训练数据'), `应明确禁止用训练数据当今天：${t}`);
+    });
+
+    ok('跨时区也给出正确日期（不是硬编码 +08:00）', () => {
+      // 2026-11-02T23:30Z = 2026-11-02 15:30 in Los_Angeles
+      const t = buildTimeContext(new Date('2026-11-02T23:30:00Z'), 'America/Los_Angeles');
+      assert.ok(t.includes('2026-11-02'), `洛杉矶当地应是 11-02：${t}`);
+    });
+
+    ok('时区不可用时不会崩（退回本地时间）', () => {
+      const t = buildTimeContext(new Date('2026-11-02T09:05:00+08:00'), 'Not/AZone');
+      assert.ok(t.includes('当前时间'), t);
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

@@ -839,12 +839,16 @@ async function run() {
     });
 
     await ev(`(async () => {
+      // 每个 AI 段落独立起跑：清掉上一条对话，避免段落之间互相影响
+      await chrome.storage.local.remove('markai.ai');
       await chrome.storage.local.set({ 'markai.config': {
         providerId: 'deepseek', baseUrl: 'http://127.0.0.1:${mock.port}/v1',
         apiKey: 'mock-key', model: 'mock-model', temperature: 0.4, customHeaders: '',
       } });
       return true;
     })()`);
+    // 段落隔离：清掉上一条对话，避免段落之间互相影响
+    await ev(`chrome.storage.local.remove('markai.ai')`);
     await cdp.send('Page.reload', {}, sessionId);
     await sleep(900);
     await waitFor(async () => await ev(`!!document.querySelector('[data-testid="chat-input"]')`), 6000);
@@ -970,6 +974,8 @@ async function run() {
       } });
       return true;
     })()`);
+    // 段落隔离：清掉上一条对话，避免段落之间互相影响
+    await ev(`chrome.storage.local.remove('markai.ai')`);
     await cdp.send('Page.reload', {}, sessionId);
     await sleep(900);
     await waitFor(async () => await ev(`!!document.querySelector('[data-testid="chat-input"]')`), 6000);
@@ -1068,6 +1074,158 @@ async function run() {
       return true;
     })()`);
     server.srv.close();
+  }
+
+  /* ══════════ 9.46 删除确认流（唯一不可逆的操作） ══════════ */
+  console.log('\n[9.46] 删除确认：AI 只能提议，用户点了才真删');
+  {
+    /*
+     * 删除是整个产品里**唯一不可逆**的动作，也是安全设计的核心：
+     * AI 只能提交提议 → 用户显式点击 → background 才 removeTree。
+     *
+     * 这条链路以前只有单测。这里用假 AI 服务让模型真的发出 propose_deletions，
+     * 在浏览器里验证「没点之前绝不能删」和「点了之后真的删掉」。
+     */
+    const VICTIM_URL = 'https://delete-victim.example/page';
+    let victimId = null;
+    await ev(`(async () => {
+      const bar = (await chrome.bookmarks.getTree())[0].children.find((c) => c.id === '1');
+      const n = await chrome.bookmarks.create({ parentId: bar.id, title: 'E2E 待删书签', url: ${JSON.stringify(VICTIM_URL)} });
+      window.__victimId = n.id;
+      return true;
+    })()`);
+    victimId = await ev(`window.__victimId`);
+
+    const mock = await new Promise((resolve) => {
+      const srv = createServer((req, res) => {
+        if (!req.url || !req.url.includes('/chat/completions')) {
+          res.writeHead(404).end();
+          return;
+        }
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', async () => {
+          let isFollowUp = false;
+          try {
+            isFollowUp = (JSON.parse(body).messages || []).some((m) => m.role === 'tool');
+          } catch {
+            /* 当首轮 */
+          }
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache',
+            Connection: 'keep-alive',
+          });
+          const send = (o) => res.write(`data: ${JSON.stringify(o)}\n\n`);
+          if (!isFollowUp) {
+            send({
+              choices: [
+                {
+                  delta: {
+                    role: 'assistant',
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'call_del_1',
+                        type: 'function',
+                        function: {
+                          name: 'propose_deletions',
+                          arguments: JSON.stringify({
+                            items: [{ bookmarkId: victimId, reason: 'E2E 测试：这条是测试数据' }],
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            });
+            send({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] });
+          } else {
+            for (const c of ['已经', '列成待删清单了。']) send({ choices: [{ delta: { content: c } }] });
+            send({ choices: [{ delta: {}, finish_reason: 'stop' }] });
+          }
+          res.write('data: [DONE]\n\n');
+          res.end();
+        });
+      });
+      srv.listen(0, '127.0.0.1', () => resolve({ srv, port: srv.address().port }));
+    });
+
+    await ev(`(async () => {
+      const cfg = (await chrome.storage.local.get('markai.config'))['markai.config'] || {};
+      await chrome.storage.local.set({ 'markai.config': {
+        ...cfg, providerId: 'deepseek', baseUrl: 'http://127.0.0.1:${mock.port}/v1',
+        apiKey: 'mock-key', model: 'mock-model', temperature: 0.4, customHeaders: '',
+        deleteMode: 'confirm',
+      } });
+      return true;
+    })()`);
+    // 段落隔离：清掉上一条对话，避免段落之间互相影响
+    await ev(`chrome.storage.local.remove('markai.ai')`);
+    await cdp.send('Page.reload', {}, sessionId);
+    await sleep(900);
+    await waitFor(async () => await ev(`!!document.querySelector('[data-testid="chat-input"]')`), 6000);
+
+    await ev(`(() => {
+      const ta = document.querySelector('[data-testid="chat-input"]');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(ta, '这条不要了，删掉');
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    await sleep(120);
+    await ev(`(() => {
+      [...document.querySelectorAll('button')].find((x) => x.getAttribute('aria-label') === '发送')?.click();
+      return true;
+    })()`);
+
+    const proposed = await waitFor(
+      async () => await ev(`document.body.innerText.includes('E2E 待删书签')`),
+      20000,
+    );
+    check('模型提出删除建议后，界面上出现待删条目', proposed === true, JSON.stringify({ proposed }));
+
+    /*
+     * 先静置一下再断言"没被删"。
+     * 否则测的是"删得够不够快"——错误的实现在时序上可能还没落地就被放过了。
+     */
+    await sleep(1000);
+    const stillThere = await ev(`(async () => {
+      const all = await chrome.bookmarks.search(${JSON.stringify(VICTIM_URL)});
+      const byId = await chrome.bookmarks.get(${JSON.stringify(victimId)}).catch(() => []);
+      return { byId: byId.length, byUrl: all.length, victimId: ${JSON.stringify(victimId)} };
+    })()`);
+    check(
+      '**没点确认之前，书签一条都不能删**（提议不等于执行）',
+      stillThere.byId === 1 && stillThere.byUrl === 1,
+      JSON.stringify(stillThere),
+    );
+
+    // 用户显式点击「删除 <标题>」
+    const clicked = await ev(`(() => {
+      const b = [...document.querySelectorAll('button')].find(
+        (x) => (x.getAttribute('aria-label') || '') === '删除 E2E 待删书签',
+      );
+      if (!b) return false;
+      b.click();
+      return true;
+    })()`);
+    check('待删条目上有可点的删除按钮', clicked === true, JSON.stringify({ clicked }));
+
+    const gone = await waitFor(
+      async () =>
+        await ev(`(async () => (await chrome.bookmarks.get(${JSON.stringify(victimId)}).catch(() => [])).length === 0)()`),
+      10000,
+    );
+    check('用户点了之后，书签真的被删掉', gone === true, JSON.stringify({ gone }));
+
+    await ev(`(async () => {
+      const cfg = (await chrome.storage.local.get('markai.config'))['markai.config'] || {};
+      await chrome.storage.local.set({ 'markai.config': { ...cfg, baseUrl: '', apiKey: '', model: '' } });
+      return true;
+    })()`);
+    mock.srv.close();
   }
 
   /* ══════════ 9.43 弹出窗（此前零覆盖） ══════════ */

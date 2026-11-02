@@ -956,6 +956,14 @@ export const useAIStore = create<AIState>((set, get) => ({
     let mergedDeletions = s.pendingDeletions;
     let savedDeletedIds: string[] = [];
     let latestClearedIds: string[] = [];
+    /**
+     * 写盘前的读取是否全部成功。
+     *
+     * 只要有一次没读到，我们就**不知道磁盘上有什么**，此时拿内存里的会话去整对象覆盖，
+     * 等于把没读到的部分直接删掉——实测：读失败时磁盘从 `[旧会话]` 变成 `[新会话]`，
+     * 整份聊天历史消失。所以读失败就不写，宁可这次不保存。
+     */
+    let readsOk = true;
     try {
       const data = await chrome.storage.local.get(AI_STORAGE_KEY);
       const saved = (data[AI_STORAGE_KEY] ?? {}) as StoredAI;
@@ -1041,7 +1049,8 @@ export const useAIStore = create<AIState>((set, get) => ({
         set({ conversations, activeId, pendingDeletions: mergedDeletions, messages: activeMsgs });
       }
     } catch {
-      // 读取失败时按本地数据落盘
+      // 读不到就不能盲写：见 readsOk 的说明
+      readsOk = false;
     }
     // 标记本次写入来自本窗口：storage.onChanged 同步监听据此跳过，避免循环刷新
     crossWindowWrite.current = true;
@@ -1066,12 +1075,27 @@ export const useAIStore = create<AIState>((set, get) => ({
           if (!have.has(rc.id)) conversations = [...conversations, rc];
         }
       } catch {
-        // 重读失败不阻塞落盘
+        // 重读失败同样不能盲写
+        readsOk = false;
       }
       // 写盘 activeId 校验：墓碑过滤后指向不存在的会话时回退（load 虽能自愈，存储不留不一致）
       const writeActiveId = conversations.some((c) => c.id === s.activeId)
         ? s.activeId
         : (conversations[0]?.id ?? null);
+      if (!readsOk) {
+        /*
+         * 读失败 → 不写。
+         * 这条路径存的是**整份会话列表**，整对象覆盖，写下去就是不可逆的删除。
+         * 用户的聊天历史比"这次没保存成功"重要得多。
+         */
+        set({
+          persistError: {
+            message: '读取本地存储失败，本次**没有保存**对话（避免用不完整的数据覆盖历史）。下次保存成功后会补上。',
+            at: Date.now(),
+          },
+        });
+        return;
+      }
       try {
         await chrome.storage.local.set({
           [AI_STORAGE_KEY]: {

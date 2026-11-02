@@ -11411,6 +11411,89 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T118: 读失败时的写盘安全网 ══════════ */
+  console.log('\n[T118] 读失败时写盘');
+  {
+    /*
+     * 背景：`load()` 的 catch 把内存会话清空；`_persist()` 落盘前会重读磁盘并合并，
+     * 所以"加载失败 → 写盘"通常不会丢历史（有一条专门的兜底）。
+     *
+     * 但兜底本身也依赖读磁盘。若**写盘前的重读也失败**，代码注释写着
+     * "重读失败不阻塞落盘"——那就可能拿着空内存去覆盖整份历史。
+     * 这条用例就来钉这件事。
+     */
+    const { useAIStore, AI_STORAGE_KEY } = await import('../src/stores/aiStore');
+    const reset = () => {
+      storageMap.clear();
+      useAIStore.setState({
+        messages: [], conversations: [], activeId: null, deletedIds: [], clearedIds: [],
+        pendingDeletions: [], streaming: false, streamingMessageId: null, persistError: null,
+      });
+    };
+
+    await okA('写盘前重读失败时，不能拿空内存覆盖掉磁盘上的历史', async () => {
+      reset();
+      const c1 = {
+        id: 'conv-keep-1', title: '旧会话一', createdAt: 1, updatedAt: 1,
+        messages: [{ id: 'm1', role: 'user', blocks: [{ kind: 'text', text: '别丢了我' }], createdAt: 1 }],
+      };
+      storageMap.set(AI_STORAGE_KEY, {
+        conversations: [c1], activeId: c1.id, pendingDeletions: [], deletedIds: [], clearedIds: [],
+      });
+
+      // 模拟：加载失败导致内存为空，紧接着用户发了一条消息（新会话），再落盘——
+      // 而这次落盘期间的所有 storage 读取都失败（读坏了，但写可能还能成功）
+      const origGet = chrome.storage.local.get;
+      const origSet = chrome.storage.local.set;
+      const fresh = {
+        id: 'conv-new', title: '新会话', createdAt: 9, updatedAt: 9,
+        messages: [{ id: 'm2', role: 'user' as const, blocks: [{ kind: 'text' as const, text: '新' }], createdAt: 9 }],
+      };
+      useAIStore.setState({ conversations: [fresh], messages: fresh.messages, activeId: fresh.id });
+
+      chrome.storage.local.get = (async () => {
+        throw new Error('模拟：读取失败');
+      }) as typeof chrome.storage.local.get;
+      try {
+        await useAIStore.getState()._persist();
+      } finally {
+        chrome.storage.local.get = origGet;
+        chrome.storage.local.set = origSet;
+      }
+
+      const stored = storageMap.get(AI_STORAGE_KEY) as { conversations?: { id: string }[] } | undefined;
+      const ids = (stored?.conversations ?? []).map((c) => c.id);
+      assert.ok(
+        ids.includes('conv-keep-1'),
+        `读失败时把磁盘上的历史覆盖掉了（现只剩 ${JSON.stringify(ids)}）`,
+      );
+      /*
+       * 同时要求给出可见提示。
+       * 只有"没写"这一半不够：如果哪天 _persist 被整个删掉，历史同样"还在"，
+       * 但用户会在毫不知情的情况下永远丢保存。这条断言把"静默什么都不做"也排除了。
+       */
+      const err = useAIStore.getState().persistError;
+      assert.ok(err, '读失败而没保存时必须给出提示，不能静默');
+      assert.ok(err!.message.includes('没有保存'), `提示要说清没保存：${err!.message}`);
+      reset();
+    });
+
+    await okA('正常写盘不会重复堆叠同一会话', async () => {
+      reset();
+      const c1 = { id: 'conv-dup', title: '唯一', createdAt: 1, updatedAt: 1, messages: [] };
+      storageMap.set(AI_STORAGE_KEY, {
+        conversations: [c1], activeId: c1.id, pendingDeletions: [], deletedIds: [], clearedIds: [],
+      });
+      await useAIStore.getState().load();
+      await useAIStore.getState()._persist();
+      await useAIStore.getState()._persist();
+      const stored = storageMap.get(AI_STORAGE_KEY) as { conversations?: { id: string }[] } | undefined;
+      const same = (stored?.conversations ?? []).filter((c) => c.id === 'conv-dup');
+      assert.equal(same.length, 1, `同一会话被写成了多份：${JSON.stringify(stored?.conversations?.map((c) => c.id))}`);
+      reset();
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

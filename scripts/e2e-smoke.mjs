@@ -309,29 +309,71 @@ async function run() {
   /* ══════════ 3. 搜索（唯一入口） ══════════ */
   console.log('\n[3] 统一搜索');
   {
-    const r = await ev(`(async () => {
-      const input = document.querySelector('[data-testid="search"]');
-      if (!input) return { ok: false, reason: 'no-search' };
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(input, 'Alpha');
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      await new Promise(r => setTimeout(r, 600));
-      // 树也应当跟着过滤：节点数变化即可证明共用一个搜索词
-      return {
-        ok: true,
-        rows: document.querySelectorAll('[data-testid="row"]').length,
-        treeNodes: document.querySelectorAll('[data-testid="tree-node"]').length,
-      };
-    })()`);
-    check('搜索框能过滤出结果', r.ok && r.rows >= 1, JSON.stringify(r));
+    /*
+     * 搜索是最高频的交互，但这条用例原来只断言"有结果"（rows >= 1）——
+     * 哪怕过滤完全失效、列出全部书签，它也一样绿。
+     * 改成前后对比：过滤后行数必须**变少**，且每一行都含关键词。
+     */
+    const typeSearch = async (q) => {
+      await ev(`(() => {
+        const input = document.querySelector('[data-testid="search"]');
+        if (!input) return false;
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+        setter.call(input, ${JSON.stringify(q)});
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()`);
+      await sleep(600);
+    };
+    /*
+     * 取标题用 `title` 属性而不是 innerText：搜索结果会把匹配词拆成多个 span，
+     * innerText 就不再有换行，split 出来的第一"行"会是碎块（实测拿到 "A"/"S"/"S"）。
+     */
+    const rowTitles = async () =>
+      ev(`[...document.querySelectorAll('[data-testid="row"]')].map((r) => {
+        const t = r.getAttribute('title') || '';
+        return t.split(String.fromCharCode(10))[0];
+      })`);
+
+    /*
+     * 先补几条不同标题的书签：这一段跑得早，列表里可能只有一行，
+     * 行数没法"变少"，过滤就验不出东西（实测 allCount=1）。
+     */
     await ev(`(async () => {
-      const input = document.querySelector('[data-testid="search"]');
-      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-      setter.call(input, '');
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      await new Promise(r => setTimeout(r, 400));
+      const bar = (await chrome.bookmarks.getTree())[0].children.find((c) => c.id === '1');
+      const seeds = [
+        ['Alpha-一', 'https://search.example/alpha-1'],
+        ['Beta-二', 'https://search.example/beta-2'],
+        ['Gamma-三', 'https://search.example/gamma-3'],
+        ['Alpha-四', 'https://search.example/alpha-4'],
+      ];
+      for (const [title, url] of seeds) {
+        const hit = (await chrome.bookmarks.search(url))[0];
+        if (!hit) await chrome.bookmarks.create({ parentId: bar.id, title, url });
+      }
       return true;
     })()`);
+    await sleep(700);
+
+    const allCount = (await rowTitles()).length;
+    await typeSearch('Alpha');
+    const filtered = await rowTitles();
+    check(
+      '搜索真的过滤了（行数变少，且每一行都含关键词）',
+      allCount > filtered.length &&
+        filtered.length >= 1 &&
+        filtered.every((t) => /alpha/i.test(t)),
+      JSON.stringify({ allCount, filtered }),
+    );
+
+    // 清空后必须恢复全量
+    await typeSearch('');
+    const restored = await rowTitles();
+    check(
+      '清空搜索后恢复全量列表',
+      restored.length === allCount,
+      JSON.stringify({ allCount, restored: restored.length }),
+    );
   }
 
   /* ══════════ 4. 排序与时间线 ══════════ */

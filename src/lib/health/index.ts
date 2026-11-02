@@ -112,10 +112,14 @@ export async function readSnapshot(): Promise<HealthSnapshot> {
     // 与 background 走同一个 storage key 与同一套归一化（resolveConfig），
     // 否则诊断看到的配置和运行时实际用的不是同一份，结论就是错的
     const raw = await chrome.storage.local.get('markai.config');
-    const c = resolveConfig(raw['markai.config'] as Partial<AIConfig> | undefined);
+    const saved = (raw['markai.config'] ?? {}) as Partial<AIConfig>;
+    const c = resolveConfig(saved);
     config = {
       providerId: c.providerId ?? null,
       baseUrl: c.baseUrl ?? null,
+      // 原始输入单独留一份：诊断要告诉用户"你输的不像地址"，
+      // 而归一化会把一切看起来不像地址的值都修成合法地址（见 types.ts 的说明）
+      baseUrlRaw: typeof saved.baseUrl === 'string' ? saved.baseUrl : null,
       apiKey: c.apiKey ?? null,
       model: c.model ?? null,
       customHeaders: c.customHeaders ?? null,
@@ -140,7 +144,25 @@ export async function readSnapshot(): Promise<HealthSnapshot> {
     .catch(() => [] as string[]);
 
   const store = await chrome.storage.local.get(['markai.undo', 'markai.organize.log']).catch(() => ({}) as Record<string, unknown>);
-  const undoPoints = (store as Record<string, unknown>)['markai.undo'];
+  /*
+   * 撤销记录取 `.points`，不是整个存储对象。
+   *
+   * `markai.undo` 的形状是 `{ points, notice?, terminalRunIds? }`
+   * （见 undo/recorder.ts 的 writeUndoPoints）。原来这里把**整个对象**塞进快照，
+   * 而 diagnose 用 `asArray(snapshot.undoPoints)` 只认数组——对象会被当成空数组，
+   * 于是 `undo.corrupt` / `undo.overflow` 两条诊断**在真实健康检查里永远不触发**，
+   * 对应的「清理损坏的撤销点」「保留最近 N 个」两个修复按钮用户根本看不到。
+   *
+   * 单测之所以一直是绿的：它们直接调 `diagnose()` 并传了正确形状的数组，
+   * 从没走过 `readSnapshot` 这条真实路径。
+   *
+   * 整理记录那边是裸数组（organize-log.ts 直接 set 数组），所以保持原样。
+   */
+  const undoStore = (store as Record<string, unknown>)['markai.undo'];
+  const undoPoints =
+    undoStore && typeof undoStore === 'object' && Array.isArray((undoStore as { points?: unknown }).points)
+      ? (undoStore as { points: unknown }).points
+      : undoStore;
   const logEntries = (store as Record<string, unknown>)['markai.organize.log'];
 
   let bookmarks: HealthSnapshot['bookmarks'] = null;

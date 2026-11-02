@@ -106,13 +106,22 @@ export function diagnose(snapshot: HealthSnapshot): HealthReport {
       });
     }
 
-    if (cfg.baseUrl?.trim() && !isHttpUrl(cfg.baseUrl.trim())) {
+    /*
+     * 判据看**用户原始输入**（baseUrlRaw），不是归一化后的 baseUrl。
+     *
+     * 曾经这里看的是归一化后的值，于是这条判形同虚设：`normalizeBaseUrl` 会把
+     * 任何不带协议的值补上 https://，归一化之后 `new URL()` 一律通过——
+     * 用户输入什么都不像地址的值都诊断不出来，「修正为合法地址」那个按钮
+     * 也就成了永远看不到的死代码（0.2.101 修）。
+     */
+    const rawBaseUrl = (cfg.baseUrlRaw ?? cfg.baseUrl ?? '').trim();
+    if (rawBaseUrl && !isHttpUrl(rawBaseUrl)) {
       issues.push({
         id: 'config.invalid-baseurl',
         area: 'config',
         severity: 'high',
         title: 'Base URL 不像一个地址',
-        detail: `当前值：${cfg.baseUrl.trim().slice(0, 80)}`,
+        detail: `你输入的：${rawBaseUrl.slice(0, 80)}（已自动按 https:// 处理）`,
         fix: { action: 'config.normalize-baseurl', label: '修正为合法地址' },
       });
     }

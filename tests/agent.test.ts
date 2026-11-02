@@ -12566,3 +12566,79 @@ void okA('契约守卫对"说明里有、代码里没有"敏感（证伪）', as
   );
   assert.equal(gaps2.length, 2, JSON.stringify(gaps2));
 });
+
+/* ── 健康检查契约：点了「修复」，那个问题必须真的消失 ─────────────────
+ *
+ * 这个坑踩过两次：
+ *   0.2.68 「填入默认值」在只缺 API Key 时也被提供，点了修不好；
+ *   0.2.69 log.mark-orphan 写了字段，但判据不认，问题原样还在、健康分不动。
+ * 用户看到的是「点了没反应」。
+ *
+ * 所以这里把契约钉住：**每个带 fix 的诊断，跑完对应修复后不得再出现。**
+ */
+void okA('每个可修复的诊断，跑完修复后都不再出现（契约）', async () => {
+  const { runFix } = await import('../src/lib/health/fixes');
+  const { runHealthCheck } = await import('../src/lib/health');
+
+  const idsOf = (report: { issues: { id: string }[] }) => new Set(report.issues.map((i) => i.id));
+
+  /* ── config.normalize-baseurl ── */
+  storageMap.set('markai.config', {
+    // 注意：resolveConfig 会 normalizeBaseUrl（自动补 https://），
+    // 所以「api.deepseek.com」这种会被修成合法地址、根本不触发诊断。
+    // 要触发 invalid-baseurl，得用归一化之后 new URL() 仍然抛错的值。
+    providerId: 'deepseek', baseUrl: 'https://', model: 'm', apiKey: 'k',
+  });
+  let ids = idsOf(await runHealthCheck());
+  assert.ok(ids.has('config.invalid-baseurl'), `前置：应报 invalid-baseurl，实际 ${[...ids]}`);
+  await runFix('config.normalize-baseurl');
+  ids = idsOf(await runHealthCheck());
+  assert.ok(!ids.has('config.invalid-baseurl'), `修完仍报 invalid-baseurl：${[...ids]}`);
+
+  /* ── config.drop-bad-headers ── */
+  storageMap.set('markai.config', {
+    providerId: 'deepseek', baseUrl: 'https://api.deepseek.com', model: 'm', apiKey: 'k',
+    customHeaders: 'X-Ok: 1\n坏行没有冒号\nX-Two: 2',
+  });
+  ids = idsOf(await runHealthCheck());
+  assert.ok(ids.has('config.bad-headers'), `前置：应报 bad-headers，实际 ${[...ids]}`);
+  await runFix('config.drop-bad-headers');
+  ids = idsOf(await runHealthCheck());
+  assert.ok(!ids.has('config.bad-headers'), `修完仍报 bad-headers：${[...ids]}`);
+
+  /* ── undo.drop-corrupt ── */
+  storageMap.set('markai.undo', { points: [{ 不是: '点' }, null, '垃圾'] });
+  ids = idsOf(await runHealthCheck());
+  assert.ok(ids.has('undo.corrupt'), `前置：应报 undo.corrupt，实际 ${[...ids]}`);
+  await runFix('undo.drop-corrupt');
+  ids = idsOf(await runHealthCheck());
+  assert.ok(!ids.has('undo.corrupt'), `修完仍报 undo.corrupt：${[...ids]}`);
+
+  /* ── log.mark-orphan ── */
+  storageMap.set('markai.undo', { points: [] });
+  // 整理记录是**裸数组**（organize-log.ts 直接 set 数组），不是 { entries: [...] }
+  storageMap.set('markai.organize.log', [
+    { id: 'e1', runId: 'run-gone', at: Date.now(), title: 'x.com', moved: 1, created: 0 },
+  ]);
+  ids = idsOf(await runHealthCheck());
+  assert.ok(ids.has('log.orphan'), `前置：应报 log.orphan，实际 ${[...ids]}`);
+  await runFix('log.mark-orphan');
+  ids = idsOf(await runHealthCheck());
+  assert.ok(!ids.has('log.orphan'), `修完仍报 log.orphan：${[...ids]}`);
+
+  /* ── log.trim-limit（溢出） ── */
+  const many = Array.from({ length: 250 }, (_, i) => ({
+    id: `e${i}`, runId: `run-${i}`, at: Date.now() - i * 1000, moved: 1, created: 0, domains: ['x.com'],
+  }));
+  storageMap.set('markai.undo', { points: [] });
+  storageMap.set('markai.organize.log', many);
+  ids = idsOf(await runHealthCheck());
+  assert.ok(ids.has('log.overflow'), `前置：应报 log.overflow，实际 ${[...ids]}`);
+  await runFix('log.trim-limit');
+  ids = idsOf(await runHealthCheck());
+  assert.ok(!ids.has('log.overflow'), `修完仍报 log.overflow：${[...ids]}`);
+
+  storageMap.delete('markai.config');
+  storageMap.delete('markai.undo');
+  storageMap.delete('markai.organize.log');
+});

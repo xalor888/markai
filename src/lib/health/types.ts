@@ -62,6 +62,16 @@ export interface HealthSnapshot {
   config: {
     providerId?: string | null;
     baseUrl?: string | null;
+    /**
+     * 用户**原始输入**的 Base URL（未归一化）。
+     *
+     * 必须有这个字段：`readSnapshot` 为了"诊断看到的配置和运行时实际用的是同一份"
+     * 会走 `resolveConfig`，而它会 `normalizeBaseUrl`（自动补 https://、去尾斜杠）。
+     * 于是 `config.invalid-baseurl` 这条判据**永远不可能触发**——
+     * 用户输入什么都不像地址的值，归一化之后 `new URL()` 全都通过。
+     * 那个「修正为合法地址」的修复按钮因此是用户永远看不到的死代码。
+     */
+    baseUrlRaw?: string | null;
     apiKey?: string | null;
     model?: string | null;
     customHeaders?: string | null;

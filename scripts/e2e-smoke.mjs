@@ -1704,6 +1704,20 @@ async function run() {
         len: mock.state.systemContent.length,
       }),
     );
+    /*
+     * 能力边界：工具只读不产文件。若提示词里没有这句，
+     * 用户说「导出书签」时模型很可能回一句"已为你导出"——他去磁盘上找，什么都没有。
+     */
+    check(
+      '系统消息里写明"产不出文件、不要声称导出"，并把用户指到书签导出入口',
+      typeof mock.state.systemContent === 'string' &&
+        /产不出文件|不会生成任何文件/.test(mock.state.systemContent) &&
+        mock.state.systemContent.includes('书签导出'),
+      JSON.stringify({
+        saysNoFile: /产不出文件|不会生成任何文件/.test(mock.state.systemContent),
+        pointsToExport: mock.state.systemContent.includes('书签导出'),
+      }),
+    );
 
     // 收尾：删掉这条书签，避免影响后面的用例
     await ev(`(async () => {

@@ -12124,6 +12124,36 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T128: 提示词必须说清"我产不出文件" ══════════ */
+  console.log('\n[T128] 能力边界写进提示词');
+  {
+    /*
+     * 缺陷：所有工具都只把数据**读给模型分析**，不在磁盘上产文件。
+     * 但用户说「导出我的书签」时，模型没有任何依据去说"我不能"——
+     * 它很可能顺口回一句"已为你导出"，用户去磁盘上找，什么都没有。
+     *
+     * 现在 UI 里有了「设置 → 数据管理 → 书签导出」，提示词要把用户指到那里。
+     */
+    const { SYSTEM_PROMPT } = await import('../src/lib/ai/prompts');
+
+    ok('明确说明产不出文件、不要声称导出', () => {
+      assert.ok(/产不出文件|不会生成任何文件/.test(SYSTEM_PROMPT), SYSTEM_PROMPT.slice(-400));
+      assert.ok(/不要.*声称|已为你导出/.test(SYSTEM_PROMPT), '要禁止"已为你导出"这种说法');
+    });
+
+    ok('把用户指到真实存在的入口', () => {
+      assert.ok(SYSTEM_PROMPT.includes('书签导出'), '应提到书签导出');
+      assert.ok(SYSTEM_PROMPT.includes('书签 HTML'), '应给出可选的格式');
+      assert.ok(SYSTEM_PROMPT.includes('JSON'), '应提到 JSON');
+    });
+
+    ok('没有把工具描述说成"导出文件"（口径一致）', () => {
+      assert.ok(SYSTEM_PROMPT.includes('export_bookmarks'), '仍应保留 export_bookmarks 的用法说明');
+      assert.equal(/export_bookmarks[^。]{0,12}文件/.test(SYSTEM_PROMPT), false,
+        'export_bookmarks 是"取清单"，不能被描述成产文件');
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

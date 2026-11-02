@@ -12969,6 +12969,84 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     assert.equal((await mockBookmarks.getChildren(restoredFolder.id)).length, 3, '3 个子书签应被还原');
   });
 
+  /*
+   * `stats` 工具的每个字段口径都要和名字一致。
+   *
+   * 「从未打开且添加超过两年」这个字段原来叫「超过两年未访问」——**名不副实**：
+   * 判据是 dateLastUsed<=0 && 添加超两年，而"三年前打开过一次"的书签
+   * dateLastUsed 有值，根本不算。AI 会把错口径告诉用户
+   * （"你有 800 条两年没访问"，其实数的是"从未打开且够旧"）。
+   *
+   * 这些字段此前一条断言都没有（只有书签总数/文件夹总数被测过）。
+   */
+  await okA('stats 的每个字段都按名字的口径计数', async () => {
+    const { executeTool } = await import('../src/lib/ai/tools');
+
+    const now = Date.now();
+    const THREE_YEARS = 3 * 365 * 86_400_000;
+    const FOLDER = '1'; // 书签栏
+
+    /*
+     * 必须直接插 store：`mockBookmarks.create` 不接受 dateAdded/dateLastUsed，
+     * 而这两个字段正是本用例的判据。
+     *
+     * store 是跨用例累积的模块级数组，别处留下的旧书签也满足「从未打开且够旧」，
+     * 所以不能断言绝对值——**先取基线，再造数据，再取一次**，断言增量。
+     */
+    type StatsJson = {
+      [k: string]: unknown;
+      根目录分布: { root: string; bookmarks: number; folders: number }[];
+    };
+    const runStats = async (): Promise<StatsJson> =>
+      JSON.parse((await executeTool('stats', '{}')).result) as StatsJson;
+
+    const base = await runStats();
+
+    const mk = (title: string, url: string | undefined, dateAdded: number, dateLastUsed?: number): FNode => {
+      const n: FNode = { id: String(nextId++), parentId: FOLDER, title, dateAdded };
+      if (url) n.url = url;
+      if (dateLastUsed !== undefined) n.dateLastUsed = dateLastUsed;
+      store.push(n);
+      return n;
+    };
+    // A：从未打开、三年前添加 → **应**算
+    const a = mk('st-a', 'https://st.test/a', now - THREE_YEARS, 0);
+    // B：三年前打开过、四年前添加 → 按字面「两年未访问」该算，但这个判据不算
+    const b = mk('st-b', 'https://st.test/b', now - 4 * THREE_YEARS, now - THREE_YEARS);
+    // C：从未打开、一个月前添加 → 不够旧，不算
+    mk('st-c', 'https://st.test/c', now - 30 * 86_400_000, 0);
+    // D：空文件夹
+    const emptyF = mk('st-empty', undefined, now);
+
+    assert.ok(nodeById(a.id) && nodeById(b.id), '前置：两条书签都应存在');
+    assert.ok(nodeById(emptyF.id), '前置：空文件夹应存在');
+
+    const after = await runStats();
+
+    // 字段名必须如实描述判据，不能叫「超过两年未访问」
+    assert.ok(
+      '从未打开且添加超过两年' in after,
+      `字段名必须说清判据是「从未打开」，实际键：${JSON.stringify(Object.keys(after))}`,
+    );
+    assert.ok(!('超过两年未访问' in after), '不能再留名不副实的旧字段名');
+
+    // B 有 dateLastUsed，按判据不算——这正说明名字不能叫「两年未访问」
+    const staleAfter = Number(after['从未打开且添加超过两年']);
+    const staleBase = Number(base['从未打开且添加超过两年']);
+    const staleDelta = staleAfter - staleBase;
+    assert.equal(staleDelta, 1, `只该多算 A 一条（B 打开过、C 不够旧），实际增量 ${staleDelta}`);
+
+    const emptyDelta = Number(after['空文件夹数']) - Number(base['空文件夹数']);
+    assert.equal(emptyDelta, 1, `只该多一个空文件夹（st-empty），实际增量 ${emptyDelta}`);
+
+    // 根目录分布要覆盖书签栏，且书签数随构造增长
+    const bar = after['根目录分布'].find((r) => r.root === '书签栏');
+    const barBase = base['根目录分布'].find((r) => r.root === '书签栏');
+    assert.ok(bar, `分布里应有「书签栏」，实际 ${JSON.stringify(after['根目录分布'])}`);
+    assert.equal(bar.bookmarks - (barBase?.bookmarks ?? 0), 3, `书签栏下应多 a/b/c 三条，实际 ${bar.bookmarks - (barBase?.bookmarks ?? 0)}`);
+    assert.equal(bar.folders - (barBase?.folders ?? 0), 1, `书签栏下应多一个文件夹，实际 ${bar.folders - (barBase?.folders ?? 0)}`);
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

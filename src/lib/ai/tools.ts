@@ -1010,7 +1010,17 @@ async function stats(args: unknown): Promise<ToolOutput> {
       bookmarkCount++;
       const lastUsed = node.dateLastUsed ?? 0;
       const added = node.dateAdded ?? 0;
-      // 无使用记录且添加超过 2 年 → 视为可能长期未访问
+      /*
+       * 判据是「**从未打开**且添加超过 2 年」——不是「两年内没打开过」。
+       *
+       * 区别很实际：Chrome 的 dateLastUsed 只在书签被打开过时才写，
+       * 导入的书签、从不同步的设备来的书签往往是 0。而"三年前打开过一次"
+       * 的书签 dateLastUsed 有值，这个判据**不**会算它。
+       *
+       * 字段名原来叫「超过两年未访问」，名不副实——AI 会把错口径告诉用户
+       * （"你有 800 条两年没访问"其实数的是"从未打开且够旧"）。
+       * 已改成如实描述判据的名字。
+       */
       if (lastUsed <= 0 && added > 0 && now - added > TWO_YEARS) unusedTwoYears++;
       return;
     }
@@ -1035,7 +1045,7 @@ async function stats(args: unknown): Promise<ToolOutput> {
       书签总数: bookmarkCount,
       文件夹总数: folderCount,
       空文件夹数: emptyFolders,
-      超过两年未访问: unusedTwoYears,
+      从未打开且添加超过两年: unusedTwoYears,
       根目录分布: perRoot,
     }),
   };

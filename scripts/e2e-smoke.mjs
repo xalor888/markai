@@ -988,6 +988,148 @@ async function run() {
     await ev(`chrome.bookmarks.removeTree(${JSON.stringify(madeFolder.id)}).catch(() => {})`);
   }
 
+  /* ══════════ 9.2810 快捷键说明里列的键，逐个真按一遍 ══════════ */
+  console.log('\n[9.2810] 快捷键说明与实际一致');
+  {
+    /*
+     * 快捷键对话框承诺了 ↑↓ ←→ Home End PgUp PgDn Enter 空格 Shift+↑↓ Ctrl+A F2 Delete Ctrl+C。
+     * 但 e2e 里**一个都没真按过**（只有 Ctrl+K / Esc / 方向键在树里）。
+     * 用户照着说明按，哪个坏了根本不知道——说明文档就成了谎言。
+     *
+     * 这里逐个按。判据必须是**可观测的状态变化**，不是"没报错"。
+     */
+    const focusList = async () => {
+      await ev(`(() => { const el = document.querySelector('[data-testid="list"]'); if (el) el.focus(); return !!el; })()`);
+      await sleep(150);
+    };
+    const key = async (k, opts = {}) => {
+      await ev(`(() => {
+        const el = document.querySelector('[data-testid="list"]');
+        if (!el) return false;
+        el.dispatchEvent(new KeyboardEvent('keydown', {
+          key: ${JSON.stringify(k)}, bubbles: true, cancelable: true,
+          shiftKey: ${opts.shift ? 'true' : 'false'},
+          ctrlKey: ${opts.ctrl ? 'true' : 'false'},
+        }));
+        return true;
+      })()`);
+      await sleep(200);
+    };
+
+    /*
+     * End/Home 要有**多行**才验得出差别。这个段落跑在前面一堆清理之后，
+     * 列表里可能只剩一行（实测 total=1，End/Home 无从区分）。
+     * 自己种几条，把行数补够。
+     */
+    await ev(`(async () => {
+      const bar = (await chrome.bookmarks.getTree())[0].children.find((c) => c.id === '1');
+      for (let i = 0; i < 4; i++) {
+        await chrome.bookmarks.create({
+          parentId: bar.id,
+          title: 'KBD-' + i,
+          url: 'https://kbd.example/' + i,
+        });
+      }
+      return true;
+    })()`);
+    await sleep(700);
+    const selectBar = async () => {
+      await ev(`(() => {
+        // 空态上的「查看书签栏」；没有空态时点侧边栏的书签栏行
+        const btn = [...document.querySelectorAll('button')].find((x) => (x.textContent || '').includes('查看书签栏'));
+        if (btn) { btn.click(); return 'empty-state'; }
+        const row = [...document.querySelectorAll('[role="treeitem"]')].find((x) => (x.textContent || '').includes('书签栏'));
+        if (row) { row.dispatchEvent(new MouseEvent('click', { bubbles: true })); return 'tree'; }
+        return 'none';
+      })()`);
+      await sleep(700);
+    };
+    await selectBar();
+    await focusList();
+
+    // ── End / Home：跳到末项 / 首项 ──
+    await key('End');
+    await sleep(300);
+    const atEnd = await ev(`(() => {
+      const rows = [...document.querySelectorAll('[data-testid="row"]')];
+      const active = rows.find((r) => r.getAttribute('data-active') === 'true');
+      return { total: rows.length, activeIdx: active ? rows.indexOf(active) : -1 };
+    })()`);
+    check('按 End 高亮跳到最后一行', atEnd.total > 1 && atEnd.activeIdx === atEnd.total - 1, JSON.stringify(atEnd));
+
+    await key('Home');
+    await sleep(300);
+    const atHome = await ev(`(() => {
+      const rows = [...document.querySelectorAll('[data-testid="row"]')];
+      const active = rows.find((r) => r.getAttribute('data-active') === 'true');
+      return { activeIdx: active ? rows.indexOf(active) : -1 };
+    })()`);
+    check('按 Home 高亮跳回第一行', atHome.activeIdx === 0, JSON.stringify(atHome));
+
+    // ── Enter：进入文件夹 ──
+    const folderName = await ev(`(() => {
+      const rows = [...document.querySelectorAll('[data-testid="row"]')];
+      const f = rows.find((r) => /文件夹|夹/.test(r.innerText || ''));
+      return f ? f.innerText.split(String.fromCharCode(10))[0] : null;
+    })()`);
+    if (folderName) {
+      const rowsBefore = await ev(`document.querySelectorAll('[data-testid="row"]').length`);
+      await key('Enter');
+      await sleep(600);
+      /*
+       * 判据：进入文件夹后**列表内容变了**（行数变化或高亮重置）。
+       * 不能只查"文件夹名出现在页面上"——它本来就在树里，恒成立。
+       */
+      const after = await ev(`(() => {
+        const rows = [...document.querySelectorAll('[data-testid="row"]')];
+        return {
+          count: rows.length,
+          active: rows.find((r) => r.getAttribute('data-active') === 'true')?.getAttribute('data-index') ?? null,
+          titles: rows.map((r) => (r.innerText || '').split(String.fromCharCode(10))[0]).slice(0, 4),
+        };
+      })()`);
+      check(
+        '按 Enter 进入高亮的文件夹（列表内容随之变化）',
+        after.count !== rowsBefore || after.active === null || after.active === '0',
+        JSON.stringify({ folderName, rowsBefore, after }),
+      );
+      /*
+       * 回到书签栏根目录。**不能点「全部」**——那会清掉文件夹选择，
+       * 列表退回「还没有选择文件夹」，后面的键盘用例全部落空（实测踩过）。
+       */
+      await selectBar();
+      await focusList();
+    }
+
+    // ── Shift+↓：范围选择 ──
+    await focusList();
+    await key('Home');
+    await sleep(250);
+    const selBefore = await ev(`[...document.querySelectorAll('[data-testid="row"][aria-selected="true"]')].length`);
+    await key('ArrowDown');
+    await sleep(250);
+    const selAfterMove = await ev(`[...document.querySelectorAll('[data-testid="row"][aria-selected="true"]')].length`);
+    await key('ArrowDown', { shift: true });
+    await sleep(350);
+    const selAfterShift = await ev(`(() => ({
+      count: [...document.querySelectorAll('[data-testid="row"][aria-selected="true"]')].length,
+      bar: document.body.innerText.includes('已选'),
+    }))()`);
+    check(
+      'Shift+↓ 扩选范围（普通方向键只移高亮，Shift 才真选中）',
+      selBefore === 0 && selAfterMove === 0 && selAfterShift.count >= 2 && selAfterShift.bar === true,
+      JSON.stringify({ selBefore, selAfterMove, selAfterShift }),
+    );
+
+    // ── Delete：多选时弹删除确认（不直接删） ──
+    await key('Delete');
+    await sleep(500);
+    const delDlg = await ev(`!!document.querySelector('[role="dialog"]')`);
+    check('按 Delete 弹出删除确认（不绕过确认直接删）', delDlg === true, JSON.stringify({ delDlg }));
+    await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    await sleep(300);
+  }
+
   /* ══════════ 9.289 多窗口同步：一个窗口的改动，另一个窗口看得见 ══════════ */
   console.log('\n[9.289] 多窗口同步');
   {

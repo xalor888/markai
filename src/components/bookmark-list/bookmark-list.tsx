@@ -1261,6 +1261,7 @@ const BookmarkRow = memo(function BookmarkRow({
     <div
       data-testid="row"
       data-index={index}
+      data-active={active ? 'true' : 'false'}
       role="listitem"
       aria-selected={selected}
       title={node.url ? `${node.title}\n${node.url}` : node.title}

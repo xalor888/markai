@@ -373,13 +373,38 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
       )}
 
       {notice && (
-        <p className="mb-2 flex items-start gap-1.5 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-2 text-2xs leading-4 text-destructive">
+        <div className="mb-2 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-2.5 py-2 text-2xs leading-4 text-destructive">
           <AlertCircle className="mt-px h-3 w-3 shrink-0" />
-          {notice}
-        </p>
+          <span className="min-w-0 flex-1">{notice}</span>
+          {entries.length === 0 && (
+            <button
+              type="button"
+              onClick={() => void refresh()}
+              disabled={loading}
+              data-testid="organize-log-retry"
+              className="shrink-0 rounded-sm border border-destructive/40 px-1.5 py-0.5 transition-colors hover:bg-destructive/10 disabled:opacity-50"
+            >
+              重试
+            </button>
+          )}
+        </div>
       )}
 
-      {entries.length === 0 ? (
+      {/*
+       * 读失败 ≠ 没有记录。
+       * 早先失败时 notice 和「还没有整理记录 / 收藏一个网页后…」会**同时出现**，
+       * 一句话说"联系不上后台"、下一句说"你还没收藏过"，自相矛盾。
+       * 这里让失败态独占空列表的位置，并把重试放在它旁边。
+       */}
+      {entries.length === 0 && notice ? (
+        <div className="flex flex-col items-center justify-center gap-1.5 rounded-md border border-border py-8 text-center">
+          <AlertCircle className="h-5 w-5 text-destructive/50" aria-hidden="true" />
+          <p className="text-xs text-destructive">读不到整理记录</p>
+          <p className="max-w-[300px] text-2xs leading-4 text-muted-foreground/70">
+            这不代表你没有记录，只是这次没读到。点上面的「重试」，或稍后再打开。
+          </p>
+        </div>
+      ) : entries.length === 0 ? (
         <div className="flex flex-col items-center justify-center gap-1.5 rounded-md border border-border py-8 text-center">
           <Wand2 className="h-5 w-5 text-muted-foreground/40" aria-hidden="true" />
           <p className="text-xs text-muted-foreground">还没有整理记录</p>

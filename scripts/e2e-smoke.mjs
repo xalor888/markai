@@ -616,6 +616,78 @@ async function run() {
     await sleep(200);
   }
 
+  /* ══════════ 9.31 整理记录读失败：不能自相矛盾 ══════════ */
+  console.log('\n[9.31] 整理记录读取失败态');
+  {
+    /*
+     * 缺陷：`organize:list` 失败时 notice 和「还没有整理记录 / 收藏一个网页后…」
+     * 会**同时出现**——一句话说"联系不上后台"，下一句说"你还没收藏过"，自相矛盾。
+     * 而且 notice 只是纯文字，写了"请再试一次"却没有按钮。
+     */
+    const { targetId: t } = await cdp.send('Target.createTarget', {
+      url: `chrome-extension://${EXT_ID}/page.html`,
+    });
+    const { sessionId: sid } = await cdp.send('Target.attachToTarget', { targetId: t, flatten: true });
+    await cdp.send('Page.enable', {}, sid);
+    const { identifier } = await cdp.send(
+      'Page.addScriptToEvaluateOnNewDocument',
+      {
+        source: `(() => {
+          const orig = chrome.runtime.sendMessage.bind(chrome.runtime);
+          chrome.runtime.sendMessage = (...a) => {
+            const m = a[0];
+            if (m && m.type === 'organize:list') return Promise.reject(new Error('模拟：后台不可用'));
+            return orig(...a);
+          };
+        })();`,
+      },
+      sid,
+    );
+    await cdp.send('Page.reload', {}, sid);
+    await sleep(1400);
+    const ev2 = async (expr) => {
+      const r = await cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }, sid);
+      if (r.exceptionDetails) return null;
+      return r.result?.value;
+    };
+
+    // 打开整理记录（走「更多」菜单）
+    await ev2(`(() => {
+      if (!document.querySelector('[data-testid="more-menu"]')) {
+        document.querySelector('[data-testid="more-trigger"]')?.click();
+      }
+      return true;
+    })()`);
+    await sleep(300);
+    await ev2(`(() => {
+      [...document.querySelectorAll('[role="menuitem"]')]
+        .find((b) => (b.textContent || '').includes('整理记录'))?.click();
+      return true;
+    })()`);
+    await sleep(700);
+
+    const state = await ev2(`(() => {
+      const d = document.querySelector('[data-testid="organize-log"]');
+      if (!d) return { noDialog: true };
+      const t = d.innerText;
+      return {
+        saysUnreachable: t.includes('无法联系后台') || t.includes('后台没有返回'),
+        saysNoRecords: t.includes('还没有整理记录'),
+        hasRetry: !!d.querySelector('[data-testid="organize-log-retry"]'),
+      };
+    })()`);
+    check('读失败时说清"联系不上后台"', state.saysUnreachable === true, JSON.stringify(state));
+    check(
+      '读失败时**不再**同时说「还没有整理记录」（自相矛盾）',
+      state.saysNoRecords === false,
+      JSON.stringify(state),
+    );
+    check('读失败时给出可点的「重试」', state.hasRetry === true, JSON.stringify(state));
+
+    await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sid).catch(() => {});
+    await cdp.send('Target.closeTarget', { targetId: t }).catch(() => {});
+  }
+
   /* ══════════ 9.315 撤销记录读不到时：能打开面板 + 能重试 ══════════ */
   console.log('\n[9.315] 撤销记录读取失败态');
   {

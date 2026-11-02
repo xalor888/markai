@@ -2149,6 +2149,101 @@ async function run() {
     );
   }
 
+  /* ══════════ 9.351 Shift+Enter：后台新标签页打开 ══════════ */
+  console.log('\n[9.351] Shift+Enter 后台打开');
+  {
+    /*
+     * 快捷键速查表承诺「Shift+Enter 在后台新标签页打开」，而 e2e 从没验过。
+     * 用户按它是为了**不离开当前页面**——如果实际把当前标签页抢走了，
+     * 那他正在看的整理结果就被换掉了，而这个承诺就成了反效果。
+     *
+     * 判据：多了一个标签页，且它是**非激活**的，且当前标签页没被换掉。
+     */
+    const BG_URL = 'https://shift-enter.example/bg';
+    await ev(`(async () => {
+      const bar = (await chrome.bookmarks.getTree())[0].children.find((c) => c.id === '1');
+      for (const h of await chrome.bookmarks.search(${JSON.stringify(BG_URL)})) await chrome.bookmarks.remove(h.id).catch(() => {});
+      await chrome.bookmarks.create({ parentId: bar.id, title: '后台打开靶', url: ${JSON.stringify(BG_URL)} });
+      return true;
+    })()`);
+    await sleep(800);
+    /*
+     * 先选中「书签栏」：这一段跑在前面一堆导航之后，列表可能停在别的文件夹，
+     * 刚建的书签根本不在列表里（实测高亮停在"Beta 指南"，方向键走 12 步也到不了）。
+     */
+    await ev(`(() => {
+      const row = [...document.querySelectorAll('[role="treeitem"]')]
+        .find((r) => (r.textContent || '').trim().startsWith('书签栏'));
+      if (row) row.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      return !!row;
+    })()`);
+    await sleep(700);
+
+    const before = await ev(`(async () => {
+      const tabs = await chrome.tabs.query({ currentWindow: true });
+      return { count: tabs.length, activeId: tabs.find((t) => t.active)?.id ?? null };
+    })()`);
+
+    // 高亮到那一行，再按 Shift+Enter
+    await ev(`(() => { const el = document.querySelector('[data-testid="list"]'); if (el) el.focus(); return !!el; })()`);
+    await sleep(200);
+    await ev(`(() => {
+      const el = document.querySelector('[data-testid="list"]');
+      el?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true, cancelable: true }));
+      return true;
+    })()`);
+    await sleep(300);
+    // 用方向键把高亮移到"后台打开靶"那一行
+    for (let i = 0; i < 12; i++) {
+      const on = await ev(`(() => {
+        const r = document.querySelector('[data-testid="row"][data-active="true"]');
+        return r ? (r.getAttribute('title') || '') : '';
+      })()`);
+      if (on.includes('后台打开靶')) break;
+      await ev(`(() => {
+        const el = document.querySelector('[data-testid="list"]');
+        el?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+        return true;
+      })()`);
+      await sleep(120);
+    }
+    await ev(`(() => {
+      const el = document.querySelector('[data-testid="list"]');
+      el?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true, cancelable: true }));
+      return true;
+    })()`);
+
+    const after = await waitFor(
+      async () =>
+        (await ev(`(async () => {
+          const tabs = await chrome.tabs.query({ currentWindow: true });
+          return tabs.some((t) => t.url === ${JSON.stringify(BG_URL)});
+        })()`)) === true,
+      8000,
+    );
+    const info = await ev(`(async () => {
+      const tabs = await chrome.tabs.query({ currentWindow: true });
+      const bg = tabs.find((t) => t.url === ${JSON.stringify(BG_URL)});
+      return {
+        count: tabs.length,
+        bgActive: bg ? bg.active : null,
+        currentActiveId: tabs.find((t) => t.active)?.id ?? null,
+      };
+    })()`);
+    check(
+      'Shift+Enter 在新标签页打开，且不抢走当前页面',
+      after === true && info.bgActive === false,
+      JSON.stringify({ after, info, before }),
+    );
+
+    // 清理：关掉那个后台标签页
+    await ev(`(async () => {
+      const tabs = await chrome.tabs.query({ url: ${JSON.stringify(BG_URL)} });
+      for (const t of tabs) await chrome.tabs.remove(t.id).catch(() => {});
+      return true;
+    })()`);
+  }
+
   /* ══════════ 9.33 撤销上限提示要出现在界面上 ══════════ */
   console.log('\n[9.33] 撤销上限提示');
   {

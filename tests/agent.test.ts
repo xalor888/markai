@@ -12183,6 +12183,46 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T130: 新建书签的预填判据要和「收藏当前页」一致 ══════════ */
+  console.log('\n[T130] 预填判据的一致性');
+  {
+    /*
+     * 缺陷：0.2.70 把弹窗的「收藏当前页」放宽到 `file://`，但**新建书签对话框的预填**
+     * 里还写着一份独立的 `/^https?:\/\//` —— 同样是"拿当前页预填"，
+     * 本地文件用户在一个入口能拿到、在另一个入口拿不到。
+     * 这就是"同一个规则写了两遍"的老问题。
+     */
+    const { prefillFromTab } = await import('../src/lib/bookmarks/save-tab');
+
+    ok('本地文件页也能预填（与收藏入口一致）', () => {
+      const p = prefillFromTab({ url: 'file:///Users/me/doc.html', title: '本地文档' });
+      assert.deepEqual(p, { title: '本地文档', url: 'file:///Users/me/doc.html' });
+    });
+
+    ok('没有标题时用 URL 兜底（不留空）', () => {
+      const p = prefillFromTab({ url: 'https://example.com/' });
+      assert.equal(p?.title, 'https://example.com/');
+      assert.equal(p?.url, 'https://example.com/');
+    });
+
+    ok('标题只有空白时也退回 URL', () => {
+      const p = prefillFromTab({ url: 'https://a/', title: '   ' });
+      assert.equal(p?.title, 'https://a/');
+    });
+
+    ok('浏览器自身页面不预填（和收藏入口同一判据）', () => {
+      for (const u of ['chrome://extensions', 'about:blank', 'devtools://x', 'view-source:https://a']) {
+        assert.equal(prefillFromTab({ url: u, title: 't' }), null, `不该预填：${u}`);
+      }
+    });
+
+    ok('没有活动标签页时返回 null（不崩、不预填半截）', () => {
+      assert.equal(prefillFromTab(undefined), null);
+      assert.equal(prefillFromTab({}), null);
+      assert.equal(prefillFromTab({ title: '只有标题' }), null);
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

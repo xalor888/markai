@@ -83,3 +83,18 @@ export async function saveTabToBar(tab: { title?: string; url?: string }): Promi
     return { ok: false, reason: 'error', message: e instanceof Error ? e.message : String(e) };
   }
 }
+
+/**
+ * 从当前标签页推导"新建书签"对话框的预填值。
+ *
+ * 抽成纯函数的原因：这是 UI effect，直接测不了；而它的判据（能不能预填）
+ * 和「收藏当前页」必须是同一条规则——0.2.74 发现新建书签对话框里还写着一份
+ * 独立的 `/^https?:\/\//`，把 `file://` 漏在了外面。
+ */
+export function prefillFromTab(
+  tab: { url?: string; title?: string } | undefined,
+): { title: string; url: string } | null {
+  const url = tab?.url;
+  if (!url || !isSavableUrl(url)) return null;
+  return { title: tab?.title?.trim() || url, url };
+}

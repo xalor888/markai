@@ -666,7 +666,7 @@ async function run() {
     await cdp.send('Runtime.evaluate', { expression: `localStorage.setItem('markai.theme', 'dark')` }, sid);
     await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] }, sid);
     await cdp.send('Page.reload', {}, sid);
-    await sleep(1200);
+    await waitFor(async () => (await ev2(`typeof window.__firstFrame !== 'undefined'`)) === true, 8000);
     const cls2 = await ev2(`window.__firstFrame`);
     check(
       '系统浅色但用户选了深色时，首帧就是暗的',

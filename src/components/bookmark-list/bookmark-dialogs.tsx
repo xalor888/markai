@@ -7,6 +7,7 @@ import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { MovePicker } from '@/components/bookmark-list/move-picker';
+import { isSavableUrl, prefillFromTab } from '@/lib/bookmarks/save-tab';
 
 /**
  * 书签管理对话框（新建文件夹 / 新建书签 / 重命名 / 删除），
@@ -60,11 +61,11 @@ export function BookmarkDialogs() {
       void chrome.tabs
         .query({ active: true, currentWindow: true })
         .then(([tab]) => {
-          const u = tab?.url;
-          if (u && /^https?:\/\//i.test(u)) {
+          const pre = prefillFromTab(tab);
+          if (pre) {
             // 回调竞态保护：用户已开始输入则不覆盖
-            setTitle((prev) => prev || tab.title || u);
-            setUrl((prev) => prev || u);
+            setTitle((prev) => prev || pre.title);
+            setUrl((prev) => prev || pre.url);
           }
         })
         .catch(() => {});

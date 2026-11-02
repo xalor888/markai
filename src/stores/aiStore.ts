@@ -1,6 +1,7 @@
 /** ── Agent 聊天 store（多会话、流式状态、待删清单，持久化到 chrome.storage.local） ── */
 
 import { create } from 'zustand';
+import { retrySafety } from '@/lib/chat/retry-safety';
 import { uid } from '@/lib/format';
 import { pushToast } from '@/lib/toast';
 import { MUTATING_TOOLS } from '@/lib/ai/tools';
@@ -495,6 +496,14 @@ export const useAIStore = create<AIState>((set, get) => ({
   retryLast() {
     const s = get();
     if (s.streaming) return;
+    /*
+     * 保险（UI 那层已经不提供入口，这里防绕过）：
+     * 上一轮如果已经成功执行过写类工具，"重新生成"会删掉那条带工具记录的消息、
+     * 并把同一句指令重发一遍 —— 工具会**再跑一次**。
+     * 移动类幂等看不出来，但 create_bookmark / copy_bookmark 会造出重复书签。
+     */
+    const lastAssistant = [...s.messages].reverse().find((m) => m.role === 'assistant');
+    if (lastAssistant && !retrySafety(lastAssistant.blocks).safeToRegenerate) return;
     const lastUser = [...s.messages].reverse().find((m) => m.role === 'user');
     if (!lastUser) return;
     const lastUserIdx = s.messages.findIndex((m) => m.id === lastUser.id);

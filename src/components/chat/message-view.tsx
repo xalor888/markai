@@ -36,6 +36,7 @@ import { copyText } from '@/lib/clipboard';
 import { TOOL_META } from '@/lib/ai/tools';
 import { useBookmarkStore, findNode, resolveTitlePath } from '@/stores/bookmarkStore';
 import type { ChatMessage, ToolCallRecord } from '@/lib/ai/types';
+import { mutatedEmptyReplyNote, retrySafety } from '@/lib/chat/retry-safety';
 import { cn } from '@/lib/utils';
 import { DeletionCard } from './deletion-card';
 
@@ -221,6 +222,13 @@ export const MessageView = memo(function MessageView({
     .replace(/^\d+[.、]\s+/gm, '')
     .trim();
 
+  /*
+   * 这一轮有没有成功执行过**写类**操作。
+   * 有的话，"重新生成"（= 删掉回复并重发同一句指令）会让工具**再跑一遍**，
+   * 移动类幂等看不出来，但 create/copy 会造出重复书签，所以必须拦掉。
+   */
+  const safety = retrySafety(message.blocks);
+
   return (
     <div className="group" title={formatRelativeTime(message.createdAt)}>
       <div className="space-y-1.5">
@@ -236,7 +244,9 @@ export const MessageView = memo(function MessageView({
           <p className="text-md text-muted-foreground">
             {message.interrupted
               ? '（生成被打断了，还没收到内容。可点击 ↻ 重新生成）'
-              : '（Agent 未返回内容，可点击 ↻ 重新生成）'}
+              : safety.safeToRegenerate
+                ? '（Agent 未返回内容，可点击 ↻ 重新生成）'
+                : mutatedEmptyReplyNote(safety.mutations)}
           </p>
         )}
         {message.interrupted && message.blocks.length > 0 && (
@@ -289,7 +299,7 @@ export const MessageView = memo(function MessageView({
               <FileText className="h-3 w-3" />
             </button>
           )}
-          {isLast && onRetry && !streaming && (
+          {isLast && onRetry && !streaming && safety.safeToRegenerate && (
             <button
               type="button"
               onClick={onRetry}

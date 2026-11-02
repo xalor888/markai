@@ -11103,6 +11103,110 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T113: 「重新生成」在有写操作时必须拦掉 ══════════ */
+  console.log('\n[T113] 重新生成的安全性');
+  {
+    /*
+     * 缺陷：`retryLast()` 会删掉最后一条用户消息之后的全部消息、并把同一句指令重发。
+     * 它默认"这一轮什么都没发生"——但只要 Agent 已经调用过写类工具，这个假设就是错的。
+     *
+     * 典型序列：用户说「把这几个归到开发」→ Agent 调了 move_bookmarks ×5 →
+     * 最后一轮没返回任何文字 → 界面显示「Agent 未返回内容，可点击 ↻ 重新生成」。
+     * 此时 5 个书签**已经移走了**。点下去会重发同一句指令，工具再跑一遍：
+     * 移动幂等看不出，但 create_bookmark / copy_bookmark 会**造出重复书签**。
+     * 更糟的是那条带工具记录的消息会被删掉，用户再也看不到"其实执行过了"。
+     */
+    const { retrySafety, mutatedEmptyReplyNote } = await import('../src/lib/chat/retry-safety');
+
+    const toolBlock = (name: string, status: 'done' | 'error' = 'done'): any => ({
+      kind: 'tool',
+      record: { id: 't', name, args: '{}', status, ...(status === 'done' ? { result: 'ok' } : { error: 'x' }) },
+    });
+
+    ok('没有工具调用 → 可以安全重新生成', () => {
+      const r = retrySafety([{ kind: 'text', text: '你好' }]);
+      assert.equal(r.mutations, 0);
+      assert.equal(r.safeToRegenerate, true);
+    });
+
+    ok('只读工具不算改动 → 仍可重新生成', () => {
+      const r = retrySafety([toolBlock('search_bookmarks'), toolBlock('get_stats')]);
+      assert.equal(r.mutations, 0, '只读工具被误算成改动');
+      assert.equal(r.safeToRegenerate, true);
+    });
+
+    ok('写类工具成功执行 → 禁止重新生成（否则会重复执行）', () => {
+      const r = retrySafety([toolBlock('move_bookmarks'), toolBlock('create_bookmark')]);
+      assert.equal(r.mutations, 2);
+      assert.equal(r.safeToRegenerate, false);
+    });
+
+    ok('写类工具**失败**不算改动（什么都没落地，重试是安全的）', () => {
+      const r = retrySafety([toolBlock('create_bookmark', 'error')]);
+      assert.equal(r.mutations, 0);
+      assert.equal(r.safeToRegenerate, true);
+    });
+
+    ok('文案不再提"重新生成"，改为指向撤销', () => {
+      const note = mutatedEmptyReplyNote(3);
+      assert.ok(note.includes('3'), note);
+      assert.equal(note.includes('重新生成'), false, '已经改过东西了，不能再让人点重新生成');
+      assert.ok(note.includes('撤销'), note);
+    });
+
+    await okA('store 层也拦住（UI 不给入口，这里防绕过）', async () => {
+      const { useAIStore } = await import('../src/stores/aiStore');
+      type Msg = { id: string; role: 'user' | 'assistant'; blocks: unknown[]; createdAt: number };
+      /*
+       * 必须给一个**真实会话**：`updateActiveMessages` 找不到 active 会话时会直接
+       * 返回 {}（拒绝写入孤儿镜像）。我第一版把 conversations 留空，
+       * 于是"被拦下、消息没动"这条断言其实是白过的——它不是因为拦截而通过，
+       * 而是因为根本没写。对照组（只读工具应当截断）当场暴露了这一点。
+       */
+      const seed = (assistantBlocks: unknown[]) => {
+        storageMap.clear();
+        const msgs = [
+          { id: 'u1', role: 'user', blocks: [{ kind: 'text', text: '归到开发' }], createdAt: 1 },
+          { id: 'a1', role: 'assistant', blocks: assistantBlocks, createdAt: 2 },
+        ];
+        useAIStore.setState({
+          conversations: [{ id: 'c1', title: 't', createdAt: 1, updatedAt: 1, messages: msgs }] as never,
+          activeId: 'c1',
+          messages: msgs as never,
+          streaming: false,
+          streamingMessageId: null,
+        } as never);
+      };
+
+      /*
+       * 断言必须看**旧消息还在不在**，不能看数组长度。
+       * 允许重试时 send() 会同步补一条 assistant 占位，
+       * 于是"被拦下(2 条)"和"允许重试(1 条 user + 1 条新占位 = 2 条)"长度一样——
+       * 我第一版拿长度当判据，两种情况下都会通过，等于没测。
+       */
+      const idsOf = () => (useAIStore.getState().messages as Msg[]).map((m) => m.id);
+
+      // 已经移动过 → 必须被拦下：旧的 a1 原封不动留着
+      seed([toolBlock('move_bookmarks')]);
+      useAIStore.getState().retryLast();
+      assert.ok(
+        idsOf().includes('a1'),
+        `已执行写操作时不该裁掉带工具记录的消息，实际 [${idsOf().join(',')}]`,
+      );
+
+      // 对照：只读工具 → 允许重试：a1 必须消失（被裁掉后重发）
+      seed([toolBlock('search_bookmarks')]);
+      useAIStore.getState().retryLast();
+      assert.equal(
+        idsOf().includes('a1'),
+        false,
+        `对照组的重试没有生效，a1 还在：[${idsOf().join(',')}]`,
+      );
+      assert.equal(idsOf()[0], 'u1', '重试应保留原 user 消息');
+      useAIStore.setState({ messages: [], streaming: false, streamingMessageId: null } as never);
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

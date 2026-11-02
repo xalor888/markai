@@ -329,9 +329,35 @@ const mockBookmarks = {
     const oldIndex =
       oldParentId === undefined ? -1 : childrenOf(oldParentId).findIndex((n) => n.id === id);
     let target = dest.index;
-    if (oldParentId === dest.parentId && target !== undefined) {
-      if (target === oldIndex || target === oldIndex + 1) return toApi(node);
-      if (target > oldIndex) target--;
+
+    /*
+     * 忠实实现 Chrome 的**越界校验**。
+     *
+     * 实测（headless，真实 Chrome）：A 里有 [x,y,z]，`move(x, {parentId:A, index:99})`
+     * 直接抛 `Index out of bounds.`。
+     * 替身早先没有这个校验 → 越界 index 在测试里静默成功，到了线上才炸。
+     *
+     * 边界按 Chrome 文档：index 必须落在 0..目标文件夹子项数 之间。
+     * 同父移动时，"目标文件夹子项数"取**移除自己之后**的数目
+     * （这也是下面 target-- 修正的同一个基准）。
+     */
+    const sameParent = oldParentId === dest.parentId;
+    if (target !== undefined && sameParent && (target === oldIndex || target === oldIndex + 1)) {
+      return toApi(node);
+    }
+    if (target !== undefined) {
+      /*
+       * 边界实测（真实 Chrome）：
+       *   同父、4 个子项：[a,b,c,d] move(a → index 4)  → [b,c,d,a]（允许，等于子项数）
+       *                        move(a → index 5)  → THROW Index out of bounds.
+       *   跨父、目标 1 个子项：move(x → index 1) → 允许；index 3 → THROW
+       * 也就是说上限是**目标文件夹当前的子项数**（含被移动的那个自己），不是减一。
+       */
+      const capacity = childrenOf(dest.parentId).length;
+      if (!Number.isInteger(target) || target < 0 || target > capacity) {
+        throw new Error('Index out of bounds.');
+      }
+      if (sameParent && target > oldIndex) target--;
     }
     store.splice(
       store.findIndex((n) => n.id === id),
@@ -10975,11 +11001,26 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.equal(mockCalls.create, before, '重复时不该再创建');
     });
 
-    await okA('子串相近但不同网址不算重复（search 是子串匹配，必须再比一次 url）', async () => {
-      const a = await saveTabToBar({ title: 'page', url: 'https://sub.example/page' });
-      assert.equal(a.ok, true);
-      // 这个 url 是上一个的前缀，search 会一起返回；不能因此判成重复
-      const b = await saveTabToBar({ title: 'page2', url: 'https://sub.example/page2' });
+    await okA('子串命中不等于重复（必须再比一次 url）', async () => {
+      /*
+       * 关键在于**先后顺序**：必须先存 `.../page2`，再存 `.../page`。
+       * 这样 `search('.../page')` 会同时命中原有的 `.../page2`（子串匹配），
+       * 只有 `existing.some(n => n.url === url)` 这一步才能把它排除掉。
+       *
+       * 反过来的顺序（先 page 后 page2）搜 page2 不会命中 page，
+       * 那条断言等于什么都没验证——我上一版就是这么写的。
+       */
+      const seeded = await saveTabToBar({ title: 'page2', url: 'https://sub.example/page2' });
+      assert.equal(seeded.ok, true);
+
+      // 确认前提成立：search 真的会把这个"前缀关系"的节点带出来
+      const hits = await chrome.bookmarks.search('https://sub.example/page');
+      assert.ok(
+        hits.some((n) => n.url === 'https://sub.example/page2'),
+        '前提不成立：search 没有子串命中，这条断言失去意义',
+      );
+
+      const b = await saveTabToBar({ title: 'page', url: 'https://sub.example/page' });
       assert.equal(b.ok, true, `被误判为重复：${JSON.stringify(b)}`);
     });
 
@@ -10991,6 +11032,74 @@ async function okA(name: string, fn: () => Promise<void> | void) {
         assert.equal((res as { reason: string }).reason, 'unsupported-url');
       }
       assert.equal(mockCalls.create, before, '非 http 页面不该创建书签');
+    });
+  }
+
+  /* ══════════ T112: bookmarks.move 的 index 边界（实测钉死） ══════════ */
+  console.log('\n[T112] 移动落点边界：index == 子项数合法，越界必须抛错');
+  {
+    /*
+     * 这一条守的是**替身保真**，不是产品逻辑。
+     *
+     * 之前的替身没有越界校验：`index: 99` 在测试里静默成功，真实 Chrome 直接
+     * 抛 `Index out of bounds.`。于是"落点算错"这类 bug 在测试里永远看不出来。
+     *
+     * 边界值是实测出来的（headless 真 Chrome）：
+     *   同父、4 个子项 [a,b,c,d]：move(a → index 4) → [b,c,d,a] ✔ ；index 5 → THROW
+     *   跨父、目标 1 个子项：      move(x → index 1) → ✔ ；index 3 → THROW
+     * 上限 = 目标文件夹**当前的**子项数（含被移动的那个自己），不是减一。
+     */
+    const F = (await mockBookmarks.create({ parentId: '2', title: 'T112-F' })).id;
+    const mk = async (t: string) =>
+      (await mockBookmarks.create({ parentId: F, title: t, url: `https://t112.example/${t}` })).id;
+    const a = await mk('a');
+    await mk('b');
+    await mk('c');
+    await mk('d');
+    const kids = async () => (await chrome.bookmarks.getChildren(F)).map((n) => n.title);
+
+    await okA('同父移动到末尾：index == 子项数(4) 合法', async () => {
+      await mockBookmarks.move(a, { parentId: F, index: 4 });
+      assert.deepEqual(await kids(), ['b', 'c', 'd', 'a']);
+    });
+
+    await okA('同父越界：index == 子项数+1 必须抛错（替身保真）', async () => {
+      await assert.rejects(
+        () => mockBookmarks.move(a, { parentId: F, index: 5 }),
+        /Index out of bounds/,
+        '替身没有复刻 Chrome 的越界校验 → 落点算错的 bug 会被静默吞掉',
+      );
+      assert.deepEqual(await kids(), ['b', 'c', 'd', 'a'], '抛错时不能改动数据');
+    });
+
+    await okA('跨父越界同样抛错', async () => {
+      const G = (await mockBookmarks.create({ parentId: '2', title: 'T112-G' })).id;
+      await mockBookmarks.create({ parentId: G, title: 'only' });
+      // G 现在 1 个子项：index 1 合法
+      await mockBookmarks.move(a, { parentId: G, index: 1 });
+      assert.deepEqual(
+        (await chrome.bookmarks.getChildren(G)).map((n) => n.title),
+        ['only', 'a'],
+      );
+      // G 现在 2 个子项：index 3 越界
+      const b = (await chrome.bookmarks.getChildren(F)).find((n) => n.title === 'b')!.id;
+      await assert.rejects(() => mockBookmarks.move(b, { parentId: G, index: 3 }), /Index out of bounds/);
+    });
+
+    await okA('拖到末尾用的就是 index == 子项数（resolveDropIndex 与真实 API 对齐）', async () => {
+      const H = (await mockBookmarks.create({ parentId: '2', title: 'T112-H' })).id;
+      await mockBookmarks.create({ parentId: H, title: 'p', url: 'https://t112.example/p' });
+      const q = (await mockBookmarks.create({ parentId: H, title: 'q', url: 'https://t112.example/q' })).id;
+      const list = await chrome.bookmarks.getChildren(H);
+      const { resolveDropIndex } = await import('../src/lib/bookmark-dnd');
+      const idx = resolveDropIndex(list.length - 1, 'below');
+      assert.equal(idx, list.length, `拖到末行下方应得到 ${list.length}，实际 ${idx}`);
+      // q 拖到自己下方 = 原地不动（Chrome 的 oldIndex+1 空操作）
+      await mockBookmarks.move(q, { parentId: H, index: idx });
+      assert.deepEqual(
+        (await chrome.bookmarks.getChildren(H)).map((n) => n.title),
+        ['p', 'q'],
+      );
     });
   }
 

@@ -187,7 +187,12 @@ export function diagnose(snapshot: HealthSnapshot): HealthReport {
   /* ── 整理记录 ── */
   {
     const raw = asArray(snapshot.logEntries);
-    const usable = raw.filter(isUsableLogEntry) as { id: string; runId?: string; undoneAt?: number }[];
+    const usable = raw.filter(isUsableLogEntry) as {
+      id: string;
+      runId?: string;
+      undoneAt?: number;
+      unreversibleAt?: number;
+    }[];
     const corrupt = raw.length - usable.length;
     if (corrupt > 0) {
       issues.push({
@@ -217,7 +222,16 @@ export function diagnose(snapshot: HealthSnapshot): HealthReport {
         .filter(isUsableUndoPoint)
         .map((p) => (p as { runId: string }).runId),
     );
-    const orphan = usable.filter((e) => e.runId && !undoIds.has(e.runId) && !e.undoneAt);
+    /*
+     * 必须同时排除 `unreversibleAt`：那正是 `log.mark-orphan` 这个修复写下的标记。
+     *
+     * 否则会出现"修了但没修好"：用户点「标记为不可撤销」→ 修复成功 → 记录被打上标记 →
+     * **但这条判据不认这个标记**，问题原样还在、健康分不动。
+     * 用户看到的是"点了没反应"。
+     */
+    const orphan = usable.filter(
+      (e) => e.runId && !undoIds.has(e.runId) && !e.undoneAt && !e.unreversibleAt,
+    );
     if (orphan.length > 0) {
       issues.push({
         id: 'log.orphan',

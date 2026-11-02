@@ -11867,6 +11867,100 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T125: `log.mark-orphan` 修完必须真的不再报 ══════════ */
+  console.log('\n[T125] 修复动作要能让自己上报的问题消失');
+  {
+    /*
+     * 缺陷：孤儿判据只排除了 `undoneAt`，没排除 `unreversibleAt`——
+     * 而 `log.mark-orphan` 这个修复写的正是 `unreversibleAt`。
+     *
+     * 结果："修了但没修好"：用户点「标记为不可撤销」→ 修复成功 → 记录被打上标记 →
+     * 但判据不认这个标记，问题原样还在、健康分不动。用户看到的是"点了没反应"。
+     */
+    const { diagnose } = await import('../src/lib/health/diagnostics');
+    const { runFix } = await import('../src/lib/health/fixes');
+    const { ORGANIZE_LOG_KEY } = await import('../src/lib/ai/organize-log');
+    const { UNDO_STORAGE_KEY } = await import('../src/lib/undo/recorder');
+    type HealthSnapshot = Parameters<typeof diagnose>[0];
+
+    const snapWith = (logEntries: unknown[]): HealthSnapshot =>
+      ({
+        configError: null,
+        config: {
+          providerId: 'deepseek',
+          baseUrl: 'https://api.deepseek.com',
+          apiKey: 'sk-x',
+          model: 'deepseek-v4-flash',
+          customHeaders: '',
+          autoOrganizeNew: true,
+          autoOrganizeAi: true,
+          contextWindow: 128000,
+        },
+        providerNeedsKey: true,
+        permissions: ['bookmarks', 'storage', 'sidePanel', 'tabs'],
+        undoPoints: [],
+        logEntries,
+        bookmarks: { total: 1, folders: 1, emptyFolders: 0, maxDepth: 2, orphaned: 0, duplicateNameGroups: 0 },
+        storageBytes: 1024,
+        lastAiError: null,
+      }) as HealthSnapshot;
+
+    await okA('孤儿记录：修复前上报，修复后不再上报（且状态确实落盘）', async () => {
+      storageMap.delete(UNDO_STORAGE_KEY);
+      const entry = {
+        id: 'log-1',
+        at: Date.now(),
+        title: 'T125 书签',
+        domain: 't125.example',
+        action: 'moved',
+        detail: '已移动',
+        via: 'ai',
+        runId: 'run-gone',
+      };
+      storageMap.set(ORGANIZE_LOG_KEY, [entry]);
+
+      // 修复前：应当报 log.orphan
+      const before = diagnose(snapWith([entry]));
+      assert.ok(
+        before.issues.some((i) => i.id === 'log.orphan'),
+        `修复前应报孤儿记录：${JSON.stringify(before.issues.map((i) => i.id))}`,
+      );
+
+      const r = await runFix('log.mark-orphan');
+      assert.equal(r.ok, true, `修复应成功：${r.detail}`);
+
+      // 修复后：磁盘上应当带上 unreversibleAt
+      const stored = storageMap.get(ORGANIZE_LOG_KEY) as Record<string, unknown>[];
+      assert.ok(
+        typeof stored[0]!.unreversibleAt === 'number',
+        `修复应把标记写进存储：${JSON.stringify(stored[0])}`,
+      );
+
+      // 用磁盘上的真实内容重新诊断：问题必须消失
+      const after = diagnose(snapWith(stored));
+      assert.equal(
+        after.issues.some((i) => i.id === 'log.orphan'),
+        false,
+        `修完之后还在报孤儿记录——"修了但没修好"：${JSON.stringify(after.issues.map((i) => i.id))}`,
+      );
+      storageMap.delete(ORGANIZE_LOG_KEY);
+    });
+
+    await okA('已撤销过的记录不算孤儿（原有行为不变）', async () => {
+      const entry = {
+        id: 'log-2',
+        at: Date.now(),
+        title: 'T125b',
+        action: 'moved',
+        detail: '',
+        runId: 'run-gone-2',
+        undoneAt: Date.now(),
+      };
+      const rep = diagnose(snapWith([entry]));
+      assert.equal(rep.issues.some((i) => i.id === 'log.orphan'), false);
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

@@ -1,6 +1,8 @@
 import { Activity, BookmarkPlus, Check, Keyboard, LayoutPanelLeft, Maximize, MessageSquare, Monitor, Moon, MoreHorizontal, Settings, Sparkles, Sun, Trash2, Wand2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useThemeStore, type Theme } from '@/stores/themeStore';
+import { useConfigStore } from '@/stores/configStore';
+import { pushToast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
 
 /**
@@ -55,26 +57,30 @@ export function MoreMenu({
    * 它一直在后台跑，但界面上没有任何地方显示"它在工作 / 被关掉了"——
    * 于是用户只能靠猜（"我是不是把自动整理弄没了？"）。这里给它一个可见开关。
    */
-  const [autoOrganize, setAutoOrganize] = useState(true);
-  useEffect(() => {
-    if (!open) return;
-    void chrome.storage.local
-      .get('markai.config')
-      .then((d) => {
-        const cfg = d['markai.config'] as { autoOrganizeNew?: boolean } | undefined;
-        setAutoOrganize(cfg?.autoOrganizeNew ?? true);
-      })
-      .catch(() => {});
-  }, [open]);
+  /*
+   * 直接读 config store，而不是自己再读一遍 storage。
+   *
+   * 原先这里是「storage.get → 合并 → storage.set」的整对象覆盖写法：
+   * 读失败时 `cfg` 退化成 `{}`，接着写 `{ ...{}, autoOrganizeNew }`
+   * ——**整份配置（API Key / 端点 / 模型 / 删除模式）被一个布尔字段覆盖**。
+   * 这是 0.2.60~0.2.63 那一类盲写的第五处，而且绕开了 store 里已有的保护。
+   */
+  const config = useConfigStore((s) => s.config);
+  const autoOrganize = config.autoOrganizeNew ?? true;
+  const [savingAuto, setSavingAuto] = useState(false);
 
   const toggleAutoOrganize = async () => {
-    const d = await chrome.storage.local.get('markai.config').catch(() => ({}) as Record<string, unknown>);
-    const cfg = (d['markai.config'] ?? {}) as Record<string, unknown>;
-    const next = !(cfg.autoOrganizeNew ?? true);
-    await chrome.storage.local
-      .set({ 'markai.config': { ...cfg, autoOrganizeNew: next } })
-      .catch(() => {});
-    setAutoOrganize(next);
+    const next = !autoOrganize;
+    setSavingAuto(true);
+    try {
+      const r = await useConfigStore.getState().update({ autoOrganizeNew: next });
+      pushToast(r.ok ? (next ? '已开启自动整理' : '已关闭自动整理') : '开关没有保存成功', {
+        variant: r.ok ? 'default' : 'destructive',
+        ...(r.ok ? {} : { description: r.error ?? '' }),
+      });
+    } finally {
+      setSavingAuto(false);
+    }
   };
 
   // 点击外部 / Esc 关闭（与仓库里其它浮层一致）

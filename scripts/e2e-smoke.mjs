@@ -616,6 +616,78 @@ async function run() {
     await sleep(200);
   }
 
+  /* ══════════ 9.29 更多菜单的自动整理开关：读失败时不能覆盖整份配置 ══════════ */
+  console.log('\n[9.29] 自动整理开关的盲写');
+  {
+    /*
+     * 缺陷：more-menu 里自己做了「storage.get → 合并 → storage.set」的整对象覆盖。
+     * 读失败时 `cfg` 退化成 `{}`，接着写 `{ ...{}, autoOrganizeNew }`
+     * ——**整份配置（API Key / 端点 / 模型 / 删除模式）被一个布尔字段覆盖**。
+     * 这是 0.2.60~0.2.63 那一类盲写的第五处，而且绕开了 store 里已有的保护。
+     */
+    const KEY = 'markai.config';
+    const real = {
+      providerId: 'deepseek',
+      baseUrl: 'https://api.deepseek.com/v1',
+      apiKey: 'sk-e2e-别丢',
+      model: 'deepseek-chat',
+      customHeaders: 'X-A: 1',
+      deleteMode: 'confirm',
+      autoOrganizeNew: true,
+    };
+    await ev(`chrome.storage.local.set({ '${KEY}': ${JSON.stringify(real)} })`);
+    const { targetId: t } = await cdp.send('Target.createTarget', {
+      url: `chrome-extension://${EXT_ID}/page.html`,
+    });
+    const { sessionId: sid } = await cdp.send('Target.attachToTarget', { targetId: t, flatten: true });
+    await cdp.send('Page.enable', {}, sid);
+    const { identifier } = await cdp.send(
+      'Page.addScriptToEvaluateOnNewDocument',
+      {
+        source: `(() => {
+          window.__breakCfg = true;
+          const orig = chrome.storage.local.get.bind(chrome.storage.local);
+          chrome.storage.local.get = (k, ...rest) => {
+            const key = Array.isArray(k) ? k[0] : k;
+            if (window.__breakCfg && key === 'markai.config') {
+              return Promise.reject(new Error('模拟：配置读取失败'));
+            }
+            return orig(k, ...rest);
+          };
+        })();`,
+      },
+      sid,
+    );
+    await cdp.send('Page.reload', {}, sid);
+    await sleep(1300);
+    const ev2 = async (expr) => {
+      const r = await cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }, sid);
+      if (r.exceptionDetails) return null;
+      return r.result?.value;
+    };
+
+    await waitFor(async () => await ev2(`!!document.querySelector('[data-testid="more-trigger"]')`), 8000);
+    await ev2(`document.querySelector('[data-testid="more-trigger"]').click()`);
+    await waitFor(async () => await ev2(`!!document.querySelector('[data-testid="auto-organize-toggle"]')`), 6000);
+    await ev2(`document.querySelector('[data-testid="auto-organize-toggle"]').click()`);
+    await sleep(800);
+
+    /*
+     * 必须用**没有注入坏 get 的页面**读回来。
+     * 我第一版用 ev2（同一个被打坏的页面）读，get 直接 reject → 读到 null →
+     * 断言把"读不到"误报成"被覆盖"。断言本身成了假阳性来源。
+     */
+    const stored = await ev(`(async () => (await chrome.storage.local.get('${KEY}'))['${KEY}'])()`);
+    check(
+      '读配置失败时点开关，API Key / 端点 / 模型 必须还在（不能被一个布尔字段覆盖）',
+      !!stored && stored.apiKey === real.apiKey && stored.baseUrl === real.baseUrl && stored.model === real.model,
+      JSON.stringify({ apiKey: stored?.apiKey ?? null, model: stored?.model ?? null }),
+    );
+
+    await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sid).catch(() => {});
+    await cdp.send('Target.closeTarget', { targetId: t }).catch(() => {});
+  }
+
   /* ══════════ 9.30 搜索失败不能永远转圈 ══════════ */
   console.log('\n[9.30] 搜索失败态');
   {

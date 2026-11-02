@@ -7,11 +7,10 @@ import { ThemeProvider } from '@/components/theme/theme-provider';
 import { ToastViewport } from '@/components/toast/toast';
 import { ConfigForm, OptionsHeader } from '@/components/options/config-form';
 import { useConfigStore } from '@/stores/configStore';
+import { preapplyTheme } from '@/stores/themeStore';
 
 // 同步预应用系统主题，避免挂载闪烁（ThemeProvider 载入存储配置后会精确校准）
-if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-  document.documentElement.classList.add('dark');
-}
+preapplyTheme();
 
 /** 左侧导航条目：与 ConfigForm 里各 Section 的 anchor 一一对应 */
 const NAV = [

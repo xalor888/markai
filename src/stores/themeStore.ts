@@ -21,11 +21,15 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
     try {
       const data = await chrome.storage.local.get(THEME_KEY);
       const saved = data[THEME_KEY] as Theme | undefined;
-      set({ theme: saved ?? 'system' });
-      applyTheme(saved ?? 'system');
+      const t = saved ?? 'system';
+      set({ theme: t });
+      applyTheme(t);
+      mirrorTheme(t);
     } catch (e) {
-      set({ theme: 'system' });
-      applyTheme('system');
+      const t: Theme = 'system';
+      set({ theme: t });
+      applyTheme(t);
+      mirrorTheme(t);
       pushToast('无法读取主题设置', {
         description: `${e instanceof Error ? e.message : String(e)}；已临时使用系统默认主题。`,
         variant: 'destructive',
@@ -46,8 +50,59 @@ export const useThemeStore = create<ThemeState>((set, get) => ({
     }
     set({ theme: t });
     applyTheme(t);
+    mirrorTheme(t);
   },
 }));
+
+/**
+ * 首帧该不该是暗的（纯函数，方便单测）。
+ *
+ * 优先级：**用户显式选过** > 系统偏好。之前入口只看系统偏好，
+ * 于是"系统深色但用户选了浅色"的人每次打开都会先看到一帧深色，然后才被 load() 纠正。
+ */
+export function shouldStartDark(saved: string | null, systemPrefersDark: boolean): boolean {
+  if (saved === 'dark') return true;
+  if (saved === 'light') return false;
+  return systemPrefersDark;
+}
+
+/** 把用户选择镜像进 localStorage：它同步可读，首帧就能拿到（chrome.storage 只能异步读） */
+function mirrorTheme(t: Theme): void {
+  try {
+    localStorage.setItem(THEME_KEY, t);
+  } catch {
+    /* 隐私模式下写不进去不影响功能，只是首帧会退回系统偏好 */
+  }
+}
+
+/**
+ * 在模块求值阶段（React 渲染之前）就把主题应用好。
+ *
+ * 四个入口都调它。读取顺序：localStorage（同步）→ 系统偏好。
+ */
+export function preapplyTheme(): void {
+  if (typeof document === 'undefined' || typeof localStorage === 'undefined') return;
+  let saved: string | null = null;
+  try {
+    saved = localStorage.getItem(THEME_KEY);
+  } catch {
+    saved = null;
+  }
+  const systemDark =
+    typeof window !== 'undefined' &&
+    typeof window.matchMedia === 'function' &&
+    window.matchMedia('(prefers-color-scheme: dark)').matches;
+  document.documentElement.classList.toggle('dark', shouldStartDark(saved, systemDark));
+}
+
+/**
+ * 模块加载时先按「系统」应用一次。
+ *
+ * `load()` 是异步的（要读 storage），而 React 的第一帧在它回来之前就画了。
+ * 若不做这一次同步应用，`<html>` 上还没有 `.dark`——深色系统的用户
+ * **每次打开侧边栏/设置页都会先白一下**，然后才变暗。
+ */
+preapplyTheme();
 
 /** 解析最终主题并应用到 <html> 的 .dark class */
 export function applyTheme(theme: Theme): void {

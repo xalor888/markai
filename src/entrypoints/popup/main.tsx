@@ -18,11 +18,10 @@ import { BrandMark } from '@/components/theme/theme-provider';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Separator } from '@/components/ui/separator';
+import { preapplyTheme } from '@/stores/themeStore';
 
 // 同步预应用系统主题，避免挂载闪烁（ThemeProvider 载入存储配置后会精确校准）
-if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-  document.documentElement.classList.add('dark');
-}
+preapplyTheme();
 
 /** 弹出窗：快速查看待办（待删清单数 + 最近 Agent 动态）+ 各入口 */
 function PopupApp() {

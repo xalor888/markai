@@ -616,6 +616,69 @@ async function run() {
     await sleep(200);
   }
 
+  /* ══════════ 9.281 深色系统下首帧就是暗的（不闪白） ══════════ */
+  console.log('\n[9.281] 主题首帧');
+  {
+    /*
+     * 缺陷：`applyTheme` 只在异步的 `load()` 里调用，而 React 第一帧在它之前就画了。
+     * 于是 `<html>` 上还没有 `.dark` —— 深色系统的用户**每次打开都先白一下**。
+     *
+     * 判据：在 DOMContentLoaded 这一刻记录 `<html>` 的 class。
+     * 那一刻模块脚本已经执行完（我们的同步应用就在这里发生），
+     * 而 `load()` 的 storage 读取还没回来——正好把"首帧"卡住。
+     */
+    const { targetId: t } = await cdp.send('Target.createTarget', {
+      url: `chrome-extension://${EXT_ID}/page.html`,
+    });
+    const { sessionId: sid } = await cdp.send('Target.attachToTarget', { targetId: t, flatten: true });
+    await cdp.send('Page.enable', {}, sid);
+    // 系统深色，但用户在设置里选了**浅色** —— 首帧必须是浅色
+    await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'dark' }] }, sid);
+    const { identifier } = await cdp.send(
+      'Page.addScriptToEvaluateOnNewDocument',
+      {
+        source: `document.addEventListener('DOMContentLoaded', () => {
+          window.__firstFrame = document.documentElement.className;
+        });`,
+      },
+      sid,
+    );
+    await cdp.send(
+      'Runtime.evaluate',
+      { expression: `localStorage.setItem('markai.theme', 'light'); chrome.storage.local.remove('markai.theme')` },
+      sid,
+    );
+    await cdp.send('Page.reload', {}, sid);
+    await sleep(1200);
+    const ev2 = async (expr) => {
+      const r = await cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }, sid);
+      if (r.exceptionDetails) return null;
+      return r.result?.value;
+    };
+    const cls = await ev2(`window.__firstFrame`);
+    check(
+      '系统深色但用户选了浅色时，首帧就是浅的（不被系统偏好带偏）',
+      typeof cls === 'string' && !cls.includes('dark'),
+      JSON.stringify({ firstFrameClass: cls }),
+    );
+
+    // 反向：选了深色 + 系统浅色 → 首帧必须就是暗的
+    await cdp.send('Runtime.evaluate', { expression: `localStorage.setItem('markai.theme', 'dark')` }, sid);
+    await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: 'light' }] }, sid);
+    await cdp.send('Page.reload', {}, sid);
+    await sleep(1200);
+    const cls2 = await ev2(`window.__firstFrame`);
+    check(
+      '系统浅色但用户选了深色时，首帧就是暗的',
+      typeof cls2 === 'string' && cls2.includes('dark'),
+      JSON.stringify({ firstFrameClass: cls2 }),
+    );
+
+    await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sid).catch(() => {});
+    await cdp.send('Emulation.setEmulatedMedia', { features: [] }, sid).catch(() => {});
+    await cdp.send('Target.closeTarget', { targetId: t }).catch(() => {});
+  }
+
   /* ══════════ 9.282 设置页能导出书签文件 ══════════ */
   console.log('\n[9.282] 书签导出');
   {

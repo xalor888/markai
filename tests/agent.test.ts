@@ -12154,6 +12154,35 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T129: 首帧主题优先级 ══════════ */
+  console.log('\n[T129] 首帧主题判定');
+  {
+    /*
+     * 缺陷：入口原先只看系统偏好。于是"系统深色、但用户在设置里选了浅色"的人，
+     * 每次打开都会**先看到一帧深色**，然后才被异步的 load() 纠正。
+     * 用户显式选过的优先级必须高于系统偏好，而这一点必须在首帧就能算出来。
+     */
+    const { shouldStartDark } = await import('../src/stores/themeStore');
+
+    ok('用户显式选过 > 系统偏好', () => {
+      assert.equal(shouldStartDark('light', true), false, '选了浅色就该是浅色，哪怕系统是深色');
+      assert.equal(shouldStartDark('dark', false), true, '选了深色就该是深色，哪怕系统是浅色');
+    });
+
+    ok('没选过时跟随系统', () => {
+      assert.equal(shouldStartDark(null, true), true);
+      assert.equal(shouldStartDark(null, false), false);
+      assert.equal(shouldStartDark('system', true), true);
+      assert.equal(shouldStartDark('system', false), false);
+    });
+
+    ok('脏值不猜：当成"没选过"跟随系统', () => {
+      assert.equal(shouldStartDark('purple', true), true);
+      assert.equal(shouldStartDark('purple', false), false);
+      assert.equal(shouldStartDark('', false), false);
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

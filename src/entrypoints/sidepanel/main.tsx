@@ -9,11 +9,10 @@ import { initBookmarkListeners, initUIWindowSync, useBookmarkStore } from '@/sto
 import { useAIStore, initCrossWindowSync } from '@/stores/aiStore';
 import { useConfigStore } from '@/stores/configStore';
 import { consumeSeed } from '@/lib/chat/seed';
+import { preapplyTheme } from '@/stores/themeStore';
 
 // 同步预应用系统主题，避免挂载闪烁（ThemeProvider 载入存储配置后会精确校准）
-if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
-  document.documentElement.classList.add('dark');
-}
+preapplyTheme();
 
 /**
  * 侧边栏入口（Arc 风格紧凑工作区）：

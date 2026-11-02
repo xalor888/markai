@@ -1381,6 +1381,53 @@ async function run() {
     check('新建的书签出现在界面上（不用手动刷新）', inList === true, JSON.stringify({ inList }));
   }
 
+  /* ══════════ 9.2912 Ctrl+D 收藏当前页：提示承诺了，以前却没有处理器 ══════════ */
+  console.log('\n[9.2912] Ctrl+D 收藏当前页');
+  {
+    /*
+     * 空态提示从 0.2.x 起就写着「或按 Ctrl+D 把当前页面收藏进来」，
+     * 但**代码里从来没有这个处理器**（全库搜不到 key === 'd' 的分支）——
+     * 用户照着提示按下去什么都没发生。这是**文案承诺了却不存在的行为**，
+     * 属于产品缺陷，不是测试缺口。
+     *
+     * 0.2.98 补上处理器。这里验三件事：
+     *   1) Ctrl+D 真的弹出新建书签对话框
+     *   2) 标题和地址被**预填**成当前活动标签页（原生收藏的手感）
+     *   3) 输入框里的 Ctrl+D **不**被劫持（否则打字受影响）
+     */
+    await ev(`(() => { const el = document.querySelector('[data-testid="list"]'); if (el) el.focus(); return !!el; })()`);
+    await sleep(200);
+
+    /*
+     * 预填（读活动标签页）这里**不**在 e2e 里断言：
+     * CDP 建的标签页不一定落在扩展页所在窗口，`chrome.tabs.query({active:true,
+     * currentWindow:true})` 拿到的可能是空 URL（实测 url:""），
+     * 于是断言会因**环境**而不是产品失败。
+     * 预填逻辑本身是纯函数 `prefillFromTab`，单测已覆盖 8 处
+     * （http / file:// / 空标题 / 不可收藏 URL）。
+     * 这里只验这一轮真正修的东西：**Ctrl+D 终于有处理器了**。
+     */
+    await ev(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', ctrlKey: true, bubbles: true, cancelable: true }))`);
+    const dlgOpen = await waitFor(async () => await ev(`!!document.querySelector('#bookmark-title')`), 5000);
+    check('按 Ctrl+D 弹出新建书签对话框（提示里承诺的行为）', dlgOpen === true, JSON.stringify({ dlgOpen }));
+
+    // 输入框里的 Ctrl+D 不该被劫持
+    const inInput = await ev(`(async () => {
+      const input = document.querySelector('#bookmark-title');
+      if (!input) return { ok: false, reason: 'no-input' };
+      input.focus();
+      const before = document.querySelector('#bookmark-title') !== null;
+      input.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', ctrlKey: true, bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 400));
+      // 对话框应该还在（没有被关掉/重开），输入框还在
+      return { ok: true, stillOpen: !!document.querySelector('#bookmark-title'), before };
+    })()`);
+    check('输入框里的 Ctrl+D 不劫持（打字不受影响）', inInput.ok === true && inInput.stillOpen === true, JSON.stringify(inInput));
+
+    await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    await sleep(300);
+  }
+
   /* ══════════ 9.289 多窗口同步：一个窗口的改动，另一个窗口看得见 ══════════ */
   console.log('\n[9.289] 多窗口同步');
   {

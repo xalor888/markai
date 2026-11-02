@@ -226,6 +226,34 @@ export function Workspace({
     };
   }, []);
 
+  /*
+   * Ctrl/Cmd+D：把当前页面收藏进来（原生浏览器习惯，也是空态提示里承诺的）。
+   *
+   * 提示文案从 0.2.x 起就写着「或按 Ctrl+D 把当前页面收藏进来」，
+   * 但**代码里从来没有这个处理器**——用户照着提示按下去，什么都没发生。
+   * 这是文案承诺了却不存在的行为，属于产品缺陷而不是测试缺口。
+   *
+   * 预填不用自己写：create-bookmark 对话框打开时会自己读活动标签页
+   * （见 bookmark-dialogs.tsx 的 prefillFromTab）。
+   */
+  useEffect(() => {
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key !== 'd' && e.key !== 'D') return;
+      if (!e.ctrlKey && !e.metaKey) return;
+      const el = e.target as HTMLElement | null;
+      if (el && typeof el.closest === 'function' && el.closest('input, textarea, select, [contenteditable="true"]')) {
+        return; // 输入框里的 Ctrl+D 是浏览器/编辑器自己的行为，不劫持
+      }
+      e.preventDefault();
+      useUIStore.getState().openDialog({
+        kind: 'create-bookmark',
+        parentId: useBookmarkStore.getState().selectedFolderId ?? '',
+      });
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   // 「?」打开快捷键速查：界面上不看文档也能发现这些键
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {

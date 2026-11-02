@@ -14,7 +14,12 @@ interface Shortcut {
   desc: string;
 }
 
-const GROUPS: { title: string; items: Shortcut[] }[] = [
+/**
+ * 导出来给契约守卫用：说明里列的每个键，都必须在真实处理器里找得到。
+ * 注释里写着"只列代码里真实绑定过的键"——没有守卫守着，这句话就是空话
+ * （Ctrl+D 那次已经证明：界面承诺了、代码里没有，用户按下去什么都没发生）。
+ */
+export const SHORTCUT_GROUPS: { title: string; items: Shortcut[] }[] = [
   {
     title: '导航',
     items: [
@@ -74,7 +79,7 @@ export function ShortcutsDialog({ open, onOpenChange }: { open: boolean; onOpenC
       width="w-[560px]"
     >
       <div className="grid grid-cols-1 gap-x-6 gap-y-4 sm:grid-cols-2">
-        {GROUPS.map((group) => (
+        {SHORTCUT_GROUPS.map((group) => (
           <section key={group.title}>
             <h3 className="mb-2 flex items-center gap-1.5 text-2xs font-semibold tracking-wide text-muted-foreground uppercase">
               <Keyboard className="h-3 w-3" aria-hidden="true" />

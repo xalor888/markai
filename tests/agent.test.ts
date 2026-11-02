@@ -12508,3 +12508,61 @@ async function okA(name: string, fn: () => Promise<void> | void) {
   console.error('\n❌ 测试失败:', e);
   process.exit(1);
 });
+
+/* ── 快捷键说明 vs 真实处理器 的契约守卫 ─────────────────────────────
+ *
+ * 速查表注释写着「只列代码里真实绑定过的键，不写"应该支持"的键」，
+ * 但没有任何东西守着它。Ctrl+D 那次（0.2.98）已经证明：
+ * 界面承诺了、代码里没有，用户按下去什么都没发生。
+ */
+void okA('快捷键说明里列的键，处理器里都接得住', async () => {
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const { SHORTCUT_GROUPS } = await import('../src/components/common/shortcuts-dialog');
+  const {
+    findShortcutGaps,
+    handledKeysFromFile,
+    extractHandledKeys,
+  } = await import('../src/lib/guards/shortcut-contract');
+
+  const declared = SHORTCUT_GROUPS.flatMap((g) => g.items);
+  const handlers = [
+    handledKeysFromFile(repoRoot, 'src/components/bookmark-list/bookmark-list.tsx'),
+    handledKeysFromFile(repoRoot, 'src/components/sidebar/bookmark-tree.tsx'),
+    handledKeysFromFile(repoRoot, 'src/components/workspace/workspace.tsx'),
+    handledKeysFromFile(repoRoot, 'src/components/command/command-palette.tsx'),
+  ];
+
+  const gaps = findShortcutGaps(declared, handlers);
+  assert.deepEqual(
+    gaps,
+    [],
+    `快捷键速查表列了但处理器里找不到的键：${JSON.stringify(gaps)}`,
+  );
+});
+
+void okA('契约守卫对"说明里有、代码里没有"敏感（证伪）', async () => {
+  const { extractHandledKeys, findShortcutGaps } = await import('../src/lib/guards/shortcut-contract');
+
+  // 处理器只接了方向键，说明里却列了 F2 —— 必须被抓出来
+  const handlers = [extractHandledKeys("case 'arrowdown':\ncase 'arrowup':\n")];
+  const gaps = findShortcutGaps(
+    [
+      { keys: ['↑', '↓'], desc: '上下移动高亮' },
+      { keys: ['F2'], desc: '重命名当前项' },
+    ],
+    handlers,
+  );
+  assert.equal(gaps.length, 1, JSON.stringify(gaps));
+  assert.deepEqual(gaps[0]!.keys, ['F2']);
+
+  // 注释里出现的键不算接住（注释到不了运行时）
+  const commented = [extractHandledKeys("// case 'f2': 重命名\n/* case 'delete': 删除 */\n")];
+  const gaps2 = findShortcutGaps(
+    [
+      { keys: ['F2'], desc: '重命名当前项' },
+      { keys: ['Delete'], desc: '删除' },
+    ],
+    commented,
+  );
+  assert.equal(gaps2.length, 2, JSON.stringify(gaps2));
+});

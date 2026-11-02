@@ -11656,6 +11656,109 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T121: 长期记忆读失败时，保存不能清空已有记忆 ══════════ */
+  console.log('\n[T121] 长期记忆的盲写');
+  {
+    /*
+     * `getMemories()` 读失败会退回 `memoryCache`（首次是 `[]`），而 `addMemoryItem`
+     * 拿它当"当前全部记忆"构造新列表写回 → **已有记忆被清空**。
+     * 与 0.2.60 / 0.2.61 / 0.2.62 同一结构，这是第四处。
+     */
+    const { getMemories, saveMemories, MEMORY_STORAGE_KEY } = await import('../src/lib/ai/memory');
+    const KEY = MEMORY_STORAGE_KEY;
+    const seed = [
+      { id: 'mem-1', content: '我偏好中文回复', category: 'preference', createdAt: 1, updatedAt: 1, weight: 1 },
+      { id: 'mem-2', content: '我在做设计相关项目', category: 'context', createdAt: 2, updatedAt: 2, weight: 1 },
+    ];
+
+    await okA('读失败后保存：拒绝写入，磁盘上的记忆一条不少', async () => {
+      /*
+       * 先做一次成功读取把模块内缓存清成空（memory.ts 有模块级 memoryCache，
+       * 上一条用例会把它留脏；不重置的话前置断言会因环境而从失败）。
+       */
+      storageMap.set(KEY, []);
+      await getMemories();
+      // 现在磁盘上有真实记忆，而内存缓存仍是空 —— 正是危险状态
+      storageMap.set(KEY, seed);
+      const orig = chrome.storage.local.get;
+      chrome.storage.local.get = (async (k: unknown) => {
+        const key = Array.isArray(k) ? k[0] : k;
+        if (key === KEY) throw new Error('模拟：读记忆失败');
+        return orig(k as never);
+      }) as typeof chrome.storage.local.get;
+      let list: unknown[] = [];
+      try {
+        list = await getMemories();
+      } finally {
+        chrome.storage.local.get = orig;
+      }
+      // 前置：读失败时返回空（这就是危险状态）
+      assert.deepEqual(list, [], '前置：读失败应返回空列表');
+
+      await assert.rejects(
+        () => saveMemories([{ id: 'mem-new', content: '新记忆', category: 'preference', createdAt: 3, updatedAt: 3, weight: 1 }] as never),
+        /没有保存|读取长期记忆失败/,
+        '读失败时保存必须报错，不能静默覆盖',
+      );
+
+      const stored = storageMap.get(KEY) as { id: string }[];
+      const ids = stored.map((m) => m.id);
+      assert.deepEqual(ids, ['mem-1', 'mem-2'], `已有记忆被清空了：${JSON.stringify(ids)}`);
+      storageMap.delete(KEY);
+    });
+
+    await okA('读正常时保存照常生效（没把功能改坏）', async () => {
+      storageMap.set(KEY, seed);
+      await getMemories();
+      await saveMemories([...seed, { id: 'mem-3', content: '第三条', category: 'preference', createdAt: 3, updatedAt: 3, weight: 1 }] as never);
+      const stored = storageMap.get(KEY) as { id: string }[];
+      assert.equal(stored.length, 3, `应写入三条：${JSON.stringify(stored.map((m) => m.id))}`);
+      storageMap.delete(KEY);
+    });
+  }
+
+  /* ══════════ T122: 整理记录读失败时也不许盲写（回归锁） ══════════ */
+  console.log('\n[T122] 整理记录的盲写（本来就是安全的，锁住别改坏）');
+  {
+    /*
+     * 这一处**没有** bug：`appendOrganizeLog` / `updateOrganizeLogEntry` 里
+     * `storage.local.set` 写在 `try` 内部，读失败会直接跳到 catch，不会写。
+     *
+     * 但它和前三处长得一模一样（读 → 改 → 整对象写），重构时极易被"整理"成盲写。
+     * 用一条用例把这个性质钉住。
+     */
+    const { appendOrganizeLog, ORGANIZE_LOG_KEY } = await import('../src/lib/ai/organize-log');
+    const KEY = ORGANIZE_LOG_KEY;
+
+    await okA('读失败时放弃追加，磁盘上已有记录不变', async () => {
+      const seed = [
+        { id: 'o1', at: 1_000, title: '旧记录一', domain: 'a.example', action: 'moved', detail: 'ok', via: 'local' },
+        { id: 'o2', at: 2_000, title: '旧记录二', domain: 'b.example', action: 'moved', detail: 'ok', via: 'local' },
+      ];
+      storageMap.set(KEY, seed);
+
+      const orig = chrome.storage.local.get;
+      chrome.storage.local.get = (async (k: unknown) => {
+        const key = Array.isArray(k) ? k[0] : k;
+        if (key === KEY) throw new Error('模拟：读整理记录失败');
+        return orig(k as never);
+      }) as typeof chrome.storage.local.get;
+      try {
+        await appendOrganizeLog({
+          id: 'o3', at: 3_000, title: '新记录', domain: 'c.example', action: 'moved', detail: 'ok', via: 'local',
+        } as never);
+      } finally {
+        chrome.storage.local.get = orig;
+      }
+
+      const stored = storageMap.get(KEY) as { id: string }[];
+      const ids = stored.map((e) => e.id);
+      assert.deepEqual(ids, ['o1', 'o2'], `已有整理记录被覆盖了：${JSON.stringify(ids)}`);
+
+      storageMap.delete(KEY);
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

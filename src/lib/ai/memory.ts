@@ -24,6 +24,14 @@ export const CATEGORY_LABELS: Record<MemoryCategory, string> = {
 
 // 内存兜底（非扩展环境/单测回退）
 let memoryCache: MemoryItem[] = [];
+/**
+ * 上一次 `getMemories()` 是否真的读到了存储。
+ *
+ * 读失败时 `memoryCache` 会停在旧值（首次是 `[]`），而调用方会拿它当"当前全部记忆"
+ * 去构造新列表写回——**已有记忆会被清空**。这与 0.2.60 / 0.2.61 / 0.2.62 是同一类盲写：
+ * 读失败 → 内存退化成空 → 整对象覆盖。
+ */
+let lastReadOk = false;
 
 /** 从存储读取所有记忆（按更新时间降序） */
 export async function getMemories(): Promise<MemoryItem[]> {
@@ -32,15 +40,27 @@ export async function getMemories(): Promise<MemoryItem[]> {
       const data = await chrome.storage.local.get(MEMORY_STORAGE_KEY);
       const list = (data[MEMORY_STORAGE_KEY] as MemoryItem[]) || [];
       memoryCache = Array.isArray(list) ? list : [];
+      lastReadOk = true;
     }
   } catch {
-    // 降级使用 memoryCache
+    // 降级使用 memoryCache；标记读失败，写路径据此拒绝盲写
+    lastReadOk = false;
   }
   return [...memoryCache].sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
 /** 保存记忆列表到持久化存储 */
 export async function saveMemories(memories: MemoryItem[]): Promise<void> {
+  /*
+   * 没成功读到过就不能写。
+   *
+   * 传进来的 `memories` 是调用方基于"当前全部记忆"构造的完整列表；
+   * 如果那个"当前全部"其实是读失败后的空数组，写下去就是把用户的长期记忆清空。
+   * 宁可不保存，也要把原因说清楚。
+   */
+  if (!lastReadOk) {
+    throw new Error('读取长期记忆失败，本次**没有保存**（避免用不完整的列表覆盖已有记忆）。请稍后重试。');
+  }
   memoryCache = [...memories];
   if (typeof chrome !== 'undefined' && chrome.storage?.local) {
     await chrome.storage.local.set({ [MEMORY_STORAGE_KEY]: memoryCache });

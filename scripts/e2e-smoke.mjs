@@ -1629,6 +1629,58 @@ async function run() {
     mock.srv.close();
   }
 
+  /* ══════════ 9.437 弹窗整理卡片：读不到别说「今天 0 条」 ══════════ */
+  console.log('\n[9.437] 弹窗整理卡片失败态');
+  {
+    const { targetId: t } = await cdp.send('Target.createTarget', {
+      url: `chrome-extension://${EXT_ID}/popup.html`,
+    });
+    const { sessionId: sid } = await cdp.send('Target.attachToTarget', { targetId: t, flatten: true });
+    await cdp.send('Page.enable', {}, sid);
+    // 只打坏整理记录那一次读取，其他读写保持正常
+    const { identifier } = await cdp.send(
+      'Page.addScriptToEvaluateOnNewDocument',
+      {
+        source: `(() => {
+          const orig = chrome.storage.local.get.bind(chrome.storage.local);
+          chrome.storage.local.get = (...a) => {
+            const k = a[0];
+            const isLog = (typeof k === 'string' && k === 'markai.organize.log')
+              || (Array.isArray(k) && k.includes('markai.organize.log'));
+            if (isLog) return Promise.reject(new Error('模拟：整理记录读取失败'));
+            return orig(...a);
+          };
+        })();`,
+      },
+      sid,
+    );
+    await cdp.send('Page.reload', {}, sid);
+    await sleep(1300);
+    const ev2 = async (expr) => {
+      const r = await cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }, sid);
+      if (r.exceptionDetails) return null;
+      return r.result?.value;
+    };
+    await waitFor(async () => await ev2(`!!document.querySelector('[data-testid="popup-organize-badge"]')`), 6000);
+    const card = await ev2(`(() => ({
+      badge: document.querySelector('[data-testid="popup-organize-badge"]')?.textContent?.trim(),
+      body: document.querySelector('[data-testid="popup-organize-body"]')?.textContent?.trim(),
+    }))()`);
+    check(
+      '读不到整理记录时徽标说「读取失败」，不是「今天 0 条」',
+      card.badge === '读取失败',
+      JSON.stringify(card),
+    );
+    check(
+      '正文说明这只代表没读到，不是"还没收藏过"',
+      typeof card.body === 'string' && card.body.includes('不代表') && !card.body.includes('收藏新页面后'),
+      JSON.stringify(card),
+    );
+
+    await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sid).catch(() => {});
+    await cdp.send('Target.closeTarget', { targetId: t }).catch(() => {});
+  }
+
   /* ══════════ 9.435 弹窗读取失败时不能假装"没有待办" ══════════ */
   console.log('\n[9.435] 弹窗读取失败态');
   {

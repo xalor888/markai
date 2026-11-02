@@ -416,8 +416,21 @@ async function handleOneShot(msg: OneShotInbound): Promise<OneShotOutbound> {
     }
 
     case 'organize:list': {
-      const entries = await readOrganizeLog();
-      return { type: 'organize:list:result', entries, stats: summarizeOrganizeLog(entries) };
+      /*
+       * 读失败要显式回一个 error，而不是让整个 handler reject。
+       * reject 会让发送方只看到"通道异常"，分不清"读不到记录"和"联系不上后台"。
+       */
+      try {
+        const entries = await readOrganizeLog();
+        return { type: 'organize:list:result', entries, stats: summarizeOrganizeLog(entries) };
+      } catch (e) {
+        return {
+          type: 'organize:list:result',
+          entries: [],
+          stats: summarizeOrganizeLog([]),
+          error: e instanceof Error ? e.message : String(e),
+        };
+      }
     }
 
     case 'organize:clear': {

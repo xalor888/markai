@@ -187,7 +187,13 @@ export type OneShotOutbound =
   | { type: 'undo:list:result'; points: UndoPoint[]; notice?: string; noticeAt?: number }
   | { type: 'undo:apply:result'; result: UndoApplyResult }
   | { type: 'task:status:result'; running: boolean }
-  | { type: 'organize:list:result'; entries: OrganizeLogEntry[]; stats: OrganizeStats }
+  | {
+      type: 'organize:list:result';
+      entries: OrganizeLogEntry[];
+      stats: OrganizeStats;
+      /** 读取失败时的原因：有它就表示 entries 不可信（不是"没有记录"） */
+      error?: string;
+    }
   | { type: 'organize:clear:result'; ok: boolean }
   | { type: 'organize:retry:result'; ok: boolean; detail: string }
   | { type: 'organize:retry:all:result'; attempted: number; succeeded: number; failed: number; detail: string }

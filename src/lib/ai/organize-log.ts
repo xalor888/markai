@@ -120,8 +120,18 @@ export function appendOrganizeLog(entry: OrganizeLogEntry): Promise<void> {
 }
 
 /** 读取日志（按时间倒序，容忍脏数据） */
+/**
+ * 读整理记录。
+ *
+ * **读失败会抛**，不再返回空数组。
+ *
+ * 早先这里 `catch { return [] }`，把"读不到"变成了"没有记录"——
+ * 调用方的 `.catch` 永远不触发，于是界面上就会出现
+ * 「今天 0 条 / 收藏新页面后会自动归类」这种假话（见 0.2.55 / 0.2.57 / 0.2.58 同类问题）。
+ * 错误必须让调用方看见，由它决定怎么呈现。
+ */
 export async function readOrganizeLog(): Promise<OrganizeLogEntry[]> {
-  try {
+  {
     const data = await chrome.storage.local.get(ORGANIZE_LOG_KEY);
     const raw = Array.isArray(data[ORGANIZE_LOG_KEY]) ? (data[ORGANIZE_LOG_KEY] as unknown[]) : [];
     return raw
@@ -132,8 +142,6 @@ export async function readOrganizeLog(): Promise<OrganizeLogEntry[]> {
       })
       .sort((a, b) => b.at - a.at)
       .slice(0, ORGANIZE_LOG_LIMIT);
-  } catch {
-    return [];
   }
 }
 

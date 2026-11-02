@@ -11309,6 +11309,108 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T116: 弹窗整理卡片也不能把"不知道"说成"0 条" ══════════ */
+  console.log('\n[T116] 弹窗整理卡片的三种语义');
+  {
+    /*
+     * 同一个问题的第二次出现：`organizeStats` 初值 null、读失败也是 null，
+     * 而渲染写成 `today ?? 0` → 读不到也显示「今天 0 条」，
+     * 还配一句「收藏新页面后会自动归类」——两句都在说"你这边什么都没有"。
+     * 实际是**这次没读到**。
+     */
+    const { organizeCardCopy } = await import('../src/lib/bookmarks/organize-card-copy');
+
+    ok('读取中：徽标说"读取中"，正文不下结论', () => {
+      const c = organizeCardCopy('loading', null);
+      assert.equal(c.badge, '读取中');
+      assert.equal(/\d+\s*条/.test(c.badge), false, `读取中不该出现条数：${c.badge}`);
+      assert.equal(c.body.includes('没整理过'), false, c.body);
+    });
+
+    ok('读取失败：不能说「今天 0 条」，也不能说"会自动归类"', () => {
+      const c = organizeCardCopy('error', null);
+      assert.equal(c.badge, '读取失败');
+      assert.equal(c.badge.includes('0 条'), false, `读失败不能说 0 条：${c.badge}`);
+      assert.equal(c.body.includes('收藏新页面后'), false, `读失败不能说"还没收藏"：${c.body}`);
+      assert.ok(c.body.includes('不代表'), c.body);
+    });
+
+    ok('读到且为空：这时才可以显示 0 条', () => {
+      const c = organizeCardCopy('ok', { today: 0, total: 0, moved: 0, created: 0, failed: 0, latest: null } as never);
+      assert.equal(c.badge, '今天 0 条');
+      assert.ok(c.body.includes('收藏新页面后'), c.body);
+    });
+
+    ok('读到且有数据：显示条数与最近一条，失败数单独给出', () => {
+      const c = organizeCardCopy(
+        'ok',
+        {
+          today: 3,
+          total: 9,
+          moved: 2,
+          created: 1,
+          failed: 2,
+          latest: { title: 'Radix', target: '设计资料' },
+        } as never,
+      );
+      assert.equal(c.badge, '今天 3 条');
+      assert.ok(c.body.includes('Radix'), c.body);
+      assert.ok(c.body.includes('设计资料'), c.body);
+      assert.equal(c.failedCount, 2);
+    });
+
+    ok('读失败时即使有旧的 stats 也不能拿来充数（避免显示过期数字）', () => {
+      const c = organizeCardCopy('error', { today: 7, total: 7, moved: 7, created: 0, failed: 0, latest: { title: 'X' } } as never);
+      assert.equal(c.badge, '读取失败');
+      assert.equal(c.failedCount, 0);
+    });
+  }
+
+  /* ══════════ T117: 读整理记录失败要抛，不能假装"没有记录" ══════════ */
+  console.log('\n[T117] readOrganizeLog 不再吞错');
+  {
+    /*
+     * 根因：`readOrganizeLog` 里 `catch { return [] }` 把"读不到"变成了"没有记录"。
+     * 调用方的 `.catch` 永远不触发 → 界面上出现「今天 0 条 / 收藏新页面后会自动归类」
+     * 这种假话。这是 0.2.55 / 0.2.57 / 0.2.58 之后的第四次同类问题。
+     */
+    const { readOrganizeLog, ORGANIZE_LOG_KEY } = await import('../src/lib/ai/organize-log');
+
+    await okA('存储读取失败时抛出（而不是返回空数组）', async () => {
+      storageMap.delete(ORGANIZE_LOG_KEY);
+      const orig = chrome.storage.local.get;
+      // 只让这次读取失败
+      chrome.storage.local.get = (async () => {
+        throw new Error('模拟：存储读取失败');
+      }) as typeof chrome.storage.local.get;
+      try {
+        await assert.rejects(
+          () => readOrganizeLog(),
+          /存储读取失败/,
+          '读失败必须抛出，否则调用方会把"读不到"当成"没有记录"',
+        );
+      } finally {
+        chrome.storage.local.get = orig;
+      }
+    });
+
+    await okA('正常读取仍然返回条目（没有把功能改坏）', async () => {
+      storageMap.set(ORGANIZE_LOG_KEY, [
+        { id: 'e1', at: Date.now(), title: 'T117', domain: 'x.example', action: 'moved', detail: 'ok', via: 'local' },
+      ]);
+      const entries = await readOrganizeLog();
+      assert.equal(entries.length, 1);
+      assert.equal(entries[0]!.id, 'e1');
+      storageMap.delete(ORGANIZE_LOG_KEY);
+    });
+
+    await okA('没有记录时返回空数组（这是"真的没有"，不是"读不到"）', async () => {
+      storageMap.delete(ORGANIZE_LOG_KEY);
+      const entries = await readOrganizeLog();
+      assert.deepEqual(entries, []);
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

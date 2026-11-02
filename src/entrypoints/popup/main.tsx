@@ -13,6 +13,7 @@ import { ORGANIZE_LOG_KEY, readOrganizeLog, summarizeOrganizeLog, type OrganizeS
 import { appVersion } from '@/lib/version';
 import { saveTabToBar } from '@/lib/bookmarks/save-tab';
 import { pendingCardCopy } from '@/lib/bookmarks/pending-copy';
+import { organizeCardCopy, type OrganizeLoadState } from '@/lib/bookmarks/organize-card-copy';
 import { BrandMark } from '@/components/theme/theme-provider';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -45,6 +46,8 @@ function PopupApp() {
   const [autoDeleteMode, setAutoDeleteMode] = useState(false);
   /** 自动整理摘要：popup 是用户最容易看到「它刚帮我干了什么」的地方 */
   const [organizeStats, setOrganizeStats] = useState<OrganizeStats | null>(null);
+  /** 整理记录的读取状态：null 统计 + 失败 ≠ 今天没整理过 */
+  const [organizeState, setOrganizeState] = useState<OrganizeLoadState>('loading');
 
   // 当前活动标签页是否可收藏（http/https 才可）
   useEffect(() => {
@@ -67,8 +70,15 @@ function PopupApp() {
       })
       .catch(() => setTaskRunning(false));
     void readOrganizeLog()
-      .then((entries) => setOrganizeStats(summarizeOrganizeLog(entries)))
-      .catch(() => setOrganizeStats(null));
+      .then((entries) => {
+        setOrganizeStats(summarizeOrganizeLog(entries));
+        setOrganizeState('ok');
+      })
+      .catch(() => {
+        // 读不到 ≠ 今天没整理过：必须区分，否则界面在说假话
+        setOrganizeStats(null);
+        setOrganizeState('error');
+      });
     void chrome.storage.local
       .get([AI_STORAGE_KEY, 'markai.config'])
       .then((data) => {
@@ -161,6 +171,8 @@ function PopupApp() {
   };
 
   /** 收藏当前活动标签页（重复检测，存入书签栏）；失败时保留 popup 并显示原因 */
+  const organizeCopy = organizeCardCopy(organizeState, organizeStats);
+
   const saveCurrentTab = async () => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     setSaveError('');
@@ -239,18 +251,16 @@ function PopupApp() {
           <div className="flex items-center gap-2">
             <Wand2 className="h-3.5 w-3.5 text-accent" />
             <span className="text-xs font-medium text-foreground">自动整理</span>
-            <Badge variant="outline" className="ml-auto">
-              今天 {organizeStats?.today ?? 0} 条
+            <Badge variant="outline" className="ml-auto" data-testid="popup-organize-badge">
+              {organizeCopy.badge}
             </Badge>
           </div>
-          <p className="mt-2 text-2xs leading-4 text-muted-foreground">
-            {organizeStats?.latest
-              ? `最近：${organizeStats.latest.title}${organizeStats.latest.target ? ` → ${organizeStats.latest.target}` : ''}`
-              : '收藏新页面后会自动归类，记录会出现在这里。'}
+          <p className="mt-2 text-2xs leading-4 text-muted-foreground" data-testid="popup-organize-body">
+            {organizeCopy.body}
           </p>
-          {(organizeStats?.failed ?? 0) > 0 && (
+          {organizeCopy.failedCount > 0 && (
             <p className="mt-1 text-2xs text-destructive">
-              有 {organizeStats?.failed} 条整理失败，可查看并重试
+              有 {organizeCopy.failedCount} 条整理失败，可查看并重试
             </p>
           )}
         </button>

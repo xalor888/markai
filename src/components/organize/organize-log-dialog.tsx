@@ -59,9 +59,17 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
     if (!opts.silent) setLoading(true);
     try {
       const res = (await chrome.runtime.sendMessage({ type: 'organize:list' })) as
-        | { type?: string; entries?: OrganizeLogEntry[]; stats?: OrganizeStats }
+        | { type?: string; entries?: OrganizeLogEntry[]; stats?: OrganizeStats; error?: string }
         | undefined;
       if (res?.type === 'organize:list:result') {
+        /*
+         * 后台可能带回 error：那表示 entries 不可信（不是"没有记录"）。
+         * 这时保留已有条目（可能是上一次读到的），但必须把原因摆出来。
+         */
+        if (res.error) {
+          setNotice(`读取整理记录失败：${res.error}。这不代表你没有记录，点「重试」再试一次。`);
+          return;
+        }
         setEntries(res.entries ?? []);
         setStats(res.stats ?? null);
         setNotice(null);

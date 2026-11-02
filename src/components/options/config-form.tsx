@@ -472,6 +472,7 @@ export function ConfigForm() {
       </Section>
 
       {/* ── AI 服务 ── */}
+      <ErrorBoundary area="AI 服务">
       <Section icon={Plug} title="AI 服务" anchor="ai">
         <div className="space-y-3.5">
           <Field
@@ -658,8 +659,10 @@ export function ConfigForm() {
           </div>
         </div>
       </Section>
+      </ErrorBoundary>
 
       {/* ── 上下文与预算 ── */}
+      <ErrorBoundary area="上下文与预算">
       <Section icon={SlidersHorizontal} title="上下文与预算" anchor="context">
         <div className="space-y-3.5">
           <Field
@@ -747,8 +750,10 @@ export function ConfigForm() {
           </label>
         </div>
       </Section>
+      </ErrorBoundary>
 
       {/* ── Agent 行为 ── */}
+      <ErrorBoundary area="Agent 行为">
       <Section icon={Zap} title="Agent 行为" anchor="agent">
         <div className="space-y-3.5">
           <Field
@@ -834,6 +839,7 @@ export function ConfigForm() {
           </button>
         </div>
       </Section>
+      </ErrorBoundary>
 
       {/* ── 长期记忆 ── */}
       <Section
@@ -932,6 +938,7 @@ export function ConfigForm() {
       </Section>
 
       {/* ── 外观 ── */}
+      <ErrorBoundary area="外观">
       <Section icon={Palette} title="外观" anchor="appearance">
         <div className="grid grid-cols-3 gap-1.5">
           {(
@@ -958,8 +965,10 @@ export function ConfigForm() {
           ))}
         </div>
       </Section>
+      </ErrorBoundary>
 
       {/* ── 数据管理 ── */}
+      <ErrorBoundary area="数据管理">
       <Section icon={Database} title="数据管理" anchor="data">
         {/*
          * 书签导出：浏览器通用的 Netscape HTML（可再导入 Chrome/Edge/Firefox/Safari）
@@ -1020,6 +1029,7 @@ export function ConfigForm() {
           </Button>
         </div>
       </Section>
+      </ErrorBoundary>
 
       {/* ── 安全说明：次要信息，不占一张卡片 ── */}
       <div className="rounded-lg border border-border/60 bg-muted/30 px-4 py-3.5">

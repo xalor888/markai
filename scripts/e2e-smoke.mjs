@@ -679,6 +679,48 @@ async function run() {
     await cdp.send('Target.closeTarget', { targetId: t }).catch(() => {});
   }
 
+  /* ══════════ 9.284 设置页每一节都有错误边界 ══════════ */
+  console.log('\n[9.284] 设置页错误边界');
+  {
+    /*
+     * 缺陷：ErrorBoundary 以前只包了「健康检查」。其余五节没有——
+     * React 19 里任何子组件抛错都会卸掉整棵树，用户看到的是**纯白设置页**，
+     * 没有报错、没有重试，只能重开。
+     */
+    const { targetId: t } = await cdp.send('Target.createTarget', {
+      url: `chrome-extension://${EXT_ID}/options.html`,
+    });
+    const { sessionId: sid } = await cdp.send('Target.attachToTarget', { targetId: t, flatten: true });
+    await cdp.send('Page.enable', {}, sid);
+    const ev2 = async (expr) => {
+      const r = await cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }, sid);
+      if (r.exceptionDetails) return null;
+      return r.result?.value;
+    };
+    await waitFor(async () => await ev2(`!!document.querySelector('[data-testid="export-html"]')`), 10000);
+
+    const bounds = await ev2(`[...document.querySelectorAll('[data-error-boundary]')].map((e) => e.getAttribute('data-error-boundary'))`);
+    const needed = ['健康检查', 'AI 服务', '上下文与预算', 'Agent 行为', '外观', '数据管理'];
+    const missing = needed.filter((n) => !(bounds || []).includes(n));
+    check(
+      '设置页六节各自都有错误边界（任一节抛错不会带走整页）',
+      Array.isArray(bounds) && missing.length === 0,
+      JSON.stringify({ have: bounds, missing }),
+    );
+
+    const titles = await ev2(`(() => {
+      const html = document.body.innerHTML;
+      return { health: html.includes('健康检查'), ai: html.includes('AI 服务'), data: html.includes('数据管理') };
+    })()`);
+    check(
+      '页面正常渲染（不是白屏、没掉进错误边界）',
+      titles?.health === true && titles?.ai === true && titles?.data === true,
+      JSON.stringify(titles),
+    );
+
+    await cdp.send('Target.closeTarget', { targetId: t }).catch(() => {});
+  }
+
   /* ══════════ 9.282 设置页能导出书签文件 ══════════ */
   console.log('\n[9.282] 书签导出');
   {

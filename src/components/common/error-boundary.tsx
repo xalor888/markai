@@ -47,7 +47,13 @@ export class ErrorBoundary extends Component<
     const { error, info } = this.state;
     const wrap = this.props.className;
     // 零布局影响：contents 让 wrapper 不生成盒子，子元素直接参与父级布局
-    if (!error) return <div className="contents">{this.props.children}</div>;
+    if (!error) {
+      return (
+        <div className="contents" data-error-boundary={this.props.area ?? 'unknown'}>
+          {this.props.children}
+        </div>
+      );
+    }
     const area = this.props.area ? `「${this.props.area}」` : '';
     return (
       // role="alert"：渲染崩溃属于需要立刻告知的状态，不能让屏幕阅读器等用户自己发现

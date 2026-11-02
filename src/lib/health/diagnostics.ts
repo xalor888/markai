@@ -97,9 +97,16 @@ export function diagnose(snapshot: HealthSnapshot): HealthReport {
          * 而且它还会被计进「N 个可一键修复」，让健康分看起来有救其实没有。
          * 与其给一个点了不动的按钮，不如只留那句该怎么做。
          */
-        ...(missing.some((m) => m !== 'API Key')
-          ? { fix: { action: 'config.fill-defaults' as const, label: '填入该服务商的默认值' } }
-          : {}),
+        /*
+         * **不给「填入默认值」按钮**（0.2.104 删掉的）。
+         *
+         * 曾经这里提供一个 `config.fill-defaults` 修复。但 `readSnapshot` 为了
+         * 「诊断看到的配置和运行时实际用的是同一份」会走 `resolveConfig`，
+         * 而它**已经把预设里能补的都补上了**（baseUrl、defaultModel）。
+         * 于是这条诊断只可能在预设也补不了时触发——也就是 custom / opencode-go
+         * 这种预设本身没有可填值的服务商。而那正是修复什么都填不了的情况。
+         * 结论：这个按钮要么不出现，一出现就必然点了没用。
+         */
         manualHint: missing.includes('API Key')
           ? '到服务商后台复制一个 Key 填进来。'
           : '在设置页把这两项补齐即可。',

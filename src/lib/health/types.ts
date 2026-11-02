@@ -24,7 +24,6 @@ export type IssueArea = 'config' | 'permission' | 'undo' | 'log' | 'bookmarks' |
 
 /** 可自动执行的修复动作 id（与 fixes.ts 一一对应） */
 export type FixAction =
-  | 'config.fill-defaults'
   | 'config.normalize-baseurl'
   | 'config.drop-bad-headers'
   | 'undo.drop-corrupt'

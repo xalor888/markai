@@ -11844,18 +11844,25 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.ok(iss!.manualHint?.includes('Key') === true, `应提示去拿 Key：${iss!.manualHint}`);
     });
 
-    ok('缺 Base URL / 模型：给按钮（确实补得了）', () => {
+    /*
+     * 0.2.104：这两条原来的断言是"缺 baseUrl/model 时应当给一键补按钮"，
+     * 配套的 `config.fill-defaults` 已删除——因为 readSnapshot 的 resolveConfig
+     * 早就把预设能补的都补上了，这条诊断只可能在预设也补不了时触发，
+     * 那时修复什么都填不了。一个一出现就必然点了没用的按钮，不如没有。
+     */
+    ok('缺 Base URL / 模型：报出来，但不给没用的按钮', () => {
       const r = diagnose(healthy({ config: { ...healthy().config!, baseUrl: '', model: '' } }));
       const iss = r.issues.find((i) => i.id === 'config.incomplete');
       assert.ok(iss);
-      assert.ok(iss!.fix, '缺 baseUrl/model 时应当能一键补');
-      assert.equal(iss!.fix!.action, 'config.fill-defaults');
+      assert.equal(iss!.fix, undefined, `不该再给 config.fill-defaults：${JSON.stringify(iss!.fix)}`);
+      assert.ok(iss!.manualHint, '没有按钮时必须留下手动下一步');
     });
 
-    ok('三者都缺：也要给按钮（Key 之外还有可补的）', () => {
+    ok('三者都缺：也只报不动，不摆没用的按钮', () => {
       const r = diagnose(healthy({ config: { ...healthy().config!, baseUrl: '', model: '', apiKey: '' } }));
       const iss = r.issues.find((i) => i.id === 'config.incomplete');
-      assert.ok(iss!.fix, '有可补字段时应当给按钮');
+      assert.ok(iss);
+      assert.equal(iss!.fix, undefined, `不该再给 config.fill-defaults：${JSON.stringify(iss!.fix)}`);
     });
 
     ok('可一键修复的计数不再把"补不了"的问题算进去', () => {
@@ -12602,6 +12609,41 @@ await okA('每个可修复的诊断，跑完修复后都不再出现（契约）
   await runFix('config.drop-bad-headers');
   ids = idsOf(await runHealthCheck());
   assert.ok(!ids.has('config.bad-headers'), `修完仍报 bad-headers：${[...ids]}`);
+
+  /* ── config.incomplete：不该再提供「填入默认值」按钮 ── */
+  /*
+   * 0.2.104 删掉了 `config.fill-defaults`：readSnapshot 走的 resolveConfig
+   * 已经把预设里能补的都补上了，所以这条诊断只可能在预设也补不了时触发
+   * （custom / opencode-go）——而那正是修复什么都填不了的情况。
+   * 一个要么不出现、一出现就必然点了没用的按钮，不如没有。
+   */
+  storageMap.set('markai.config', { providerId: 'custom', baseUrl: '', model: '', apiKey: 'k' });
+  ids = idsOf(await runHealthCheck());
+  assert.ok(ids.has('config.incomplete'), `前置：应报 config.incomplete，实际 ${[...ids]}`);
+  const cfgIssue = (await runHealthCheck()).issues.find((i) => i.id === 'config.incomplete');
+  assert.ok(!cfgIssue?.fix, `不该再提供「填入默认值」：${JSON.stringify(cfgIssue?.fix)}`);
+  assert.ok(
+    (cfgIssue?.manualHint || '').length > 0,
+    '没有修复按钮时必须留下手动的下一步',
+  );
+
+  /* ── 只缺 API Key 时也不该有按钮（0.2.68 的老结论仍然成立） ── */
+  storageMap.set('markai.config', {
+    providerId: 'deepseek', baseUrl: 'https://api.deepseek.com', model: 'deepseek-v4-flash', apiKey: '',
+  });
+  const keyOnly = (await runHealthCheck()).issues.find((i) => i.id === 'config.incomplete');
+  assert.ok(keyOnly, '只缺 Key 时仍应报 config.incomplete');
+  assert.ok(!keyOnly!.fix, `只缺 API Key 时不该有修复按钮：${JSON.stringify(keyOnly!.fix)}`);
+
+  /* ── undo.trim-overflow ── */
+  storageMap.set('markai.undo', {
+    points: Array.from({ length: 12 }, (_, i) => ({ id: `p${i}`, runId: `r${i}`, ops: [] })),
+  });
+  ids = idsOf(await runHealthCheck());
+  assert.ok(ids.has('undo.overflow'), `前置：应报 undo.overflow，实际 ${[...ids]}`);
+  await runFix('undo.trim-overflow');
+  ids = idsOf(await runHealthCheck());
+  assert.ok(!ids.has('undo.overflow'), `修完仍报 undo.overflow：${[...ids]}`);
 
   /* ── undo.drop-corrupt ── */
   storageMap.set('markai.undo', { points: [{ 不是: '点' }, null, '垃圾'] });

@@ -44,24 +44,6 @@ async function writeDict(key: string, value: unknown): Promise<boolean> {
 
 /* ────────────────────────── 配置类 ────────────────────────── */
 
-/** 补齐该服务商的默认 Base URL 与空模型名（不碰用户已填的值） */
-async function fillConfigDefaults(): Promise<FixResult> {
-  const cfg = await readDict(CONFIG_KEY);
-  const preset = getPreset(typeof cfg.providerId === 'string' ? cfg.providerId : '');
-  if (!preset) return { ok: false, detail: '这个服务商没有内置默认值，请手动填写 Base URL 与模型。' };
-
-  const patch: Dict = {};
-  if (!String(cfg.baseUrl ?? '').trim() && preset.baseUrl) patch.baseUrl = preset.baseUrl;
-  if (!String(cfg.model ?? '').trim() && preset.models?.[0]) patch.model = preset.models[0];
-  if (Object.keys(patch).length === 0) {
-    return { ok: false, detail: '没有可以自动填的字段（Base URL 与模型都已填好），请检查 API Key。' };
-  }
-  const ok = await writeDict(CONFIG_KEY, { ...cfg, ...patch });
-  return ok
-    ? { ok: true, detail: `已填入：${Object.keys(patch).join(' / ')}。API Key 需要你自己去服务商后台拿，无法代为填写。` }
-    : { ok: false, detail: '写入配置失败（存储不可写）。' };
-}
-
 /** 把不像地址的 Base URL 修成合法形式：补协议、去尾部斜杠 */
 async function normalizeBaseUrl(): Promise<FixResult> {
   const cfg = await readDict(CONFIG_KEY);
@@ -199,7 +181,6 @@ async function markOrphanLog(): Promise<FixResult> {
 
 /** 动作 → 实现（显式映射，缺一个会编译报错） */
 const FIXES: Record<FixAction, () => Promise<FixResult>> = {
-  'config.fill-defaults': fillConfigDefaults,
   'config.normalize-baseurl': normalizeBaseUrl,
   'config.drop-bad-headers': dropBadHeaders,
   'undo.drop-corrupt': dropCorruptUndo,

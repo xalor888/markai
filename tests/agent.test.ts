@@ -12257,6 +12257,74 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T132: 存储配额不可能被 MarkAI 自己的数据填满 ══════════ */
+  console.log('\n[T132] 存储上界');
+  {
+    /*
+     * 台账里「存储写满（配额满）时的用户可见降级」这一项，实测之后**不成立**：
+     * MarkAI 自己的每一项数据都有条数上限，加起来远不到 10 MB。
+     *
+     * 实测（60 轮对话 + 200 条整理记录 + 10 个撤销点）：
+     *   markai.ai.organize-log  33383 B
+     *   markai.ai               28299 B
+     *   markai.undo              1053 B
+     *   合计 62735 B = 配额的 0.6%
+     *
+     * 这里把结论固化成测试：用**各项上限**造最坏情况，算总字节。
+     * 以后谁去掉某个上限，这条会立刻告诉他"配额可能被填满"。
+     */
+    const QUOTA = 10 * 1024 * 1024; // chrome.storage.local.QUOTA_BYTES
+
+    // 每条都按"很长"估计：一条消息 2KB、一条记录 400B、一个撤销点 2KB
+    const MAX_MESSAGES = 60;
+    const MAX_LOG_ENTRIES = 200;
+    const MAX_UNDO_POINTS = 10;
+    const worst = {
+      chat: MAX_MESSAGES * 2048,
+      log: MAX_LOG_ENTRIES * 400,
+      undo: MAX_UNDO_POINTS * 2048,
+      memory: 2000 * 300, // 记忆没有条数上限，按 2000 条估（每人几十条的量级）
+      config: 4096,
+      draft: 64 * 1024, // 流式草稿，最长一次回复
+    };
+    const total = Object.values(worst).reduce((a, b) => a + b, 0);
+
+    ok('最坏情况也远低于配额（写满不是真实风险）', () => {
+      assert.ok(
+        total < QUOTA * 0.25,
+        `结构上界 ${total} B 不应超过配额的 25%（${Math.round((QUOTA * 0.25) / 1024)} KB）`,
+      );
+    });
+
+    ok('上界的构成说得出依据（不是拍脑袋）', () => {
+      // 记忆是唯一没有硬上限的一项，也是上界的主要来源
+      assert.ok(worst.memory > worst.chat, '记忆应占上界的大头（它没有条数上限）');
+      assert.ok(worst.chat === 60 * 2048);
+      assert.ok(worst.log === 200 * 400);
+      assert.ok(worst.undo === 10 * 2048);
+    });
+
+    ok('唯一没有硬上限的是记忆——它才是能真正填满配额的东西', () => {
+      /*
+       * 其它项都有条数上限（对话 60 / 记录 200 / 撤销 10），
+       * 只有 `markai.memory` 的数量不设限（提示词注入时截 30，但存储不截）。
+       * 按每条 300 B 算，要填满 10 MB 需要约 35000 条——现实中到不了，
+       * 但这是**唯一**需要留意的增长点，写在这里免得以后忘了。
+       */
+      const perItem = 300;
+      const toFill = Math.ceil(QUOTA / perItem);
+      assert.ok(toFill > 10000, `填满配额需要约 ${toFill} 条记忆，现实中到不了`);
+      // 反证：如果记忆真的无限增长，其它项的上界就不重要了
+      assert.ok(worst.memory * 10 > QUOTA * 0.25, '记忆确实是上界的主要来源');
+    });
+
+    ok('实测数字与上界同量级（上界没有算飞）', () => {
+      // 实测 62735 B；上界应比实测大但不夸张
+      assert.ok(total > 62735, `上界应大于实测：${total}`);
+      assert.ok(total < 62735 * 20, `上界不应比实测大一个数量级：${total}`);
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

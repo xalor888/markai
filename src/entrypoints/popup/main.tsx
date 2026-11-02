@@ -12,6 +12,7 @@ import { openUrl } from '@/lib/open-url';
 import { ORGANIZE_LOG_KEY, readOrganizeLog, summarizeOrganizeLog, type OrganizeStats } from '@/lib/ai/organize-log';
 import { appVersion } from '@/lib/version';
 import { saveTabToBar } from '@/lib/bookmarks/save-tab';
+import { pendingCardCopy } from '@/lib/bookmarks/pending-copy';
 import { BrandMark } from '@/components/theme/theme-provider';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -30,6 +31,15 @@ function PopupApp() {
   const [activeTitle, setActiveTitle] = useState('');
   const [aiConfigured, setAiConfigured] = useState(true);
   const [canSave, setCanSave] = useState(false);
+  /*
+   * 待办数据的读取状态。
+   *
+   * 缺陷：`pendingCount` 初值是 0，第一次 storage 读回来之前界面就已经写着
+   * 「当前没有待确认的删除提议。」——**在还不知道的情况下给出确定结论**。
+   * SW 睡着时这次读要几百毫秒，用户看到的就是一句假话。
+   * 读失败时更糟：永远停在"没有提议"。
+   */
+  const [pendingState, setPendingState] = useState<'loading' | 'ok' | 'error'>('loading');
   const [saveError, setSaveError] = useState('');
   const [taskRunning, setTaskRunning] = useState(false);
   const [autoDeleteMode, setAutoDeleteMode] = useState(false);
@@ -103,10 +113,13 @@ function PopupApp() {
         const needsKey = preset?.needsKey === true && !cfg.apiKey;
         setAutoDeleteMode(cfg.deleteMode === 'auto');
         if (setConfigured) setAiConfigured(!!cfg.baseUrl && !!cfg.model && !needsKey);
+        setPendingState('ok');
       })
       .catch(() => {
         // 读取失败：按未配置展示（引导用户去设置页），不静默
         if (setConfigured) setAiConfigured(false);
+        // 待办数读不到 ≠ 没有待办：必须说出来，不能显示成"没有提议"
+        setPendingState('error');
       });
   };
 
@@ -195,14 +208,8 @@ function PopupApp() {
             <span className="text-xs font-medium text-foreground">待删除清单</span>
             {pendingCount > 0 && <Badge variant="destructive">{pendingCount} 项</Badge>}
           </div>
-          <p className="mt-2 text-2xs leading-4 text-muted-foreground">
-            {pendingCount > 0
-              ? autoDeleteMode
-                ? '当前为「无需确认」模式：Agent 的删除建议会自动执行。'
-                : 'Agent 提出了删除建议，等待你确认。'
-              : autoDeleteMode
-                ? '当前为「无需确认」模式：Agent 删除建议自动执行，无需手动确认。'
-                : '当前没有待确认的删除提议。'}
+          <p className="mt-2 text-2xs leading-4 text-muted-foreground" data-testid="popup-pending-text">
+            {pendingCardCopy({ state: pendingState, pendingCount, autoDeleteMode })}
           </p>
           {recentPending.length > 0 && (
             <div className="mt-1.5 space-y-0.5">

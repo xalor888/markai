@@ -1375,6 +1375,62 @@ async function run() {
     mock.srv.close();
   }
 
+  /* ══════════ 9.435 弹窗读取失败时不能假装"没有待办" ══════════ */
+  console.log('\n[9.435] 弹窗读取失败态');
+  {
+    /*
+     * 缺陷：`pendingCount` 初值 0，读取完成前界面就写着「当前没有待确认的删除提议。」
+     * 读失败时更是永远停在"没有提议"——用户以为干净，其实什么都没读到。
+     */
+    const { targetId: t } = await cdp.send('Target.createTarget', {
+      url: `chrome-extension://${EXT_ID}/popup.html`,
+    });
+    const { sessionId: sid } = await cdp.send('Target.attachToTarget', { targetId: t, flatten: true });
+
+    /*
+     * 必须在注入前 `Page.enable`：否则 `Page.addScriptToEvaluateOnNewDocument`
+     * 会被静默忽略（不报错、也不生效），注入等于没做——第一次跑就是这样，
+     * 卡片照旧显示"当前没有待确认的删除提议"。
+     */
+    await cdp.send('Page.enable', {}, sid);
+    // 在页面脚本执行前就把 storage.local.get 打坏
+    const { identifier } = await cdp.send(
+      'Page.addScriptToEvaluateOnNewDocument',
+      {
+        source: `(() => {
+          const orig = chrome.storage.local.get.bind(chrome.storage.local);
+          chrome.storage.local.get = (...a) => {
+            // 只破坏"读整包配置"的那次调用，其他读写保持正常
+            const k = a[0];
+            const isBulk = Array.isArray(k) || (typeof k === 'string' && k === 'markai.config');
+            if (isBulk) return Promise.reject(new Error('模拟：存储读取失败'));
+            return orig(...a);
+          };
+        })();`,
+      },
+      sid,
+    );
+    await cdp.send('Page.reload', {}, sid);
+    await sleep(1200);
+
+    const popEv = async (expr) => {
+      const r = await cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }, sid);
+      if (r.exceptionDetails) return null;
+      return r.result?.value;
+    };
+    await waitFor(async () => await popEv(`!!document.querySelector('[data-testid="popup-pending-text"]')`), 6000);
+    const text = await popEv(`document.querySelector('[data-testid="popup-pending-text"]').textContent.trim()`);
+
+    check(
+      '读不到待办时说「读取失败」，而不是「当前没有待确认的删除提议」',
+      typeof text === 'string' && text.includes('读取失败') && !text.includes('没有待确认'),
+      JSON.stringify({ text }),
+    );
+
+    await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sid).catch(() => {});
+    await cdp.send('Target.closeTarget', { targetId: t }).catch(() => {});
+  }
+
   /* ══════════ 9.43 弹出窗（此前零覆盖） ══════════ */
   console.log('\n[9.43] 弹出窗');
   {

@@ -11267,6 +11267,48 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T115: 弹窗待办卡片不能说"没有"（它还不知道） ══════════ */
+  console.log('\n[T115] 弹窗待办卡片的三种语义');
+  {
+    /*
+     * 缺陷：`pendingCount` 初值是 0，第一次 storage 读回来之前界面就已经写着
+     * 「当前没有待确认的删除提议。」——在还不知道的情况下给出确定结论。
+     * SW 睡着时这次读要几百毫秒，用户看到的就是一句假话；读失败时永远停在"没有提议"。
+     */
+    const { pendingCardCopy } = await import('../src/lib/bookmarks/pending-copy');
+
+    ok('读取中：只说"正在读"，不下结论', () => {
+      const t = pendingCardCopy({ state: 'loading', pendingCount: 0, autoDeleteMode: false });
+      assert.ok(t.includes('正在读取'), t);
+      assert.equal(t.includes('没有'), false, `读取中不能说"没有"：${t}`);
+    });
+
+    ok('读取失败：要说清看不到，而不是"没有提议"', () => {
+      const t = pendingCardCopy({ state: 'error', pendingCount: 0, autoDeleteMode: false });
+      assert.ok(t.includes('读取失败'), t);
+      assert.equal(t.includes('没有待确认'), false, `读失败不能说"没有待确认"：${t}`);
+    });
+
+    ok('读到且为空：这时才可以下"没有"的结论', () => {
+      const t = pendingCardCopy({ state: 'ok', pendingCount: 0, autoDeleteMode: false });
+      assert.ok(t.includes('没有待确认的删除提议'), t);
+    });
+
+    ok('读到且有提议：分模式说清会不会自动执行', () => {
+      const manual = pendingCardCopy({ state: 'ok', pendingCount: 3, autoDeleteMode: false });
+      assert.ok(manual.includes('等待你确认'), manual);
+      const auto = pendingCardCopy({ state: 'ok', pendingCount: 3, autoDeleteMode: true });
+      assert.ok(auto.includes('无需确认'), auto);
+      assert.ok(auto.includes('自动执行'), auto);
+    });
+
+    ok('空 + 无需确认：也要说明这个模式（否则用户以为没有提议=没风险）', () => {
+      const t = pendingCardCopy({ state: 'ok', pendingCount: 0, autoDeleteMode: true });
+      assert.ok(t.includes('无需确认'), t);
+      assert.ok(t.includes('自动执行'), t);
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

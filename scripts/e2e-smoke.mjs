@@ -607,6 +607,75 @@ async function run() {
     await sleep(200);
   }
 
+  /* ══════════ 9.32 快捷键面板承诺的键，真的都能用 ══════════ */
+  console.log('\n[9.32] 文档承诺的快捷键');
+  {
+    /*
+     * 快捷键面板写着「这些键在书签树和中栏列表里都生效」，并列了 20 多条。
+     * 但 e2e 里只验证过 ↓ 一个键 —— 也就是说**这份说明从来没被核对过**。
+     * 说明与实际不符比没有说明更糟（用户照着按，得到别的东西）。
+     *
+     * 这里挑四条有明确可观测结果的来核对：/ 聚焦搜索、Ctrl+A 全选、
+     * 空格切选中、F2 打开重命名。
+     */
+    const press = async (key, opts = {}) => {
+      await ev(`(() => {
+        const el = document.querySelector('[data-testid="list"]') || document.body;
+        el.dispatchEvent(new KeyboardEvent('keydown', {
+          key: ${JSON.stringify(key)},
+          bubbles: true,
+          cancelable: true,
+          ...${JSON.stringify(opts)},
+        }));
+        return true;
+      })()`);
+      await sleep(250);
+    };
+
+    // 先点一行，确保有活动项
+    await ev(`(() => {
+      const row = document.querySelector('[data-testid="row"]');
+      if (!row) return false;
+      row.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      row.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+      row.click();
+      return true;
+    })()`);
+    await sleep(300);
+
+    await press('/');
+    const slash = await ev(`document.activeElement?.id === 'markai-search'`);
+    check('「/」能把焦点放到搜索框（说明里写的那样）', slash === true, JSON.stringify({ slash }));
+
+    await press('a', { ctrlKey: true });
+    const selectAll = await ev(`(() => {
+      const rows = [...document.querySelectorAll('[data-testid="row"]')];
+      const sel = rows.filter((r) => r.getAttribute('aria-selected') === 'true');
+      return { total: rows.length, selected: sel.length };
+    })()`);
+    check(
+      '「Ctrl+A」全选当前列表',
+      selectAll.total > 0 && selectAll.selected === selectAll.total,
+      JSON.stringify(selectAll),
+    );
+
+    await press(' ');
+    const spaceToggled = await ev(`(() => {
+      const rows = [...document.querySelectorAll('[data-testid="row"]')];
+      return rows.filter((r) => r.getAttribute('aria-selected') === 'true').length;
+    })()`);
+    check('「空格」会改变选中状态（不是死键）', spaceToggled !== selectAll.selected, JSON.stringify({ spaceToggled }));
+
+    await press('F2');
+    const renameOpen = await ev(`(() => {
+      const d = document.querySelector('[role="dialog"]');
+      return !!d && /重命名/.test(d.innerText);
+    })()`);
+    check('「F2」打开重命名（说明里写的那样）', renameOpen === true, JSON.stringify({ renameOpen }));
+    await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    await sleep(300);
+  }
+
   /* ══════════ 9.33 撤销上限提示要出现在界面上 ══════════ */
   console.log('\n[9.33] 撤销上限提示');
   {

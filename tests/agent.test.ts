@@ -11494,6 +11494,94 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     });
   }
 
+  /* ══════════ T119: 配置加载失败后保存，不能清掉用户的 API Key ══════════ */
+  console.log('\n[T119] 配置的盲写');
+  {
+    /*
+     * `load()` 失败时回退 DEFAULT_CONFIG（apiKey/baseUrl/model 都是空）。
+     * 若此时用户改了什么，`update()` 会 `{ ...DEFAULT_CONFIG, ...patch }` 整对象覆盖磁盘
+     * ——**用户的 API Key / Base URL / 模型被清掉**，扩展直接不可用，而且用户不知道发生了什么。
+     *
+     * 这和 0.2.60 修的是同一类：读失败之后不能拿内存去覆盖磁盘。
+     */
+    const { useConfigStore } = await import('../src/stores/configStore');
+    const KEY = 'markai.config';
+    const reset = () => {
+      storageMap.clear();
+      useConfigStore.setState({ config: { ...useConfigStore.getState().config }, saveError: null, loadOk: false });
+    };
+
+    await okA('加载失败后保存，磁盘上的 API Key / 模型必须还在', async () => {
+      reset();
+      const real = {
+        providerId: 'deepseek',
+        baseUrl: 'https://api.deepseek.com/v1',
+        apiKey: 'sk-real-key-别丢',
+        model: 'deepseek-chat',
+        customHeaders: 'X-A: 1',
+        deleteMode: 'confirm',
+        contextWindow: 65536,
+      };
+      storageMap.set(KEY, real);
+
+      const orig = chrome.storage.local.get;
+      chrome.storage.local.get = (async () => {
+        throw new Error('模拟：读取失败');
+      }) as typeof chrome.storage.local.get;
+      try {
+        await useConfigStore.getState().load();
+      } finally {
+        chrome.storage.local.get = orig;
+      }
+      // 前置：内存此刻是默认值（这正是危险状态）
+      assert.notEqual(useConfigStore.getState().config.apiKey, real.apiKey, '前置：加载失败后内存应为默认值');
+
+      // 用户此时改了一个无关字段
+      const r = await useConfigStore.getState().update({ planMode: true });
+      assert.equal(r.ok, true, `保存应当成功（读回真实配置后合并）：${r.error ?? ''}`);
+
+      const stored = storageMap.get(KEY) as Record<string, unknown>;
+      assert.equal(stored.apiKey, real.apiKey, `API Key 被清掉了：${JSON.stringify(stored)}`);
+      assert.equal(stored.baseUrl, real.baseUrl, `Base URL 被清掉了：${JSON.stringify(stored)}`);
+      assert.equal(stored.model, real.model, `模型被清掉了：${JSON.stringify(stored)}`);
+      assert.equal(stored.contextWindow, real.contextWindow, `上下文长度被清掉了：${JSON.stringify(stored)}`);
+      assert.equal(stored.planMode, true, '用户这次改的字段要生效');
+      reset();
+    });
+
+    await okA('读回也失败时：不写、不覆盖，并给出可见说明', async () => {
+      reset();
+      storageMap.set(KEY, { apiKey: 'sk-still-here', model: 'm1' });
+
+      const orig = chrome.storage.local.get;
+      chrome.storage.local.get = (async () => {
+        throw new Error('模拟：读取失败');
+      }) as typeof chrome.storage.local.get;
+      let wrote = false;
+      const origSet = chrome.storage.local.set;
+      chrome.storage.local.set = (async (items: unknown) => {
+        wrote = true;
+        return origSet(items as never);
+      }) as typeof chrome.storage.local.set;
+      try {
+        await useConfigStore.getState().load();
+        const r = await useConfigStore.getState().update({ planMode: true });
+        assert.equal(r.ok, false, '读不到现有设置时不能报告保存成功');
+      } finally {
+        chrome.storage.local.get = orig;
+        chrome.storage.local.set = origSet;
+      }
+
+      assert.equal(wrote, false, '读失败时根本不应当写盘');
+      const stored = storageMap.get(KEY) as Record<string, unknown>;
+      assert.equal(stored.apiKey, 'sk-still-here', `磁盘上的配置被覆盖了：${JSON.stringify(stored)}`);
+      const err = useConfigStore.getState().saveError;
+      assert.ok(err, '必须给出可见说明');
+      assert.ok(err!.message.includes('没有保存'), `提示要说清没保存：${err!.message}`);
+      reset();
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

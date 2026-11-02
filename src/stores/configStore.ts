@@ -42,6 +42,15 @@ interface ConfigState {
   applyPreset: (providerId: string) => Promise<void>;
   /** 最近一次设置保存失败的如实说明（null = 正常）；at 稳定，界面只提示一次 */
   saveError: { message: string; at: number } | null;
+  /**
+   * 本次会话是否**成功读到过**配置。
+   *
+   * 加载失败时 `load()` 会回退 `DEFAULT_CONFIG`，内存里就是一份"空配置"。
+   * 如果这时用户改了什么，`update()` 会拿这份默认值整对象覆盖磁盘——
+   * **用户的 API Key / Base URL / 模型会被清掉**。
+   * 保存路径必须先知道"我手上的内存是不是真的"，否则就重蹈 0.2.60 的盲写覆辙。
+   */
+  loadOk: boolean;
   /** 计算实际请求配置（未填项回落到预设默认值） */
   effectiveConfig: () => AIConfig;
 }
@@ -54,9 +63,10 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
     try {
       const data = await chrome.storage.local.get(CONFIG_STORAGE_KEY);
       const saved = data[CONFIG_STORAGE_KEY] as AIConfig | undefined;
-      set({ config: { ...DEFAULT_CONFIG, ...(saved ?? {}) } });
+      set({ config: { ...DEFAULT_CONFIG, ...(saved ?? {}) }, loadOk: true });
     } catch {
-      // 存储异常时回退默认配置，避免页面卡在加载态
+      // 存储异常时回退默认配置，避免页面卡在加载态。
+      // 注意 loadOk 保持 false：此刻内存**不是**用户的真实配置，不能用来覆盖磁盘。
       set({ config: DEFAULT_CONFIG });
     } finally {
       set({ loaded: true });
@@ -64,8 +74,25 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
   },
 
   saveError: null,
+  loadOk: false,
 
   async update(patch) {
+    /*
+     * 没成功读到过配置时，先按磁盘上的真实配置重建内存再合并。
+     * 否则 `{ ...DEFAULT_CONFIG, ...patch }` 会把用户的 API Key / Base URL / 模型清空。
+     */
+    if (!get().loadOk) {
+      try {
+        const data = await chrome.storage.local.get(CONFIG_STORAGE_KEY);
+        const saved = data[CONFIG_STORAGE_KEY] as AIConfig | undefined;
+        set({ config: { ...DEFAULT_CONFIG, ...(saved ?? {}) }, loadOk: true });
+      } catch (e) {
+        const reason = e instanceof Error ? e.message : String(e);
+        const message = `读取现有设置失败，本次**没有保存**（避免用默认值覆盖你的 API Key / 模型 / 删除模式）：${reason}`;
+        set({ saveError: { message, at: Date.now() } });
+        return { ok: false, error: message };
+      }
+    }
     // 每次保存都盖上当前结构版本：contextWindow 的语义是"跟随模型"，
     // 旧版本存下来的那条（恒为 1M）在 resolveConfig 里会被当作非用户意图丢弃。
     const next = { ...get().config, ...patch, configVersion: CONFIG_VERSION };

@@ -53,6 +53,15 @@ export interface ChatMessage {
   streaming?: boolean;
   /** 被打断过（重新打开时由残留的 streaming 推断出来） */
   interrupted?: boolean;
+  /**
+   * 这一轮**请求失败**了（网络 / 401 / 5xx / 超时）。
+   *
+   * 以前失败只是在 blocks 里追加一个 `⚠ …` 文本块——于是它和普通回复**无法区分**：
+   * `hasText` 为真、`retrySafety` 照常放过、底部的「重新生成」也仍按普通消息对待
+   * （只在 hover 时出现，键盘与触屏用户根本看不到）。
+   * 失败时重试是用户唯一能做的事，所以这个状态必须显式记录下来。
+   */
+  failed?: string;
   /** 用户消息发送时附带的上下文文件夹（消息内展示 Agent 视野） */
   contextFolderId?: string;
 }

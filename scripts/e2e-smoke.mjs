@@ -2076,6 +2076,36 @@ async function run() {
     })()`);
     check('不可重试的错误（401）给出可见错误，而不是一直重试', errShown === true && !!errText, JSON.stringify({ errShown, errText }));
 
+    /*
+     * 请求失败时「重新生成」是用户唯一能做的事，而操作条平时 hover 才出现
+     * （opacity-0 group-hover:opacity-100）——键盘用户没有 hover、触屏也没有，
+     * 于是失败时那个按钮看不见也点不到。这里断言它是常亮的。
+     */
+    // 有 transition-opacity：等它过渡完，否则读到的是中间帧（实测 0.03）
+    const readBar = () => ev(`(() => {
+      const msgs = [...document.querySelectorAll('[data-testid="assistant-message"]')];
+      const last = msgs[msgs.length - 1];
+      if (!last) return null;
+      const bar = last.querySelector('[data-testid="message-actions"]');
+      if (!bar) return null;
+      return {
+        found: true,
+        opacity: Number(getComputedStyle(bar).opacity),
+        failed: last.getAttribute('data-failed'),
+        count: msgs.length,
+      };
+    })()`);
+    const barVisible = await waitFor(async () => {
+      const r = await readBar();
+      return !!r && r.failed === '1' && r.opacity >= 0.99;
+    }, 5000);
+    const failureBar = await readBar();
+    check(
+      '请求失败时消息操作条是常亮的（重试不依赖 hover）',
+      barVisible === true && failureBar?.failed === '1' && Number(failureBar.opacity) >= 0.99,
+      JSON.stringify(failureBar),
+    );
+
     const notStuck = await waitFor(
       async () =>
         await ev(`(() => {

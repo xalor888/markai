@@ -730,7 +730,12 @@ export const useAIStore = create<AIState>((set, get) => ({
         updateActiveMessages(set, (msgs) =>
           msgs.map((m) =>
             m.id === evt.messageId
-              ? { ...m, blocks: [...m.blocks, { kind: 'text', text: `⚠ ${evt.message}` }] }
+              ? {
+                  ...m,
+                  // failed 是**状态**，文本块只是**显示**：两者都要，别只留一个
+                  failed: evt.message,
+                  blocks: [...m.blocks, { kind: 'text', text: `⚠ ${evt.message}` }],
+                }
               : m,
           ),
         );

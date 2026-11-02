@@ -234,9 +234,23 @@ export const MessageView = memo(function MessageView({
    */
   const hasText = message.blocks.some((b) => b.kind === 'text' && b.text.trim().length > 0);
   const hasToolBlocks = message.blocks.some((b) => b.kind === 'tool');
+  /*
+   * 这一轮**失败了**（请求报错 / 被打断 / 模型什么都没返回）。
+   *
+   * 这种情况下"重新生成"是用户唯一能做的事，而操作条平时是 hover 才出现的
+   * （`opacity-0 group-hover:opacity-100`）——键盘用户没有 hover，触屏也没有，
+   * 于是失败时那条重试按钮**看不见也点不到**，用户只看到一条 toast 说"请求失败"。
+   * 所以：失败时把操作条设为常亮。
+   */
+  const isFailure = isLast && !streaming && safety.safeToRegenerate && !!message.failed;
 
   return (
-    <div className="group" title={formatRelativeTime(message.createdAt)}>
+    <div
+      className="group"
+      data-testid="assistant-message"
+      data-failed={message.failed ? '1' : '0'}
+      title={formatRelativeTime(message.createdAt)}
+    >
       <div className="space-y-1.5">
         {/*
          * 三种"没有内容"必须分开说，它们的含义完全不同：
@@ -290,7 +304,13 @@ export const MessageView = memo(function MessageView({
           );
         })}
         {/* 底部操作条（hover 显示）：复制整条回复（纯文本 / Markdown）/ 重试（仅最后一条） */}
-        <div className="-ml-1 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+        <div
+          data-testid="message-actions"
+          className={cn(
+            '-ml-1 flex items-center gap-1 transition-opacity',
+            isFailure ? 'opacity-100' : 'opacity-0 group-hover:opacity-100',
+          )}
+        >
           {cleanCopy && (
             <button
               type="button"

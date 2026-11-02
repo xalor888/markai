@@ -526,14 +526,50 @@ async function handleOneShot(msg: OneShotInbound): Promise<OneShotOutbound> {
 }
 
 /**
- * 「AI 分类连续失败」的计数与冷却窗口（SW 内存态，重启即重置）。
- * 用户配错 Key 时，不该让每一次收藏都白等 12 秒——见 nextAiStreakState 的注释。
+ * 「AI 分类连续失败」的计数与冷却窗口。
+ *
+ * **必须落在 storage 里，不能只放 SW 内存。**
+ *
+ * MV3 的 Service Worker 空闲约 30 秒就被回收，而冷却窗口是 10 分钟。
+ * 放在内存里时：用户配错 Key → 连失败 3 次进入冷却 → 过一会儿 SW 被回收 →
+ * 再收藏一条，SW 重启、计数归零 → **又白等 3 次 12 秒超时**才重新进冷却，
+ * 如此无限循环。用户看到的就是「收藏网页要卡十几秒」，而冷却本该修掉的正是这个。
+ *
+ * （同一个坑在 markai.organize.hinted 上已经用 storage 解决过一次。）
  */
-let aiStreak: { streak: number; cooldownUntil: number; justCooled: boolean } = {
-  streak: 0,
-  cooldownUntil: 0,
-  justCooled: false,
-};
+const AI_STREAK_KEY = 'markai.auto-organize.ai-streak';
+
+interface AiStreakState {
+  streak: number;
+  cooldownUntil: number;
+  justCooled: boolean;
+}
+
+async function loadAiStreak(): Promise<AiStreakState> {
+  try {
+    const data = await chrome.storage.local.get(AI_STREAK_KEY);
+    const raw = data[AI_STREAK_KEY] as Partial<AiStreakState> | undefined;
+    if (!raw || typeof raw !== 'object') return { streak: 0, cooldownUntil: 0, justCooled: false };
+    return {
+      streak: Number(raw.streak) || 0,
+      cooldownUntil: Number(raw.cooldownUntil) || 0,
+      justCooled: false, // justCooled 是「本次刚刚进入」的一次性信号，不跨读取保留
+    };
+  } catch {
+    // 读不到就当没有冷却：宁可多试一次模型，也不要永久冻结自动整理
+    return { streak: 0, cooldownUntil: 0, justCooled: false };
+  }
+}
+
+async function saveAiStreak(state: AiStreakState): Promise<void> {
+  try {
+    await chrome.storage.local.set({
+      [AI_STREAK_KEY]: { streak: state.streak, cooldownUntil: state.cooldownUntil },
+    });
+  } catch {
+    // 写失败不影响本次归类，只是下次可能要多试一次
+  }
+}
 
 /** 首次自动整理是否已提示过（跨 SW 重启有效：存在 storage 里） */
 const ORGANIZE_HINTED_KEY = 'markai.organize.hinted';
@@ -663,10 +699,16 @@ async function flushAutoOrganize(): Promise<void> {
     // 移动后 id 仍可查询，但标题/URL 属于书签本身，前后都一致。
     const nodes = await chrome.bookmarks.get(id).catch(() => [] as chrome.bookmarks.BookmarkTreeNode[]);
     const node = nodes[0];
+    /*
+     * 每次都从 storage 读——SW 可能在上一次收藏之后就被回收重启过，
+     * 内存里的计数会是旧的（见 AI_STREAK_KEY 上面的说明）。
+     */
+    const streakBefore = await loadAiStreak();
     // 冷却期内不再问模型：归类照常做（本地规则 + 域名兜底），只是省掉那次注定超时的等待
-    const inCooldown = Date.now() < aiStreak.cooldownUntil;
+    const inCooldown = Date.now() < streakBefore.cooldownUntil;
     const res = await autoOrganizeBookmark(id, inCooldown ? { skipAi: true } : {});
-    aiStreak = nextAiStreakState({ state: aiStreak, failed: res.aiFailed === true, now: Date.now() });
+    const aiStreak = nextAiStreakState({ state: streakBefore, failed: res.aiFailed === true, now: Date.now() });
+    await saveAiStreak(aiStreak);
     if (aiStreak.justCooled) {
       notifyAutoOrganized(true, `AI 分类连续失败，已暂停 ${Math.round(AI_COOLDOWN_MS / 60_000)} 分钟（期间按本地规则归类）。可在设置页检查服务商配置。`, false, 'ai-cooldown');
     }

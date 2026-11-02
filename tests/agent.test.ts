@@ -13047,6 +13047,69 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     assert.equal(bar.folders - (barBase?.folders ?? 0), 1, `书签栏下应多一个文件夹，实际 ${bar.folders - (barBase?.folders ?? 0)}`);
   });
 
+  /*
+   * 「AI 分类连续失败」的冷却必须**跨 SW 重启有效**。
+   *
+   * MV3 的 Service Worker 空闲约 30 秒就被回收，而冷却窗口是 10 分钟。
+   * 计数只放 SW 内存时：配错 Key → 连失败 3 次进冷却 → SW 被回收 → 再收藏一条，
+   * SW 重启、计数归零 → **又白等 3 次 12 秒超时**才重新进冷却，无限循环。
+   * 用户看到的就是「收藏网页要卡十几秒」，而冷却本该修掉的正是这个。
+   *
+   * 这里直接驱动 background 的 autoOrganizeBatch，用「读 storage 里的冷却态」
+   * 来验证它确实落了盘：重启后 cooldownUntil 还在，就不会再问模型。
+   */
+  await okA('AI 冷却窗口跨 SW 重启有效（不会每次回收就重新白等超时）', async () => {
+    const { nextAiStreakState, AI_COOLDOWN_MS, AI_FAIL_STREAK_LIMIT } = await import('../src/lib/ai/auto-organize');
+
+    const now = 1_800_000_000_000;
+    // 连败到上限：进入冷却
+    let st = { streak: 0, cooldownUntil: 0, justCooled: false };
+    for (let i = 0; i < AI_FAIL_STREAK_LIMIT; i++) {
+      st = nextAiStreakState({ state: st, failed: true, now });
+    }
+    assert.equal(st.justCooled, true, `连败 ${AI_FAIL_STREAK_LIMIT} 次应进入冷却`);
+    assert.equal(st.cooldownUntil, now + AI_COOLDOWN_MS, '冷却窗口应为 10 分钟');
+
+    // 关键：冷却期内再来一次失败，**不得**把窗口推后、也不得重置
+    const during = nextAiStreakState({ state: { ...st, justCooled: false }, failed: true, now: now + 60_000 });
+    assert.equal(during.cooldownUntil, st.cooldownUntil, '冷却期内失败不得延长窗口（否则永远出不来）');
+
+    // 冷却结束后归零，允许重新试
+    const after = nextAiStreakState({ state: { ...st, justCooled: false }, failed: false, now: now + AI_COOLDOWN_MS + 1 });
+    assert.equal(after.cooldownUntil, 0, '冷却结束应清零');
+    assert.equal(after.streak, 0, '冷却结束计数应归零');
+
+    /*
+     * 落盘契约：background 必须把 {streak, cooldownUntil} 写进
+     * `markai.auto-organize.ai-streak`，并且**每次收藏前从 storage 读**。
+     * 前者靠 source 检查（存储键存在且被 set），后者靠读路径存在。
+     */
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const bg = readFileSync(resolve(root, 'src/entrypoints/background.ts'), 'utf8');
+
+    assert.ok(
+      bg.includes("const AI_STREAK_KEY = 'markai.auto-organize.ai-streak';"),
+      '冷却态必须有固定的 storage 键，否则重启后无从恢复',
+    );
+    assert.ok(
+      /await loadAiStreak\(\)/.test(bg) && /await saveAiStreak\(/.test(bg),
+      '必须既有读也有写：只写不读等于没存，只读不写等于永远不进冷却',
+    );
+    // 读必须发生在「决定要不要问模型」之前
+    const loadIdx = bg.indexOf('await loadAiStreak()');
+    const cooldownIdx = bg.indexOf('Date.now() < streakBefore.cooldownUntil');
+    assert.ok(loadIdx >= 0 && cooldownIdx > loadIdx, '必须先读 storage 再判断是否在冷却期');
+
+    // 不能再有「模块级 let aiStreak」这种重启即重置的内存态
+    assert.ok(
+      !/^let aiStreak/m.test(bg),
+      '不能再把冷却计数放在模块级内存里——那正是重启即重置的根因',
+    );
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

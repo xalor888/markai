@@ -55,6 +55,14 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
   const [query, setQuery] = useState('');
   /** 被用户「叫停」的站点：撤销过一次自动整理就会进来 */
   const [optouts, setOptouts] = useState<OptOutEntry[]>([]);
+  /**
+   * 免打扰名单是否展开显示全部。
+   *
+   * 原来只显示前 3 个，第 4 个起只剩「全部恢复」——而这里的注释明明写着
+   * 「只想放开一个站点时，不该被迫全部恢复」。那句话只对前 3 个成立，
+   * 撤销过 5 个站点的用户想单独放开第 4 个，没有任何入口。
+   */
+  const [showAllOptouts, setShowAllOptouts] = useState(false);
   const refresh = useCallback(async (opts: { silent?: boolean } = {}) => {
     if (!opts.silent) setLoading(true);
     try {
@@ -522,7 +530,7 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
         <p className="mt-2 flex flex-wrap items-center gap-x-1 gap-y-0.5 text-2xs leading-4 text-muted-foreground">
           <span>已停用自动整理：</span>
           {/* 每个站点单独可恢复：只想放开一个站点时，不该被迫「全部恢复」 */}
-          {optouts.slice(0, 3).map((o) => (
+          {(showAllOptouts ? optouts : optouts.slice(0, 3)).map((o) => (
             <button
               key={o.domain}
               type="button"
@@ -534,7 +542,16 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
               <span aria-hidden="true"> ×</span>
             </button>
           ))}
-          {optouts.length > 3 && <span>等 {optouts.length} 个站点</span>}
+          {optouts.length > 3 && (
+            <button
+              type="button"
+              onClick={() => setShowAllOptouts((v) => !v)}
+              className="text-accent hover:underline"
+              title={showAllOptouts ? '收起，只看前 3 个' : `展开全部 ${optouts.length} 个站点，逐个恢复`}
+            >
+              {showAllOptouts ? '收起' : `等 ${optouts.length} 个站点`}
+            </button>
+          )}
           <button type="button" onClick={() => void restoreOptOuts()} className="text-accent hover:underline">
             全部恢复
           </button>

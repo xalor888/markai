@@ -466,6 +466,112 @@ async function run() {
     })()`);
   }
 
+  /* ── 7.1 免打扰名单：第 4 个起的站点也必须能单独恢复 ──
+   *
+   * 原来只渲染前 3 个，第 4 个起只剩「全部恢复」——而组件注释明明写着
+   * 「只想放开一个站点时，不该被迫全部恢复」。那句话只对前 3 个成立：
+   * 撤销过 5 个站点的用户想单独放开第 4 个，没有任何入口。
+   */
+  {
+    const domains = ['oo1.test', 'oo2.test', 'oo3.test', 'oo4.test', 'oo5.test'];
+    await ev(
+      `chrome.storage.local.set({ 'markai.organize.optout': ${JSON.stringify(
+        domains.map((d, i) => ({ domain: d, at: 1_700_000_000_000 + i })),
+      )} })`,
+    );
+    const r = await clickMenu('整理记录');
+    const opened = await waitFor(() => ev(`!!document.querySelector('[data-testid="organize-log"]')`), 4000);
+    check('7.1 能打开整理记录', r.ok && opened, JSON.stringify({ click: r, opened }));
+
+    // 未展开时：只显示前 3 个，但有展开入口
+    const beforeExpand = await ev(`
+      (() => {
+        const dlg = document.querySelector('[data-testid="organize-log"]');
+        const chips = [...dlg.querySelectorAll('button')].map(b => b.textContent || '').filter(t => t.includes('.test'));
+        return { chips, hasExpand: [...dlg.querySelectorAll('button')].some(b => (b.textContent||'').includes('等 5 个站点')) };
+      })()
+    `);
+    check('7.1 未展开时只显示前 3 个站点', beforeExpand.chips.length === 3, JSON.stringify(beforeExpand));
+    check('7.1 有「等 5 个站点」展开入口', beforeExpand.hasExpand === true, JSON.stringify(beforeExpand));
+
+    // 展开后：5 个全部可点
+    await ev(`
+      (() => {
+        const dlg = document.querySelector('[data-testid="organize-log"]');
+        const btn = [...dlg.querySelectorAll('button')].find(b => (b.textContent||'').includes('等 5 个站点'));
+        btn.click();
+        return true;
+      })()
+    `);
+    await new Promise((res) => setTimeout(res, 400));
+    const afterExpand = await ev(`
+      (() => {
+        const dlg = document.querySelector('[data-testid="organize-log"]');
+        const chips = [...dlg.querySelectorAll('button')].map(b => b.textContent || '').filter(t => t.includes('.test'));
+        return chips;
+      })()
+    `);
+    check(
+      '7.1 展开后 5 个站点都可单独恢复',
+      afterExpand.length === 5 && domains.every((d) => afterExpand.some((c) => c.startsWith(d))),
+      JSON.stringify(afterExpand),
+    );
+
+    // 单独恢复第 4 个：它应从名单里消失，其余还在
+    await ev(`
+      (() => {
+        const dlg = document.querySelector('[data-testid="organize-log"]');
+        const btn = [...dlg.querySelectorAll('button')].find(b => (b.textContent||'').startsWith('oo4.test'));
+        btn.click();
+        return true;
+      })()
+    `);
+    await waitFor(
+      () =>
+        ev(`
+        (() => {
+          const dlg = document.querySelector('[data-testid="organize-log"]');
+          if (!dlg) return false;
+          const chips = [...dlg.querySelectorAll('button')].map(b => b.textContent || '').filter(t => t.includes('.test'));
+          return !chips.some(c => c.startsWith('oo4.test')) && chips.some(c => c.startsWith('oo5.test'));
+        })()
+      `),
+      4000,
+    );
+    const afterOne = await ev(`
+      (() => {
+        const dlg = document.querySelector('[data-testid="organize-log"]');
+        const chips = [...dlg.querySelectorAll('button')].map(b => b.textContent || '').filter(t => t.includes('.test'));
+        return chips;
+      })()
+    `);
+    check(
+      '7.1 单独恢复第 4 个后它消失、其余还在',
+      !afterOne.some((c) => c.startsWith('oo4.test')) && afterOne.some((c) => c.startsWith('oo5.test')),
+      JSON.stringify(afterOne),
+    );
+
+    // 存储里也要真的少一条（不能只是界面假装）
+    const stored = await ev(`
+      (async () => {
+        const d = await chrome.storage.local.get('markai.organize.optout');
+        return (d['markai.organize.optout'] || []).map(e => e.domain);
+      })()
+    `);
+    check(
+      '7.1 恢复真的写回了存储',
+      Array.isArray(stored) && !stored.includes('oo4.test') && stored.includes('oo5.test'),
+      JSON.stringify(stored),
+    );
+
+    await ev(`chrome.storage.local.remove('markai.organize.optout')`);
+    await ev(`(async () => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await new Promise(r => setTimeout(r, 300));
+      return true;
+    })()`);
+  }
+
   /* ══════════ 8. ⌘K 命令面板 ══════════ */
   console.log('\n[8] ⌘K 命令面板');
   {

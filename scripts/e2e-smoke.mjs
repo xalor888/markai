@@ -679,6 +679,44 @@ async function run() {
     await cdp.send('Target.closeTarget', { targetId: t }).catch(() => {});
   }
 
+  /* ══════════ 9.287 键盘能进书签树并移动选中项 ══════════ */
+  console.log('\n[9.287] 树的可达性');
+  {
+    /*
+     * 台账里"所有可点元素可 Tab 到达"这一项。实测发现：树的行是
+     * `<div role="treeitem">` 且没有 tabindex——但**容器**有 tabIndex=0 并处理方向键，
+     * 所以是"一个制表位 + 方向键漫游"的设计，键盘确实能用。
+     * 这里把这条路径钉住：Tab 能进树，方向键能改选中项。
+     */
+    const tabbable = await ev(`(() => {
+      const tree = document.querySelector('[role="tree"]');
+      if (!tree) return { hasTree: false };
+      const host = tree.closest('[tabindex]');
+      return { hasTree: true, hostTabIndex: host ? host.getAttribute('tabindex') : null };
+    })()`);
+    check('书签树有可聚焦的宿主（Tab 能进去）', tabbable?.hasTree === true && tabbable?.hostTabIndex === '0', JSON.stringify(tabbable));
+
+    const moved = await ev(`(async () => {
+      const host = document.querySelector('[role="tree"]')?.closest('[tabindex]');
+      if (!host) return { ok: false, why: 'no host' };
+      host.focus();
+      const focused = document.activeElement === host;
+      // 活动行由 ring 类标记（见 bookmark-tree.tsx 的 active && 'ring-1 …'）
+      const activeText = () =>
+        document.querySelector('[role="treeitem"].ring-1')?.innerText?.trim().slice(0, 20) || '';
+      const before = activeText();
+      host.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true, cancelable: true }));
+      await new Promise((r) => setTimeout(r, 400));
+      const after = activeText();
+      return { ok: true, focused, before, after, changed: before !== after };
+    })()`);
+    check(
+      '聚焦树后按方向键，活动行会变（不是死键）',
+      moved?.ok === true && moved?.focused === true && moved?.changed === true,
+      JSON.stringify(moved),
+    );
+  }
+
   /* ══════════ 9.286 空状态都要有"下一步该做什么" ══════════ */
   console.log('\n[9.286] 空状态的下一步');
   {

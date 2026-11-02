@@ -1,4 +1,4 @@
-import {
+import { RefreshCw,
   ArrowDown,
   Bot,
   Brain,
@@ -96,6 +96,9 @@ export function ChatPanel({
   // 撤销历史（新在前）：让「撤销第几步」可控，而不是只能盲点最新那一个
   const undoHistory = describeUndoHistory(undoPoints);
   const undoLast = useAIStore((s) => s.undoLast);
+  const refreshUndo = useAIStore((s) => s.refreshUndo);
+  /** 撤销记录读取失败后的重试中标记 */
+  const [retryingUndo, setRetryingUndo] = useState(false);
   // 撤销：最新一轮的写操作。含删除的轮次会返回不可撤销 + 原因（不假装成功）
   const undoPoint = undoPoints[0];
   const undoReady = undoReadiness(undoPoint);
@@ -328,9 +331,14 @@ export function ChatPanel({
           <Button
             variant="ghost"
             size="icon"
-            title={`撤销历史（最近 ${undoHistory.length} 步）`}
+            title={undoUnknown ? '撤销历史（读取失败，可点开重试）' : `撤销历史（最近 ${undoHistory.length} 步）`}
             aria-label="撤销历史"
-            disabled={undoHistory.length === 0}
+            /*
+             * 状态未知时也要能打开：读取失败时 undoHistory 恰好是 0 条，
+             * 按"0 条就禁用"会把唯一能说明"读取失败、不是没有操作"的面板锁死——
+             * 用户在按钮上只看到一行 title，永远看不到原因，也没法重试。
+             */
+            disabled={undoHistory.length === 0 && !undoUnknown}
             onClick={() => setUndoHistoryOpen(true)}
           >
             <History className="h-3.5 w-3.5" />
@@ -442,9 +450,29 @@ export function ChatPanel({
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto p-2">
               {undoUnknown ? (
-                <p className="px-2 py-3 text-center text-2xs text-destructive">
-                  撤销记录读取失败，当前状态未知（这不等于「没有可撤销的操作」）。请稍后重试或重新打开面板。
-                </p>
+                /*
+                 * 读失败 ≠ 没有可撤销的操作（这句区别很重要），
+                 * 但光说"请重新打开面板"等于把活推给用户——面板里就该有一个重试。
+                 */
+                <div className="flex flex-col items-center gap-2 px-2 py-3">
+                  <p className="text-center text-2xs text-destructive">
+                    撤销记录读取失败，当前状态未知（这不等于「没有可撤销的操作」）。
+                  </p>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="h-7 gap-1 px-2 text-2xs"
+                    disabled={retryingUndo}
+                    onClick={() => {
+                      setRetryingUndo(true);
+                      void refreshUndo().finally(() => setRetryingUndo(false));
+                    }}
+                    data-testid="undo-retry"
+                  >
+                    <RefreshCw className={cn('h-3 w-3', retryingUndo && 'animate-spin')} />
+                    重试
+                  </Button>
+                </div>
               ) : undoHistory.length === 0 ? (
                 <p className="px-2 py-3 text-center text-2xs text-muted-foreground">
                   还没有可撤销的操作。Agent 每次整理（以及你手工确认的删除）都会在这里留下一步。

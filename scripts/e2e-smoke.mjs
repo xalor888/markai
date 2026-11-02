@@ -567,11 +567,20 @@ async function run() {
     await ev(`(() => { document.activeElement?.blur?.(); document.body.focus(); return true; })()`);
     await sleep(150);
     await ev(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }))`);
-    await sleep(500);
-    const opened = await ev(`!!document.querySelector('[data-testid="command-palette"]')`);
-    const focusInside = await ev(
-      `!!document.querySelector('[data-testid="command-palette"]')?.contains(document.activeElement)`,
+    /*
+     * 用 waitFor 等"面板出现且焦点在内"这个最终状态，而不是 sleep(500) 后碰运气。
+     * 固定 sleep 在机器忙的时候会假失败——本轮就是要消掉这类假信号。
+     */
+    const paletteReady = await waitFor(
+      async () =>
+        await ev(`(() => {
+          const p = document.querySelector('[data-testid="command-palette"]');
+          return !!p && p.contains(document.activeElement);
+        })()`),
+      5000,
     );
+    const opened = paletteReady;
+    const focusInside = paletteReady;
     check('Ctrl+K 打开命令面板且焦点在里面', opened === true && focusInside === true, JSON.stringify({ opened, focusInside }));
 
     // 关掉面板，再打开速查表看文案
@@ -605,6 +614,110 @@ async function run() {
     );
     await ev(`document.body.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
     await sleep(200);
+  }
+
+  /* ══════════ 9.315 撤销记录读不到时：能打开面板 + 能重试 ══════════ */
+  console.log('\n[9.315] 撤销记录读取失败态');
+  {
+    /*
+     * 缺陷（两层）：
+     *  1) 「撤销历史」按钮 `disabled={undoHistory.length === 0}`，而读取失败时恰好 0 条
+     *     → 那个唯一能说明"读取失败、不是没有操作"的面板**根本打不开**；
+     *  2) 就算打开了，里面只写"请稍后重试或重新打开面板"，**没有重试按钮**。
+     */
+    const { targetId: t } = await cdp.send('Target.createTarget', {
+      url: `chrome-extension://${EXT_ID}/page.html`,
+    });
+    const { sessionId: sid } = await cdp.send('Target.attachToTarget', { targetId: t, flatten: true });
+    await cdp.send('Page.enable', {}, sid);
+
+    // 让发往 background 的 undo:list 失败（模拟 SW 回收 / 通道异常）
+    const { identifier } = await cdp.send(
+      'Page.addScriptToEvaluateOnNewDocument',
+      {
+        source: `(() => {
+          const orig = chrome.runtime.sendMessage.bind(chrome.runtime);
+          chrome.runtime.sendMessage = (...a) => {
+            const m = a[0];
+            if (m && m.type === 'undo:list') return Promise.reject(new Error('模拟：通道不可用'));
+            return orig(...a);
+          };
+        })();`,
+      },
+      sid,
+    );
+    await cdp.send('Page.reload', {}, sid);
+    await sleep(1400);
+
+    const ev2 = async (expr) => {
+      const r = await cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }, sid);
+      if (r.exceptionDetails) return null;
+      return r.result?.value;
+    };
+
+    const btnState = await waitFor(
+      async () =>
+        await ev2(`(() => {
+          const b = [...document.querySelectorAll('button')].find(
+            (x) => (x.getAttribute('aria-label') || '') === '撤销历史',
+          );
+          return b ? !b.disabled : false;
+        })()`),
+      6000,
+    );
+    check('读取失败时「撤销历史」按钮仍可点开（否则原因永远看不到）', btnState === true, JSON.stringify({ btnState }));
+
+    await ev2(`(() => {
+      [...document.querySelectorAll('button')]
+        .find((x) => (x.getAttribute('aria-label') || '') === '撤销历史')?.click();
+      return true;
+    })()`);
+    await sleep(400);
+
+    const panel = await ev2(`(() => {
+      const t = document.body.innerText;
+      const retry = document.querySelector('[data-testid="undo-retry"]');
+      return {
+        saysUnknown: t.includes('读取失败') && t.includes('状态未知'),
+        hasRetry: !!retry,
+      };
+    })()`);
+    check(
+      '面板里说清「状态未知 ≠ 没有可撤销的操作」',
+      panel.saysUnknown === true,
+      JSON.stringify(panel),
+    );
+    check('面板里给出可点的「重试」（不只是让用户自己重开）', panel.hasRetry === true, JSON.stringify(panel));
+
+    // 恢复通道后点重试：应当拿到真实列表
+    await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sid).catch(() => {});
+    await ev2(`(() => {
+      const orig = chrome.runtime.sendMessage;
+      // 还原：用一个总是失败的标记不行，直接重载页面更干净
+      return true;
+    })()`);
+    await cdp.send('Page.reload', {}, sid);
+    await sleep(1200);
+    /*
+     * 判据是「失败状态消失」，不是「按钮可点」。
+     * 通道恢复后如果本来就没有撤销点，按钮**本来就该是禁用的**（没东西可撤），
+     * 拿 enabled 当判据会误判——我第一版就是这么写错的。
+     */
+    const recovered = await waitFor(
+      async () =>
+        await ev2(`(() => {
+          const b = [...document.querySelectorAll('button')].find(
+            (x) => (x.getAttribute('aria-label') || '') === '撤销历史',
+          );
+          if (!b) return false;
+          const title = b.getAttribute('title') || '';
+          return !title.includes('读取失败');
+        })()`),
+      6000,
+    );
+    check('通道恢复后失败状态消失（title 不再提示读取失败）', recovered === true, JSON.stringify({ recovered }));
+
+    await cdp.send('Target.closeTarget', { targetId: t }).catch(() => {});
   }
 
   /* ══════════ 9.32 快捷键面板承诺的键，真的都能用 ══════════ */

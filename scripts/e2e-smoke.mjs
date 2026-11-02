@@ -616,6 +616,86 @@ async function run() {
     await sleep(200);
   }
 
+  /* ══════════ 9.283 命令面板：能搜文件夹、无结果有提示、Esc 能关 ══════════ */
+  console.log('\n[9.283] 命令面板');
+  {
+    /*
+     * 面板写着「搜书签、文件夹，或执行动作…」。以前只验证过"Ctrl+K 能打开"，
+     * 没验证过它**真的能搜到文件夹**，也没验证过无结果时的样子和 Esc 的退出。
+     */
+    await ev(`(() => { document.activeElement?.blur?.(); document.body.focus(); return true; })()`);
+    await sleep(150);
+    await ev(`window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }))`);
+    const opened = await waitFor(
+      async () => await ev(`!!document.querySelector('[data-testid="command-palette"]')`),
+      5000,
+    );
+    check('Ctrl+K 能打开命令面板', opened === true, JSON.stringify({ opened }));
+
+    const typeQuery = async (q) => {
+      await ev(`(() => {
+        const el = document.querySelector('[data-testid="command-palette"] input');
+        if (!el) return false;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(el, ${JSON.stringify(q)});
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        return true;
+      })()`);
+      await sleep(350);
+    };
+
+    /*
+     * 自己造一个唯一命名的文件夹：之前直接用种子里的名字，
+     * 而那个文件夹在当前环境里可能根本不存在 —— 断言会因环境而假失败。
+     */
+    const FOLDER_NAME = 'E2E-命令面板文件夹';
+    const madeFolder = await ev(`(async () => {
+      const bar = (await chrome.bookmarks.getTree())[0].children.find((c) => c.id === '1');
+      const existed = (await chrome.bookmarks.search(${JSON.stringify(FOLDER_NAME)}))[0];
+      if (existed) return { id: existed.id };
+      const n = await chrome.bookmarks.create({ parentId: bar.id, title: ${JSON.stringify(FOLDER_NAME)} });
+      return { id: n.id };
+    })()`);
+    await sleep(800);
+    await typeQuery(FOLDER_NAME);
+    /*
+     * 必须断言到**文件夹类型的结果项**。
+     * 第一版查的是"面板里有没有『文件夹』三个字"——而动作里有「整理此文件夹」，
+     * 这三个字恒成立，于是把文件夹从数据源里删掉它也照样绿。
+     */
+    const folderHit = await ev(`(() => {
+      const p = document.querySelector('[data-testid="command-palette"]');
+      if (!p) return { noPanel: true };
+      const items = [...p.querySelectorAll('[data-testid="command-item"]')];
+      const folderItems = items.filter((el) => el.getAttribute('data-kind') === 'folder');
+      return {
+        folderCount: folderItems.length,
+        folderNames: folderItems.map((el) => el.innerText.split(String.fromCharCode(10))[0]),
+      };
+    })()`);
+    check(
+      '搜文件夹名能搜到**文件夹类型**的结果（面板承诺"搜书签、文件夹"）',
+      folderHit.folderCount >= 1 && folderHit.folderNames.includes(FOLDER_NAME),
+      JSON.stringify(folderHit),
+    );
+
+    await typeQuery('zzz-绝对搜不到-zzz');
+    const empty = await waitFor(
+      async () => await ev(`document.querySelector('[data-testid="command-palette"]')?.innerText.includes('没有匹配')`),
+      4000,
+    );
+    check('搜不到时明确说「没有匹配」，不是一片空白', empty === true, JSON.stringify({ empty }));
+
+    await ev(`document.querySelector('[data-testid="command-palette"] input')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+    const closed = await waitFor(
+      async () => await ev(`!document.querySelector('[data-testid="command-palette"]')`),
+      4000,
+    );
+    check('「Esc」能关掉面板', closed === true, JSON.stringify({ closed }));
+
+    await ev(`chrome.bookmarks.removeTree(${JSON.stringify(madeFolder.id)}).catch(() => {})`);
+  }
+
   /* ══════════ 9.285 本地文件能不能真的存成书签 ══════════ */
   console.log('\n[9.285] file:// 书签');
   {

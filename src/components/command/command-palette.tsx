@@ -202,6 +202,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
                       key={item.id}
                       type="button"
                       data-testid="command-item"
+                      data-kind={item.kind}
                       data-idx={idx}
                       onMouseEnter={() => setActive(idx)}
                       onClick={() => runItem(item)}

@@ -767,6 +767,131 @@ async function run() {
     })()`);
   }
 
+  /* ══════════ 9.42 核心 Agent 循环：工具调用 → 执行 → 回填 → 最终回复 ══════════ */
+  console.log('\n[9.42] Agent 工具循环（真浏览器）');
+  {
+    /*
+     * 这是整个产品的主干：模型返回 tool_call → 我们执行 → 把结果回填 → 模型再回一段文字。
+     * 这条链路以前**一次都没在浏览器里跑过**，只有单测。
+     * 它同时串起了 tools.ts、撤销记录、UI 渲染三块，任何一处接错都看不出来。
+     */
+    const TARGET_URL = 'https://agent-loop.example/created-by-tool';
+    const mock = await new Promise((resolve) => {
+      const state = { requests: 0 };
+      const server = createServer((req, res) => {
+        if (!req.url || !req.url.includes('/chat/completions')) {
+          res.writeHead(404).end();
+          return;
+        }
+        let body = '';
+        req.on('data', (c) => (body += c));
+        req.on('end', async () => {
+          state.requests++;
+          let isFollowUp = false;
+          try {
+            const parsed = JSON.parse(body);
+            isFollowUp = (parsed.messages || []).some((m) => m.role === 'tool');
+          } catch {
+            /* 解析不了就当首轮 */
+          }
+          res.writeHead(200, {
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Cache-Control': 'no-cache',
+            Connection: 'keep-alive',
+          });
+          const send = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+          if (!isFollowUp) {
+            // 第一轮：要求调用 create_bookmark
+            send({
+              choices: [
+                {
+                  delta: {
+                    role: 'assistant',
+                    tool_calls: [
+                      {
+                        index: 0,
+                        id: 'call_e2e_1',
+                        type: 'function',
+                        function: {
+                          name: 'create_bookmark',
+                          arguments: JSON.stringify({ title: 'E2E 工具建的', url: TARGET_URL }),
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            });
+            send({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] });
+          } else {
+            // 第二轮：工具结果已回填，给最终文字
+            for (const c of ['已经', '帮你建好了。']) {
+              send({ choices: [{ delta: { content: c } }] });
+              await new Promise((r) => setTimeout(r, 60));
+            }
+            send({ choices: [{ delta: {}, finish_reason: 'stop' }] });
+          }
+          res.write('data: [DONE]\n\n');
+          res.end();
+        });
+      });
+      server.listen(0, '127.0.0.1', () => resolve({ server, state, port: server.address().port }));
+    });
+
+    await ev(`(async () => {
+      await chrome.storage.local.set({ 'markai.config': {
+        providerId: 'deepseek', baseUrl: 'http://127.0.0.1:${mock.port}/v1',
+        apiKey: 'mock-key', model: 'mock-model', temperature: 0.4, customHeaders: '',
+      } });
+      return true;
+    })()`);
+    await cdp.send('Page.reload', {}, sessionId);
+    await sleep(900);
+    await waitFor(async () => await ev(`!!document.querySelector('[data-testid="chat-input"]')`), 6000);
+
+    await ev(`(() => {
+      const ta = document.querySelector('[data-testid="chat-input"]');
+      const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value').set;
+      setter.call(ta, '帮我建一个书签');
+      ta.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    await sleep(120);
+    await ev(`(() => {
+      [...document.querySelectorAll('button')].find((x) => x.getAttribute('aria-label') === '发送')?.click();
+      return true;
+    })()`);
+
+    const finished = await waitFor(
+      async () => await ev(`document.body.innerText.includes('帮你建好了')`),
+      20000,
+    );
+    check('模型 → 工具 → 回填 → 最终文字：整条链路跑通', finished === true, JSON.stringify({ finished }));
+
+    const created = await ev(`(async () => {
+      const hits = await chrome.bookmarks.search(${JSON.stringify(TARGET_URL)});
+      return { count: hits.length, title: hits[0]?.title ?? null };
+    })()`);
+    check(
+      '工具调用真的落到了书签数据（不是只画了个卡片）',
+      created.count === 1 && created.title === 'E2E 工具建的',
+      JSON.stringify(created),
+    );
+
+    const turns = mock.state.requests;
+    check('确实发生了两轮请求（工具结果被回填给模型）', turns >= 2, JSON.stringify({ turns }));
+
+    // 收尾：删掉这条书签，避免影响后面的用例
+    await ev(`(async () => {
+      const hits = await chrome.bookmarks.search(${JSON.stringify(TARGET_URL)});
+      for (const h of hits) await chrome.bookmarks.remove(h.id).catch(() => {});
+      const cfg = (await chrome.storage.local.get('markai.config'))['markai.config'] || {};
+      await chrome.storage.local.set({ 'markai.config': { ...cfg, baseUrl: '', apiKey: '', model: '' } });
+      return true;
+    })()`);
+    mock.server.close();
+  }
+
   /* ══════════ 9.43 弹出窗（此前零覆盖） ══════════ */
   console.log('\n[9.43] 弹出窗');
   {

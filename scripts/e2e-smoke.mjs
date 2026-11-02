@@ -616,6 +616,85 @@ async function run() {
     await sleep(200);
   }
 
+  /* ══════════ 9.305 对话没保存成功时必须有重试 ══════════ */
+  console.log('\n[9.305] 对话保存失败的重试');
+  {
+    /*
+     * 缺陷：`persistError` 横幅只有「知道了」。
+     * 按下去等于把唯一一条"这段对话不在磁盘上"的提示关掉，数据仍然没保存——
+     * 用户看到过一句话，然后什么都没有了。
+     */
+    const { targetId: t } = await cdp.send('Target.createTarget', {
+      url: `chrome-extension://${EXT_ID}/page.html`,
+    });
+    const { sessionId: sid } = await cdp.send('Target.attachToTarget', { targetId: t, flatten: true });
+    await cdp.send('Page.enable', {}, sid);
+    // 只让"写会话存储"失败，其他读写正常
+    const { identifier } = await cdp.send(
+      'Page.addScriptToEvaluateOnNewDocument',
+      {
+        source: `(() => {
+          window.__breakAiWrite = true;
+          const orig = chrome.storage.local.set.bind(chrome.storage.local);
+          chrome.storage.local.set = (items) => {
+            if (window.__breakAiWrite && items && Object.prototype.hasOwnProperty.call(items, 'markai.ai')) {
+              return Promise.reject(new Error('模拟：配额已满'));
+            }
+            return orig(items);
+          };
+        })();`,
+      },
+      sid,
+    );
+    await cdp.send('Page.reload', {}, sid);
+    await sleep(1300);
+    const ev2 = async (expr) => {
+      const r = await cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }, sid);
+      if (r.exceptionDetails) return null;
+      return r.result?.value;
+    };
+
+    /*
+     * 走真实的落盘触发路径：页面在 visibilitychange(hidden) 时会 flushStreamPersist()。
+     * 不新造测试钩子——那测的就不是真实链路了。
+     */
+    await waitFor(async () => await ev2(`!!document.querySelector('[data-testid="chat-input"]')`), 8000);
+    await ev2(`(() => {
+      Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+      document.dispatchEvent(new Event('visibilitychange'));
+      return true;
+    })()`);
+    await sleep(400);
+
+    const shown = await waitFor(
+      async () => await ev2(`document.body.innerText.includes('没有保存成功')`),
+      8000,
+    );
+    check('保存失败时出现「没有保存成功」的提示', shown === true, JSON.stringify({ shown }));
+
+    const hasRetry = await ev2(`!!document.querySelector('[data-testid="persist-retry"]')`);
+    check('提示旁边给出可点的「重试保存」（不是只有「知道了」）', hasRetry === true, JSON.stringify({ hasRetry }));
+
+    // 恢复写入后点重试
+    await ev2(`(() => { window.__breakAiWrite = false; return true; })()`);
+    const clicked = await ev2(`(() => {
+      const b = document.querySelector('[data-testid="persist-retry"]');
+      if (!b) return false;
+      b.click();
+      return true;
+    })()`);
+    check('重试按钮可点击', clicked === true, JSON.stringify({ clicked }));
+
+    const cleared = await waitFor(
+      async () => await ev2(`!document.body.innerText.includes('没有保存成功')`),
+      10000,
+    );
+    check('重试成功后提示消失（真的保存了）', cleared === true, JSON.stringify({ cleared }));
+
+    await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sid).catch(() => {});
+    await cdp.send('Target.closeTarget', { targetId: t }).catch(() => {});
+  }
+
   /* ══════════ 9.31 整理记录读失败：不能自相矛盾 ══════════ */
   console.log('\n[9.31] 整理记录读取失败态');
   {

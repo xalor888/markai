@@ -423,6 +423,31 @@ export function ChatPanel({
           >
             <AlertTriangle className="mt-[1px] h-3 w-3 shrink-0" />
             <span className="min-w-0 flex-1">{persistError?.message ?? persistNotice}</span>
+            {/*
+             * "没保存成功"必须有重试。
+             *
+             * 原来只有「知道了」——按下去等于把唯一一条"这段对话不在磁盘上"的提示关掉，
+             * 数据仍然没保存。用户看到过一句话，然后什么都没有了。
+             */}
+            {persistError && (
+              <button
+                type="button"
+                data-testid="persist-retry"
+                className="shrink-0 rounded-sm border border-destructive/40 px-1.5 py-0.5 text-2xs transition-colors hover:bg-destructive/10"
+                onClick={() => {
+                  void (async () => {
+                    await useAIStore.getState()._persist(true);
+                    const still = useAIStore.getState().persistError;
+                    pushToast(still ? '仍未保存成功' : '已保存', {
+                      variant: still ? 'destructive' : 'success',
+                      ...(still ? { description: still.message } : {}),
+                    });
+                  })();
+                }}
+              >
+                重试保存
+              </button>
+            )}
             <button
               type="button"
               className="shrink-0 text-2xs underline"

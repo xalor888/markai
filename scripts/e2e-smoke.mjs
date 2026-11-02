@@ -521,19 +521,65 @@ async function run() {
     check('点树里的文件夹能进入该文件夹（列表随之变化）', intoFolder, `实际 ${rows} 行 · ${JSON.stringify(await snapshot())}`);
   }
   {
-    const moved = await ev(`(async () => {
-      // 用 Ctrl 复制语义之外的正向移动：直接把书签拖到树里的目标文件夹
+    /*
+     * 真拖一次。
+     *
+     * 原来这条用例调的是 `chrome.bookmarks.move()`——那是**绕过界面**，
+     * 只验证了"扩展能收到书签变更并重绘"，拖拽本身一次都没测过。
+     * 注释说"真实拖放要构造 DataTransfer，headless 下不稳"，
+     * 实际上页面里 `new DataTransfer()` + `dispatchEvent(new DragEvent(...))` 是可行的：
+     * 处理器读写的都是 `e.dataTransfer`，合成事件照样能过。
+     */
+    const dragged = await ev(`(async () => {
       const bar = (await chrome.bookmarks.getTree())[0].children.find(c => c.id === '1');
       const target = await chrome.bookmarks.create({ parentId: bar.id, title: 'E2E 拖拽靶' });
-      const src = (await chrome.bookmarks.search({ title: 'Alpha 文档' }))[0];
-      // 真实拖放要构造 DataTransfer，headless 下不稳；这里验证扩展能收到书签变更并重绘
-      await chrome.bookmarks.move(src.id, { parentId: target.id });
+      await new Promise(r => setTimeout(r, 600));
+
+      /*
+       * 自己建源书签，别依赖前面段落留下的数据：
+       * 这段跑到后面，列表里早就没有「Alpha 文档」了（实测 no-src-row）。
+       */
+      const SRC_URL = 'https://drag-source.example/x';
+      for (const h of await chrome.bookmarks.search(SRC_URL)) await chrome.bookmarks.remove(h.id).catch(() => {});
+      const srcNode = await chrome.bookmarks.create({ parentId: bar.id, title: 'E2E 拖拽源', url: SRC_URL });
+      await new Promise(r => setTimeout(r, 700));
+
+      const srcRow = [...document.querySelectorAll('[data-testid="row"]')]
+        .find(r => (r.getAttribute('title') || '').includes('E2E 拖拽源'));
+      if (!srcRow) {
+        await chrome.bookmarks.remove(srcNode.id).catch(() => {});
+        return { ok: false, reason: 'no-src-row' };
+      }
+      const srcId = srcNode.id;
+
+      // 目标：树里刚建的那个文件夹行
+      const treeRow = [...document.querySelectorAll('[role="treeitem"]')]
+        .find(r => (r.textContent || '').includes('E2E 拖拽靶'));
+      if (!treeRow) return { ok: false, reason: 'no-tree-row' };
+
+      const dt = new DataTransfer();
+      const fire = (el, type, extra = {}) => el.dispatchEvent(
+        new DragEvent(type, { bubbles: true, cancelable: true, dataTransfer: dt, ...extra }),
+      );
+      fire(srcRow, 'dragstart');
+      fire(treeRow, 'dragenter');
+      fire(treeRow, 'dragover');
+      fire(treeRow, 'drop');
+
       await new Promise(r => setTimeout(r, 900));
       const kids = await chrome.bookmarks.getChildren(target.id);
+      const inTarget = kids.some(k => k.id === srcId);
+      const parentNow = (await chrome.bookmarks.get(srcId))[0]?.parentId;
+      // 清理：靶文件夹连带里面的源书签一起删
       await chrome.bookmarks.removeTree(target.id).catch(() => {});
-      return { moved: kids.length > 0 };
+      await chrome.bookmarks.remove(srcId).catch(() => {});
+      return { ok: true, inTarget, parentNow, targetId: target.id, srcId };
     })()`);
-    check('书签移动后扩展会实时重绘（浏览器事件链路通）', moved.moved === true, JSON.stringify(moved));
+    check(
+      '真拖：把书签拖进树里的文件夹，它真的换了父目录',
+      dragged.ok === true && dragged.inTarget === true,
+      JSON.stringify(dragged),
+    );
   }
   {
     const kb = await ev(`(async () => {

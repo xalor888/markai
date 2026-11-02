@@ -1910,6 +1910,65 @@ async function run() {
     check('确实发生了两轮请求（工具结果被回填给模型）', turns >= 2, JSON.stringify({ turns }));
 
     /*
+     * **用户真正关心的一步**：AI 动了我的书签，我能不能一下撤回？
+     * 上面只验证了"工具真的建了书签"，没验证"撤销真的能撤回来"。
+     * 这条走完整路径：打开撤销历史 → 点最新一步 → 书签消失。
+     */
+    /*
+     * 必须等撤销点**落盘**：最终文字渲染出来时，后台还在收尾事务
+     * （chat:done → endUndoTransaction → writeUndoPoints）。
+     * 不等就会读到"还没有"，把测试自己的时序问题当成产品缺陷。
+     */
+    const pointLanded = await waitFor(
+      async () =>
+        (await ev(`(async () => {
+          const d = await chrome.storage.local.get('markai.undo');
+          const pts = d['markai.undo']?.points;
+          return Array.isArray(pts) && pts.length >= 1;
+        })()`)) === true,
+      10000,
+    );
+    check('Agent 的改动落成了撤销点（事务正常收尾）', pointLanded === true, JSON.stringify({ pointLanded }));
+
+    const undoState = await ev(`(async () => {
+      const btn = [...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || '') === '撤销历史');
+      const d = await chrome.storage.local.get('markai.undo');
+      const pts = d['markai.undo']?.points;
+      return {
+        btnFound: !!btn,
+        btnDisabled: btn ? btn.disabled : null,
+        btnTitle: btn ? btn.getAttribute('title') : null,
+        undoPoints: Array.isArray(pts) ? pts.length : (pts === undefined ? 'absent' : typeof pts),
+      };
+    })()`);
+
+    await ev(`[...document.querySelectorAll('button')].find((b) => (b.getAttribute('aria-label') || '') === '撤销历史')?.click()`);
+    await sleep(400);
+    const undoRow = await ev(`(() => {
+      const rows = [...document.querySelectorAll('button')].filter((b) =>
+        (b.getAttribute('title') || '').includes('撤销最新的一步'),
+      );
+      return {
+        count: rows.length,
+        first: rows[0]?.innerText?.slice(0, 40) ?? null,
+        panelText: document.body.innerText.slice(0, 400),
+      };
+    })()`);
+    check('撤销历史里出现了可撤销的一步（Agent 的改动留了痕）', undoRow.count >= 1, JSON.stringify(undoRow));
+
+    await ev(`[...document.querySelectorAll('button')]
+      .filter((b) => (b.getAttribute('title') || '').includes('撤销最新的一步'))[0]?.click()`);
+    const reverted = await waitFor(
+      async () => (await ev(`(async () => (await chrome.bookmarks.search(${JSON.stringify(TARGET_URL)})).length)()`)) === 0,
+      10000,
+    );
+    check(
+      '从对话里点撤销，AI 建的书签真的被撤掉了（主路径闭环）',
+      reverted === true,
+      JSON.stringify({ reverted }),
+    );
+
+    /*
      * 系统提示必须把"今天"告诉模型。
      * 工具回填的是原始毫秒时间戳，没有"现在"模型只能拿训练截止日当今天——
      * 「超过 2 年没访问的书签」这类判断会算错，而且错得很自信。

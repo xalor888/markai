@@ -679,6 +679,61 @@ async function run() {
     await cdp.send('Target.closeTarget', { targetId: t }).catch(() => {});
   }
 
+  /* ══════════ 9.286 空状态都要有"下一步该做什么" ══════════ */
+  console.log('\n[9.286] 空状态的下一步');
+  {
+    /*
+     * 台账里这一项挂了很久。逐个看过之后发现**大部分已经做好了**
+     * （列表三种空态、时间线两种、撤销、记忆都有动作提示）。
+     * 但没有测试守着——下次有人改文案，很可能又退回成一句干巴巴的"空"。
+     * 这里把"每个空态都必须带下一步"钉住。
+     */
+    const probe = async (label, setup, selector, expectText) => {
+      await ev(setup);
+      await sleep(400);
+      const r = await ev(`(() => {
+        const el = document.querySelector(${JSON.stringify(selector)});
+        return el ? el.innerText : null;
+      })()`);
+      check(
+        `空态「${label}」带下一步（不只是说"空"）`,
+        typeof r === 'string' && r.length > 0 && new RegExp(expectText).test(r),
+        JSON.stringify({ text: (r || '').slice(0, 90) }),
+      );
+    };
+
+    /*
+     * 1) 没有选中文件夹 → 应给"查看书签栏"这个动作。
+     * 页面没有把 store 挂到 window，所以用键盘路径达到同一个状态：
+     *    顶栏搜索框聚焦 → Esc 失焦 → 点侧边栏的根节点之外的空白处不可靠，
+     *    改用"清空搜索 + 取消选中"的等效路径——直接点中栏的空白行区域。
+     * 退一步：这里只验证**搜索无结果**这一种空态（可由 DOM 事件稳定复现），
+     * 未选文件夹那条留给单测与人工，不为了凑数写一个跑不到的用例。
+     */
+
+    // 2) 搜索无结果 → 应给"清空搜索"这个出口
+    await probe(
+      '搜索无结果',
+      `(() => { const s = document.querySelector('input[placeholder*="搜索"]'); if (!s) return false;
+        const set = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        set.call(s, 'zzz-绝对搜不到-zzz'); s.dispatchEvent(new Event('input', { bubbles: true })); return true; })()`,
+      '[data-testid="empty-state"]',
+      // 必须出现**动作**：只匹配"没有匹配"会被状态句本身满足，那样这条用例是空的
+      '清空搜索',
+    );
+
+    // 必须把搜索清掉：后面的键盘用例（Ctrl+A / 空格 / F2）都作用在**当前列表**上，
+    // 留着这个搜不到的词会让它们全部作用在空结果上而假失败。
+    await ev(`(() => {
+      const s = document.querySelector('input[placeholder*="搜索"]');
+      if (!s) return false;
+      const set = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+      set.call(s, ''); s.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    await sleep(500);
+  }
+
   /* ══════════ 9.2835 同一个动作在界面里只有一个名字 ══════════ */
   console.log('\n[9.2835] 文案一致性');
   {

@@ -1039,7 +1039,10 @@ export function BookmarkList({ className, compact = false }: { className?: strin
             />
           ))
         ) : (
-          <div className="flex h-full flex-col items-center justify-center gap-2 px-5 text-center">
+          <div
+            data-testid="empty-state"
+            className="flex h-full flex-col items-center justify-center gap-2 px-5 text-center"
+          >
             {loadError ? (
               /* 加载失败优先于"空文件夹"：把"出错"说成"没有内容"是最误导人的一种空态 */
               <>

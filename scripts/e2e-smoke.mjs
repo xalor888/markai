@@ -988,6 +988,78 @@ async function run() {
     await ev(`chrome.bookmarks.removeTree(${JSON.stringify(madeFolder.id)}).catch(() => {})`);
   }
 
+  /* ══════════ 9.289 多窗口同步：一个窗口的改动，另一个窗口看得见 ══════════ */
+  console.log('\n[9.289] 多窗口同步');
+  {
+    /*
+     * 用户会同时开多个标签页（侧边栏 + 完整页，或两个完整页）。
+     * 在 A 里建的书签，B 必须自己出现——不能要求用户手动刷新。
+     *
+     * 这条以前从没在浏览器里验过：所有段落都只开一个目标。
+     */
+    const SYNC_TITLE = 'E2E-多窗口同步书签';
+    const SYNC_URL = 'https://multi-window.example/sync';
+
+    const { targetId: a } = await cdp.send('Target.createTarget', { url: PAGE_URL });
+    const sa = (await cdp.send('Target.attachToTarget', { targetId: a, flatten: true })).sessionId;
+    const evA = async (expr) => {
+      const r = await cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }, sa);
+      if (r.exceptionDetails) return null;
+      return r.result?.value;
+    };
+    const { targetId: b } = await cdp.send('Target.createTarget', { url: PAGE_URL });
+    const sb = (await cdp.send('Target.attachToTarget', { targetId: b, flatten: true })).sessionId;
+    const evB = async (expr) => {
+      const r = await cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }, sb);
+      if (r.exceptionDetails) return null;
+      return r.result?.value;
+    };
+    await waitFor(async () => await evA(`!!document.querySelector('[data-testid="topbar"]')`), 10000);
+    await waitFor(async () => await evB(`!!document.querySelector('[data-testid="topbar"]')`), 10000);
+
+    // 清掉可能存在的同名书签，保证起点干净
+    await evA(`(async () => {
+      for (const h of await chrome.bookmarks.search(${JSON.stringify(SYNC_URL)})) {
+        await chrome.bookmarks.remove(h.id).catch(() => {});
+      }
+      return true;
+    })()`);
+    await sleep(600);
+
+    const before = await evB(`document.body.innerText.includes(${JSON.stringify(SYNC_TITLE)})`);
+    check('同步前：B 窗口里没有这条书签', before === false, JSON.stringify({ before }));
+
+    // 在 A 的上下文里创建（等于"另一个窗口做了操作"）
+    await evA(`(async () => {
+      const bar = (await chrome.bookmarks.getTree())[0].children.find((c) => c.id === '1');
+      await chrome.bookmarks.create({ parentId: bar.id, title: ${JSON.stringify(SYNC_TITLE)}, url: ${JSON.stringify(SYNC_URL)} });
+      return true;
+    })()`);
+
+    // B 必须自己出现（不刷新）
+    const synced = await waitFor(
+      async () => (await evB(`document.body.innerText.includes(${JSON.stringify(SYNC_TITLE)})`)) === true,
+      10000,
+    );
+    check('在 A 里建的书签，B 窗口自动出现（不用手动刷新）', synced === true, JSON.stringify({ synced }));
+
+    // 反向：在 B 里删掉，A 也要跟着消失
+    await evB(`(async () => {
+      for (const h of await chrome.bookmarks.search(${JSON.stringify(SYNC_URL)})) {
+        await chrome.bookmarks.remove(h.id).catch(() => {});
+      }
+      return true;
+    })()`);
+    const goneInA = await waitFor(
+      async () => (await evA(`document.body.innerText.includes(${JSON.stringify(SYNC_TITLE)})`)) === false,
+      10000,
+    );
+    check('在 B 里删掉的书签，A 窗口也跟着消失', goneInA === true, JSON.stringify({ goneInA }));
+
+    await cdp.send('Target.closeTarget', { targetId: a }).catch(() => {});
+    await cdp.send('Target.closeTarget', { targetId: b }).catch(() => {});
+  }
+
   /* ══════════ 9.285 本地文件能不能真的存成书签 ══════════ */
   console.log('\n[9.285] file:// 书签');
   {

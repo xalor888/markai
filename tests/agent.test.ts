@@ -14502,6 +14502,61 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     }
   });
 
+  /*
+   * 取消时必须说清**已经做了多少**。
+   *
+   * 只报「已取消」的话，用户看到的是"什么都没发生"——而界面上书签树可能已经变了：
+   * 批量移动 3000 条移到一半、批量删除 2000 条删到一半，都只回一句「已取消」。
+   * 用户不知道要不要撤销、也不知道该不该撤销。
+   */
+  await okA('取消时报出已经做了多少（不能只说「已取消」）', async () => {
+    const { executeTool } = await import('../src/lib/ai/tools');
+
+    // 造 20 条书签，移动/重排到一半时取消
+    const src = (await mockBookmarks.create({ parentId: '1', title: 'T39-src' })).id;
+    const dst = (await mockBookmarks.create({ parentId: '1', title: 'T39-dst' })).id;
+    const ids: string[] = [];
+    for (let i = 0; i < 20; i++) {
+      ids.push((await mockBookmarks.create({ parentId: src, title: 'T39-' + i, url: 'https://t39-' + i + '.test/' })).id);
+    }
+
+    /*
+     * move_bookmarks 不回调进度，所以用代理 chrome.bookmarks.move 控制取消时机：
+     * 第 4 次移动之后 abort，此时应当已经移了 2 条（并发顺序不定，只要 >0 即可）。
+     */
+    const ctrl2 = new AbortController();
+    const ids2 = ids.slice(0, 10);
+    let calls = 0;
+    const realMove = mockBookmarks.move;
+    mockBookmarks.move = (async (id: string, dest: { parentId: string; index?: number }) => {
+      calls++;
+      if (calls === 4) ctrl2.abort(); // 第 4 次移动之后取消
+      return realMove.call(mockBookmarks, id, dest);
+    }) as typeof mockBookmarks.move;
+
+    let err: unknown = null;
+    try {
+      await executeTool('move_bookmarks', JSON.stringify({ ids: ids2, parentId: dst }), undefined, ctrl2.signal);
+    } catch (e) {
+      err = e;
+    } finally {
+      mockBookmarks.move = realMove;
+    }
+
+    console.log(`   [DBG] 取消错误：${String(err)}`);
+    assert.ok(err, '应当抛错');
+    assert.match(String(err), /已取消/);
+    /*
+     * 关键断言：错误里必须带「已移动 N/10 项」这样的量。
+     * 只说「已取消」的话，用户不知道已经移走了 4 条。
+     */
+    assert.match(
+      String(err),
+      /已移动 \d+\/10 项/,
+      `取消时必须报出已经移了多少，否则用户以为一条都没动。实际：${String(err)}`,
+    );
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

@@ -27,9 +27,18 @@ const ROOT_IDS = new Set<string>();
  * 真正能停下来的是工具内部循环里的检查点。没有检查点的工具会一路跑完——
  * 用户点「取消」、界面已显示取消，CPU 和网络还在烧。
  */
-function makeAbortCheck(signal?: AbortSignal): () => void {
-  return () => {
-    if (signal?.aborted) throw new Error('已取消');
+function makeAbortCheck(signal?: AbortSignal): (progress?: string) => void {
+  /*
+   * 取消时必须**带上已经做了多少**。
+   *
+   * 只报「已取消」的话，用户看到的是"什么都没发生"——而界面上书签树可能已经变了：
+   * 批量移动 3000 条移到一半、批量删除 2000 条删到一半，都只回一句「已取消」。
+   * 用户不知道要撤销、也不知道该不该撤销。
+   *
+   * 调用方把进度描述传进来（`已移动 1200/3000 条`），错误信息就带上了。
+   */
+  return (progress?: string) => {
+    if (signal?.aborted) throw new Error(progress ? `已取消（${progress}）` : '已取消');
   };
 }
 
@@ -313,8 +322,9 @@ async function createBookmarks(args: unknown, onProgress?: (text: string) => voi
   pid = pid ? await assertFolder(pid) : await assertFolder(undefined);
   const created: { title: string; url: string; id: string }[] = [];
   const failures: { title: string; error: string }[] = [];
+  let createdCount = 0;
   for (const it of items) {
-    throwIfAborted();
+    throwIfAborted(createdCount > 0 ? `已创建 ${createdCount}/${items.length} 条` : undefined);
     try {
       new URL(it.url); // 逐条校验：非法 URL 只记失败，不影响其他项
       const node = await jCreate({ parentId: pid, title: it.title, url: it.url });
@@ -390,7 +400,7 @@ const checkUrlsSchema = z.object({
 });
 
 async function checkUrls(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
-  const throwIfAborted = () => { if (signal?.aborted) throw new Error('已取消'); };
+  const throwIfAborted = makeAbortCheck(signal);
   // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
   // 那些分支在循环之前返回，不检查就等于取消无效。
   throwIfAborted();
@@ -460,7 +470,7 @@ async function checkUrlsBulk(
   onProgress?: (text: string) => void,
   signal?: AbortSignal,
 ): Promise<ToolOutput> {
-  const throwIfAborted = () => { if (signal?.aborted) throw new Error('已取消'); };
+  const throwIfAborted = makeAbortCheck(signal);
   // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
   // 那些分支在循环之前返回，不检查就等于取消无效。
   throwIfAborted();
@@ -1338,7 +1348,7 @@ async function sortFolder(args: unknown, onProgress?: (text: string) => void, si
     }
   });
   for (let i = 0; i < sorted.length; i++) {
-    throwIfAborted();
+    throwIfAborted(i > 0 ? `已重排 ${i}/${sorted.length} 项` : undefined);
     const item = sorted[i]!;
     await jMove(item.id, { parentId: pid, index: i });
   }
@@ -1424,7 +1434,7 @@ const moveBookmarksSchema = z.object({
 /** 批量移动书签/文件夹到目标文件夹（一次调用替代多轮 move_bookmark） */
 async function moveBookmarks(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
   const { ids, parentId, index } = moveBookmarksSchema.parse(args);
-  const throwIfAborted = () => { if (signal?.aborted) throw new Error('已取消'); };
+  const throwIfAborted = makeAbortCheck(signal);
   // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
   // 那些分支在循环之前返回，不检查就等于取消无效。
   throwIfAborted();
@@ -1435,18 +1445,21 @@ async function moveBookmarks(args: unknown, onProgress?: (text: string) => void,
   // 后移动的先占位，先移动的依次插到 index，最终顺序与 ids 一致（正序移动会倒置）
   const ordered = [...ids];
   if (index !== undefined) ordered.reverse();
+  let doneCount = 0;
   for (const id of ordered) {
     /*
      * 取消检查放在每条**之前**：已移动的那些已经由 jMove 记进撤销点，
      * 中断后用户仍能撤销已移动的部分——不需要额外的补偿逻辑。
+     * 但必须**说清已经移了多少**，否则用户看到「已取消」以为一条都没动。
      */
-    throwIfAborted();
+    throwIfAborted(doneCount > 0 ? `已移动 ${doneCount}/${ordered.length} 项` : undefined);
     try {
       if (isRoot(id)) throw new Error('浏览器根文件夹不可移动');
       // 文件夹批量移动同样校验循环嵌套（与 move_bookmark 一致，给出中文错误而非 Chrome 英文报错）
       const node = (await chrome.bookmarks.get(id).catch(() => []))[0];
       if (node && !node.url) await assertNoCycle(id, pid);
       await jMove(id, { parentId: pid, ...(index !== undefined ? { index } : {}) });
+      doneCount++;
     } catch (e) {
       failures.push({ id, error: e instanceof Error ? e.message : String(e) });
     }
@@ -1784,7 +1797,7 @@ async function mergeFolders(args: unknown, onProgress?: (text: string) => void, 
   let moved = 0;
   let moveFailed = 0;
   for (const child of children) {
-    throwIfAborted();
+    throwIfAborted(moved > 0 ? `已移动 ${moved}/${children.length} 项` : undefined);
     // 逐个追加到 target 末尾，保持相对顺序
     try {
       await jMove(child.id, { parentId: targetId });
@@ -1876,14 +1889,17 @@ async function proposeDeletions(args: unknown, onProgress?: (text: string) => vo
     // 同上：顺序删除，检查点属于纵深防御（逐条 index 兜底已足够）
     const parents = new Set<string>();
     for (const item of items) {
-    throwIfAborted();
+      throwIfAborted();
       const nodes = await chrome.bookmarks.get(item.bookmarkId).catch(() => []);
       const pid = nodes[0]?.parentId;
       if (pid) parents.add(pid);
     }
     for (const p of parents) await ensureOrderCheckpoint(p);
   }
+  let proposedDone = 0;
   for (const item of items) {
+    throwIfAborted(proposedDone > 0 ? `已处理 ${proposedDone}/${items.length} 条` : undefined);
+    proposedDone++; // 自增放在检查点之后：下面的 continue 也算处理过
     const nodes = await chrome.bookmarks.get(item.bookmarkId).catch(() => []);
     const node = nodes[0];
     if (!node) continue; // 已被删除的跳过

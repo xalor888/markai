@@ -13789,6 +13789,69 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     );
   });
 
+  /*
+   * **当前这条**用户消息被截断时也必须标记。
+   *
+   * 用户当场粘一份长清单是最常见的场景，而聊天界面显示的是**完整**消息
+   * （存在 store 里、原样渲染）——于是"用户看到的"和"模型看到的"静默不一致：
+   * 用户指着自己刚发的那段话提问，模型却只读过前 8000 字符。
+   */
+  await okA('当前消息被截断时明确标记（用户看到的和模型看到的不能静默不一致）', async () => {
+    const { runAgentTurn } = await import('../src/lib/ai/agent');
+
+    // 一条 30000 字符的当前消息
+    const longText = Array.from({ length: 1200 }, (_, i) => `${i + 1}. https://cur${i}.test/`).join('\\n');
+    assert.ok(longText.length > 8000, `前置：应超过 8000 上限，实际 ${longText.length}`);
+
+    fetchCalls.length = 0;
+    sseQueue = [sseResponse([sseEvent(JSON.stringify({ choices: [{ delta: { content: '好。' } }] })), sseEvent('[DONE]')])];
+    await runAgentTurn({
+      config: { ...TEST_CONFIG, contextWindow: 32000, autoCompress: false },
+      messageId: 'm-curtext',
+      history: [],
+      text: longText,
+      signal: new AbortController().signal,
+      onEvent: () => {},
+    });
+
+    const body = JSON.parse(String(fetchCalls[0]!.init.body)) as { messages: { role: string; content: string }[] };
+    const last = body.messages[body.messages.length - 1]!;
+    assert.equal(last.role, 'user', '最后一条应是当前用户消息');
+
+    assert.ok(
+      /内容被截断/.test(last.content ?? ''),
+      `被截断的当前消息必须带标记，实际结尾：${(last.content ?? '').slice(-60)}`,
+    );
+    assert.ok(
+      new RegExp(`原有 ${longText.length} 字符`).test(last.content ?? ''),
+      `必须说清原有长度（${longText.length}），实际：${(last.content ?? '').slice(-140)}`,
+    );
+    assert.ok(
+      /只发送了前 8000 字符/.test(last.content ?? ''),
+      `必须说清实际发送了多少，实际：${(last.content ?? '').slice(-140)}`,
+    );
+    // 标记要能指引用户补救
+    assert.ok(
+      /缩短后重新发送/.test(last.content ?? ''),
+      `该告诉用户怎么办，实际：${(last.content ?? '').slice(-140)}`,
+    );
+
+    /* ── 反向：短消息不该有标记 ── */
+    fetchCalls.length = 0;
+    sseQueue = [sseResponse([sseEvent(JSON.stringify({ choices: [{ delta: { content: '好。' } }] })), sseEvent('[DONE]')])];
+    await runAgentTurn({
+      config: { ...TEST_CONFIG, contextWindow: 32000, autoCompress: false },
+      messageId: 'm-curtext2',
+      history: [],
+      text: '帮我整理一下书签栏',
+      signal: new AbortController().signal,
+      onEvent: () => {},
+    });
+    const body2 = JSON.parse(String(fetchCalls[0]!.init.body)) as { messages: { role: string; content: string }[] };
+    const last2 = body2.messages[body2.messages.length - 1]!;
+    assert.equal(last2.content, '帮我整理一下书签栏', '短消息必须原样发送，一个字符都不能改');
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

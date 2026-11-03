@@ -309,7 +309,20 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
     const content = extractText(m);
     apiMessages.push({ role: m.role, content: content || null });
   }
-  apiMessages.push({ role: 'user', content: text.slice(0, 8000) });
+  /*
+   * 当前这条用户消息也有长度上限，但**不能静默切**。
+   *
+   * 用户当场粘一份长清单是最常见的场景，而聊天界面显示的是**完整**消息
+   * （存在 store 里、原样渲染）——于是"用户看到的"和"模型看到的"静默不一致：
+   * 用户指着自己刚发的那段话提问，模型却只读过前 8000 字符。
+   * 不标记的话，模型只会基于半边信息自信作答（0.2.125 同一条思路）。
+   */
+  const MAX_TEXT_CHARS = 8000;
+  const userText =
+    text.length > MAX_TEXT_CHARS
+      ? `${text.slice(0, MAX_TEXT_CHARS)}\n[…你发送的这条消息原有 ${text.length} 字符，此处因长度限制只发送了前 ${MAX_TEXT_CHARS} 字符，内容被截断。如你的问题依赖被截掉的部分，请把相关内容缩短后重新发送。]`
+      : text;
+  apiMessages.push({ role: 'user', content: userText });
 
   /** 估算当前全部发送给模型的 token 用量（系统提示已含在 apiMessages 内，不重复计入固定开销） */
   const usedTokens = () => estimateRequestTokens(apiMessages);

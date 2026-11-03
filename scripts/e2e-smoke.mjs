@@ -4275,6 +4275,99 @@ async function run() {
     await sleep(200);
   }
 
+  /* ══════════ 9.5-big 全部展开在大库上的行数与耗时 ══════════
+   *
+   * `visible` 展平没有任何行数上限：expandedIds 的 500 只限制**文件夹**数，
+   * 不限制**总行数**（文件夹 + 其全部子书签）。TreeRow 虽 memo，但 memo 只在
+   * 重渲染时有用，首次挂载 N 个 DOM 节点照卡。
+   * 这里用真实浏览器量出行数与耗时，作为加帽优化的前后对比基线。
+   */
+  console.log('\n[9.5-big] 大库全部展开的行数与耗时');
+  {
+    const NF = 60, NB = 100; // 6000 条书签，60 个文件夹
+    // 注意：内层不能用模板字面量（反引号会把外层提前终止），一律字符串拼接
+    const seeded = await ev(`(async () => {
+      const bar = (await chrome.bookmarks.getTree())[0].children.find(c => c.title === '书签栏');
+      const folders = [];
+      for (let i = 0; i < ${NF}; i++) {
+        folders.push(await chrome.bookmarks.create({ parentId: bar.id, title: 'bigf-' + i }));
+      }
+      for (let i = 0; i < ${NF}; i++) {
+        for (let j = 0; j < ${NB}; j++) {
+          await chrome.bookmarks.create({ parentId: folders[i].id, title: 'bigb-' + i + '-' + j, url: 'https://big' + i + '.test/' + j });
+        }
+      }
+      return true;
+    })()`);
+    check('前置：大库种入成功', seeded === true, JSON.stringify({ seeded }));
+    /*
+     * 必须**重载页面**再量。
+     *
+     * 实测：这个主页面目标已在后台跑了很久，Chrome 节流了它的定时器，
+     * 书签监听器的去抖刷新一直没跑——种入 6060 条后树上还是旧数据
+     * （甚至还有 9.3511 节已经删掉的 bulkcap-104）。不重载的话量到的是陈旧行数。
+     */
+    await cdp.send('Page.reload', {}, sessionId);
+    await waitFor(async () => (await ev(`document.querySelectorAll('[data-testid="tree-node"]').length > 0`).catch(() => false)) === true, 15000);
+    await sleep(1200);
+    const dbgReload = await ev(`(() => {
+      const rows = [...document.querySelectorAll('[data-testid="tree-node"]')];
+      return { n: rows.length, hasBig: rows.some((r) => (r.getAttribute('title')||'').startsWith('bigf')) };
+    })()`);
+    check('前置：重载后树上确实有大库数据', dbgReload.hasBig === true, JSON.stringify(dbgReload));
+
+    // 点「全部展开」
+    const t0 = Date.now();
+    await ev(`(() => {
+      const btns = [...document.querySelectorAll('button')];
+      const b = btns.find((x) => (x.getAttribute('title') || x.textContent || '').includes('全部展开'));
+      if (b) b.click();
+      return !!b;
+    })()`);
+    // 等行数稳定
+    let rows = 0;
+    for (let i = 0; i < 40; i++) {
+      await sleep(150);
+      const n = await ev(`document.querySelectorAll('[data-testid="tree-node"]').length`);
+      if (n === rows && n > 0) break;
+      rows = n;
+    }
+    const elapsed = Date.now() - t0;
+    console.log(`   [DBG] 全部展开：${rows} 行，耗时 ${elapsed}ms`);
+    check('大库全部展开：把真实行数记下来（优化的对比基线）', rows > 0, JSON.stringify({ rows, elapsed, NF, NB }));
+    check('大库全部展开后界面仍能响应（不被 2 万行 DOM 拖死）', rows > 0 && elapsed < 8000, JSON.stringify({ rows, elapsed }));
+
+    // 渲染上限：必须既盖住 DOM 量，又**给出出口**（不能静默少显示一批）
+    const capped = await ev(`(() => {
+      const btn = document.querySelector('[data-testid="tree-show-more"]');
+      return {
+        hasBtn: !!btn,
+        text: (btn?.textContent || '').replace(/\\s+/g, ' ').trim(),
+        rows: document.querySelectorAll('[data-testid="tree-node"]').length,
+      };
+    })()`);
+    check('大库全部展开后有「显示更多」出口（不静默少显示一批）', capped.hasBtn === true, JSON.stringify(capped));
+    // 这行在 Node 代码里（不在模板字面量内），正则用单反斜杠即可
+    check('「显示更多」说清还剩多少项', /还有 \d+ 项未显示/.test(capped.text), JSON.stringify(capped));
+    check('渲染行数被上限盖住（不再一次性挂 6000+ 个 DOM 节点）', capped.rows <= 800, JSON.stringify(capped));
+
+    // 点它应该继续加载
+    const more = await ev(`(() => {
+      const btn = document.querySelector('[data-testid="tree-show-more"]');
+      if (!btn) return { ok: false };
+      const before = document.querySelectorAll('[data-testid="tree-node"]').length;
+      btn.click();
+      return { ok: true, before };
+    })()`);
+    await sleep(600);
+    const after = await ev(`document.querySelectorAll('[data-testid="tree-node"]').length`);
+    check(
+      '点「显示更多」能继续加载（出口不是死的）',
+      more.ok === true && after > more.before,
+      JSON.stringify({ more, after }),
+    );
+  }
+
   /* ══════════ 9.5 无障碍：可点元素必须有可访问名称 ══════════ */
   console.log('\n[9.5] 无障碍守卫');
   {

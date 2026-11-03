@@ -26,6 +26,17 @@ import {
   X,
 } from 'lucide-react';
 import { useBookmarkStore, copyNodeDeep, resolveTitlePath, type TreeContextMenu } from '@/stores/bookmarkStore';
+
+/**
+ * 树一次最多渲染多少行。
+ *
+ * 树不是虚拟列表：`visible` 有多少行就挂多少个 DOM 节点。`expandedIds` 的 500
+ * 只限制**文件夹**数，不限制**总行数**（文件夹 + 其全部子书签）。
+ * 实测 60 文件夹 × 100 书签（6060 条）点「全部展开」一次性挂 6182 行、耗时 721ms；
+ * 按此外推 2 万条约 2.4s，且 React 协调成本随规模超线性增长。
+ * 800 行足够覆盖绝大多数文件夹的手动展开，又不会在大库上卡住首帧。
+ */
+const TREE_RENDER_LIMIT = 800;
 import { useUIStore } from '@/stores/uiStore';
 import { useAIStore } from '@/stores/aiStore';
 import { copyText } from '@/lib/clipboard';
@@ -112,6 +123,25 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
     walk(roots, 0, false);
     return out;
   }, [roots, expandedIds, filter]);
+
+  /*
+   * 渲染上限：树不是虚拟列表，`visible` 有多少行就挂多少个 DOM 节点。
+   *
+   * `expandedIds` 的 500 只限制**文件夹**数，不限制**总行数**（文件夹 + 其全部子书签）。
+   * 实测（60 文件夹 × 100 书签 = 6060 条）：点「全部展开」一次性挂 **6182 行**，耗时 **721ms**。
+   * 按此外推 2 万条的库约 2.4s，且 React 协调成本随规模超线性增长。
+   *
+   * 现在只渲染前 TREE_RENDER_LIMIT 行，剩下的用「显示更多」按需加载。
+   * 过滤/搜索时**不加帽**——那时行数是用户筛选的结果，砍掉会直接丢结果。
+   */
+  const filtering = filter.trim().length > 0;
+  const [renderLimit, setRenderLimit] = useState(TREE_RENDER_LIMIT);
+  // 展开状态或过滤词变化时回到默认帽：否则「收起后再展开」会停留在上次的高帽上
+  useEffect(() => {
+    setRenderLimit(TREE_RENDER_LIMIT);
+  }, [expandedIds, filter]);
+  const shown = filtering ? visible : visible.slice(0, renderLimit);
+  const hiddenCount = visible.length - shown.length;
 
   // 高亮项滚动到可视区
   useEffect(() => {
@@ -316,7 +346,7 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
         aria-label="书签树"
         className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 outline-none"
       >
-        {visible.map(({ node, depth }) => (
+        {shown.map(({ node, depth }) => (
           <TreeRow
             key={node.id}
             node={node}
@@ -329,7 +359,21 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
             onActivate={handleActivate}
           />
         ))}
-        {visible.length === 0 && (
+        {/*
+          被渲染上限挡住的行：必须给出口，不能静默少显示一批。
+          说清「还剩多少」和「怎么继续」——否则用户会以为树里就这些。
+        */}
+        {hiddenCount > 0 && (
+          <button
+            type="button"
+            data-testid="tree-show-more"
+            onClick={() => setRenderLimit((v) => v + TREE_RENDER_LIMIT)}
+            className="mt-1 w-full rounded-sm border border-dashed border-border px-2 py-1.5 text-2xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            还有 {hiddenCount} 项未显示 · 点击继续加载
+          </button>
+        )}
+        {shown.length === 0 && (
           <div className="px-2 py-3 text-center">
             {loading ? (
               <p className="flex items-center justify-center gap-1.5 text-2xs text-muted-foreground">

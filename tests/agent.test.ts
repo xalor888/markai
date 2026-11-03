@@ -13329,6 +13329,72 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
      */
   });
 
+  /*
+   * forget_memory 按 query 删除时，**必须把"还有几条匹配"如实回给模型**。
+   *
+   * searchMemories 返回全部匹配，而工具只删 matched[0]。用户说
+   * 「把所有关于 GitHub 的记忆都忘掉」时，模型删一条就汇报"已忘掉"——
+   * 其余几条仍在生效，用户下次收藏同站点书签时又会照旧被摆布。
+   *
+   * 既有的 forget_memory 用例只放了一条记忆，多匹配的情况从未被测到。
+   */
+  await okA('forget_memory 多匹配时说清"还有几条"，不让模型误报已忘光', async () => {
+    const { executeTool } = await import('../src/lib/ai/tools');
+    const { MEMORY_STORAGE_KEY } = await import('../src/lib/ai/memory');
+
+    storageMap.set(MEMORY_STORAGE_KEY, [
+      { id: 'm1', category: 'rule', content: 'GitHub 的书签放「技术」文件夹', enabled: true, createdAt: 1, updatedAt: 3 },
+      { id: 'm2', category: 'rule', content: 'GitHub 的标题不要翻译', enabled: true, createdAt: 1, updatedAt: 2 },
+      { id: 'm3', category: 'preference', content: 'GitHub 的书签用英文标题', enabled: true, createdAt: 1, updatedAt: 1 },
+    ]);
+
+    const r = await executeTool('forget_memory', JSON.stringify({ query: 'GitHub' }));
+    const out = JSON.parse(r.result) as {
+      success: boolean;
+      deleted?: string;
+      remainingCount?: number;
+      remainingIds?: string[];
+      remaining?: string[];
+      note?: string;
+      message?: string;
+    };
+
+    assert.equal(out.success, true, JSON.stringify(out));
+    assert.equal(out.deleted, 'GitHub 的书签放「技术」文件夹', `删的应是第一条，实际 ${out.deleted}`);
+
+    // 关键：必须说清还有 2 条
+    assert.equal(out.remainingCount, 2, `必须报告还有 2 条匹配，实际 ${out.remainingCount}`);
+    assert.ok(
+      Array.isArray(out.remainingIds) && out.remainingIds.length === 2,
+      `必须给出剩余项的 id（模型要靠它逐条删），实际 ${JSON.stringify(out.remainingIds)}`,
+    );
+    assert.ok(
+      (out.note || '').includes('还有 2 条'),
+      `note 必须说清"还有几条"，否则模型会误报已忘光：${out.note}`,
+    );
+    assert.ok(
+      (out.message || '').includes('另有 2 条'),
+      `给用户看的 message 也要提一句，实际 ${out.message}`,
+    );
+
+    // 存储里确实只少了 1 条
+    const stored = (storageMap.get(MEMORY_STORAGE_KEY) as { id: string }[]) ?? [];
+    assert.deepEqual(stored.map((m) => m.id), ['m2', 'm3'], `只该删掉 m1，实际 ${JSON.stringify(stored.map((m) => m.id))}`);
+
+    // 只剩一条匹配时不该出现 remaining 字段（不制造噪音）
+    storageMap.set(MEMORY_STORAGE_KEY, [
+      { id: 'n1', category: 'rule', content: 'GitHub 放技术', enabled: true, createdAt: 1, updatedAt: 2 },
+      { id: 'n2', category: 'preference', content: '深色模式', enabled: true, createdAt: 1, updatedAt: 1 },
+    ]);
+    const r2 = await executeTool('forget_memory', JSON.stringify({ query: 'GitHub' }));
+    const out2 = JSON.parse(r2.result) as { success: boolean; remainingCount?: number; note?: string };
+    assert.equal(out2.success, true);
+    assert.equal(out2.remainingCount, undefined, `只匹配一条时不该有 remainingCount，实际 ${out2.remainingCount}`);
+    assert.ok(!out2.note, `只匹配一条时不该有 note，实际 ${out2.note}`);
+
+    storageMap.delete(MEMORY_STORAGE_KEY);
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

@@ -1931,8 +1931,10 @@ async function forgetMemoryTool(args: unknown): Promise<ToolOutput> {
   const { id, query } = forgetMemorySchema.parse(args);
   const all = await getMemories();
   let targetId: string | undefined = id;
+  // query 命中多条时，必须把"还有几条"如实回给模型——否则它只会删第一条，
+  // 然后向用户报告"已忘掉"，而其余几条仍在生效（用户下次收藏同站点书签时又会照旧）。
+  const matched = !id && query ? searchMemories(query, all) : [];
   if (!targetId && query) {
-    const matched = searchMemories(query, all);
     targetId = matched[0]?.id;
   }
 
@@ -1947,11 +1949,26 @@ async function forgetMemoryTool(args: unknown): Promise<ToolOutput> {
 
   const target = all.find((m) => m.id === targetId);
   const ok = await deleteMemoryItem(targetId);
+  const remaining = matched.filter((m) => m.id !== targetId);
   return {
     result: JSON.stringify({
       success: ok,
+      deleted: target?.content ?? targetId,
+      ...(remaining.length > 0
+        ? {
+            remainingCount: remaining.length,
+            remainingIds: remaining.map((m) => m.id),
+            remaining: remaining.map((m) => m.content),
+            /*
+             * 这句话是给**模型**看的：它得知道只删了一条，剩下几条还在。
+             * 没有它时，用户说「把所有关于 GitHub 的记忆都忘掉」，
+             * 模型删一条就汇报"已忘掉"——而其余几条下次照样生效。
+             */
+            note: `query「${query}」匹配到 ${matched.length} 条记忆，本次只删除了第 1 条，还有 ${remaining.length} 条仍然有效。请逐条调用 forget_memory（用上面给出的 remainingIds）把它们也删掉，或先向用户说明还有几条、问清楚是否全删。`,
+          }
+        : {}),
       message: ok
-        ? `已从长期记忆库删除：「${target?.content ?? targetId}」`
+        ? `已从长期记忆库删除：「${target?.content ?? targetId}」${remaining.length > 0 ? `（另有 ${remaining.length} 条相似记忆仍有效）` : ''}`
         : `删除失败，记忆项不存在`,
     }),
   };

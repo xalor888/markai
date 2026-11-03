@@ -14557,6 +14557,50 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     );
   });
 
+  /*
+   * 取消后，撤销历史里要能分辨出「取消掉的半步」。
+   *
+   * 原来被取消的轮次和正常做完的轮次在列表里长得一样（都是「移动 4 项」），
+   * 用户取消后回头看历史，无法确认哪一条对应刚才那半步，也就不知道该不该撤销它。
+   */
+  await okA('被取消的轮次在撤销历史里标「已中断」', async () => {
+    const { beginUndoTransaction, endUndoTransaction, resetUndoTransactionForTest } = await import(
+      '../src/lib/undo/recorder'
+    );
+    const { jRemove } = await import('../src/lib/undo/mutations');
+    const { describeUndoHistory } = await import('../src/lib/undo/journal');
+    const { readUndoState } = await import('../src/lib/undo/recorder');
+
+    storageMap.delete('markai.undo');
+    storageMap.delete('markai.undo.pending');
+    resetUndoTransactionForTest();
+
+    const folder = (await mockBookmarks.create({ parentId: '1', title: 'T40-F' })).id;
+    const a = (await mockBookmarks.create({ parentId: folder, title: 'T40-a', url: 'https://t40-a.test/' })).id;
+    const b = (await mockBookmarks.create({ parentId: folder, title: 'T40-b', url: 'https://t40-b.test/' })).id;
+
+    // 一轮正常做完
+    await beginUndoTransaction('run-normal');
+    await jRemove(a);
+    await endUndoTransaction('run-normal', { interrupted: false });
+
+    // 一轮被取消
+    await beginUndoTransaction('run-cut');
+    await jRemove(b);
+    await endUndoTransaction('run-cut', { interrupted: true });
+
+    const st = await readUndoState();
+    const rows = describeUndoHistory(st.points);
+    const cut = rows.find((r) => r.id === st.points.find((p) => p.runId === 'run-cut')?.id);
+    const normal = rows.find((r) => r.id === st.points.find((p) => p.runId === 'run-normal')?.id);
+
+    console.log(`   [DBG] 正常: ${normal?.summary} · 取消: ${cut?.summary}`);
+    assert.ok(cut, '取消那一轮应有撤销点');
+    assert.ok(normal, '正常那一轮应有撤销点');
+    assert.match(String(cut!.summary), /已中断/, `取消的轮次必须标出来，实际：${cut!.summary}`);
+    assert.ok(!/已中断/.test(String(normal!.summary)), `正常完成的轮次不该标「已中断」，实际：${normal!.summary}`);
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

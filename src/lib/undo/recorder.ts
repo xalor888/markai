@@ -289,7 +289,16 @@ export function activeOpCount(): number {
  * 结束当前事务并落盘。
  * 没有任何写操作的轮次不会产生撤销点（避免出现「撤销 0 项」的空按钮）。
  */
-export async function endUndoTransaction(expectedRunId?: string): Promise<UndoPoint | null> {
+export async function endUndoTransaction(
+  expectedRunId?: string,
+  /**
+   * 这一轮是否被取消结束。
+   *
+   * 记下来才能在撤销历史里区分「完整做完的一步」和「取消掉的半步」——
+   * 否则两者在用户眼里都是「移动 4 项」，取消后再看历史无从确认该撤销哪一条。
+   */
+  opts: { interrupted?: boolean } = {},
+): Promise<UndoPoint | null> {
   const tx = active;
   // 迟到的收尾不得关闭**别的轮次**的事务：不匹配就不动它。
   // （没有这条时，被抢占后迟到苏醒的旧轮次会把新轮次的事务提前收尾，
@@ -303,6 +312,7 @@ export async function endUndoTransaction(expectedRunId?: string): Promise<UndoPo
     runId: tx.runId,
     createdAt: Date.now(),
     ops: tx.ops,
+    ...(opts.interrupted ? { interrupted: true } : {}),
     ...(tx.orderCheckpoints.size > 0
       ? {
           orderCheckpoints: [...tx.orderCheckpoints.entries()].map(([parentId, order]) => ({

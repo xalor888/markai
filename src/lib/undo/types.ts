@@ -102,6 +102,14 @@ export interface UndoPoint {
   containsDelete: boolean;
   /** 已执行过撤销的时间；存在即表示该点已消费 */
   appliedAt?: number;
+  /**
+   * 这一轮是被**取消**（而不是正常做完）结束的。
+   *
+   * 为什么要记：撤销历史里原来只看得到「移动 4 项」——分不出这是"完整做完的一步"
+   * 还是"取消掉的半步"。用户点了取消之后回头看历史，无法确认哪一条对应刚才那半步，
+   * 也就不知道该不该撤销它。
+   */
+  interrupted?: boolean;
 }
 
 /** undo:list 的结果 */

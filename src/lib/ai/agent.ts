@@ -270,8 +270,14 @@ export async function runAgentTurn(params: AgentTurnParams): Promise<void> {
   try {
     await runAgentTurnInner(params);
   } finally {
-    // 只收尾**自己**这一轮的事务：被抢占后迟到苏醒时不得把新轮次的事务一起关掉
-    await endUndoTransaction(params.messageId);
+    /*
+     * 只收尾**自己**这一轮的事务：被抢占后迟到苏醒时不得把新轮次的事务一起关掉。
+     *
+     * 同时标出这一轮是不是被取消结束的——撤销历史里要能区分
+     * 「完整做完的一步」和「取消掉的半步」，否则用户取消后回头看历史，
+     * 看到两条「移动 4 项」无从确认哪条是刚才那半步。
+     */
+    await endUndoTransaction(params.messageId, { interrupted: params.signal.aborted });
   }
 }
 

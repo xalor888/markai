@@ -121,9 +121,16 @@ export function describeUndoHistory(points: UndoPoint[]): UndoHistoryRow[] {
     const latestOnly = index === 0;
     const undoable = latestOnly && ready.undoable;
     const reason = !latestOnly ? '请先撤销较新的操作' : ready.reason;
+    /*
+     * 被取消的轮次要标出来。
+     *
+     * 否则「取消掉的半步」和「完整做完的一步」在列表里长得一样（都是「移动 4 项」），
+     * 用户取消后回头看历史，无法确认哪一条对应刚才那半步，也就不知道该不该撤销它。
+     */
+    const base = summarizeOps(p.ops);
     return {
       id: p.id,
-      summary: summarizeOps(p.ops),
+      summary: p.interrupted ? `${base}（已中断）` : base,
       count: ready.count,
       createdAt: p.createdAt,
       undoable,

@@ -14429,6 +14429,79 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     }
   });
 
+  /*
+   * 取消必须能打断**每一个**含长循环的工具。
+   *
+   * `executeTool` 的 signal 是 0.2.141 加的，但当时只接进了 cleanup_sweep；
+   * 0.2.142 补了 check_urls / check_urls_bulk / move_bookmarks。
+   * 剩下 14 个含长循环的工具（create_bookmarks / auto_categorize / dedupe_bookmarks /
+   * sort_folder / merge_folders / propose_deletions / delete_all_bookmarks …）**一个都没接**。
+   *
+   * 这条测试的作用是**兜住整类**：列出所有必须支持取消的工具，
+   * 以后有人新增一个长工具却忘了接 signal，这儿就会红。
+   */
+  await okA('所有含长循环的工具都能被取消打断（整类兜底）', async () => {
+    const { executeTool } = await import('../src/lib/ai/tools');
+
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      return new Response(null, { status: 200 });
+    }) as typeof fetch;
+
+    // 造一棵够大的树，让这些工具的循环真的跑起来
+    const folder = (await mockBookmarks.create({ parentId: '1', title: 'T38-F' })).id;
+    const child = (await mockBookmarks.create({ parentId: folder, title: 'T38-C' })).id;
+    const urls: string[] = [];
+    for (let i = 0; i < 40; i++) {
+      urls.push('https://t38-' + i + '.test/');
+      await mockBookmarks.create({ parentId: child, title: 'T38-b' + i, url: 'https://t38-' + i + '.test/' });
+    }
+
+    /**
+     * 每个工具一组参数。signal 在**调用前**就 abort：
+     * 工具必须在自己的循环里检查到并抛错，而不是照常跑完。
+     */
+    const cases: { name: string; args: unknown }[] = [
+      { name: 'check_urls', args: { urls: urls.slice(0, 50) } },
+      { name: 'check_urls_bulk', args: { urls } },
+      { name: 'create_bookmarks', args: { parentId: folder, items: urls.slice(0, 30).map((u, i) => ({ title: 'T38-n' + i, url: u })) } },
+      { name: 'sort_folder', args: { parentId: folder, by: 'title' } },
+      { name: 'move_bookmarks', args: { ids: [child], parentId: folder } },
+      { name: 'auto_categorize', args: { folderId: folder, minGroupSize: 1 } },
+      { name: 'dedupe_bookmarks', args: { folderIds: [folder], limit: 50 } },
+      { name: 'merge_folders', args: { sourceId: child, targetId: folder } },
+      { name: 'propose_deletions', args: { items: [{ bookmarkId: child, reason: 'test' }] } },
+    ];
+
+    try {
+      const notCancellable: string[] = [];
+      for (const c of cases) {
+        const ctrl = new AbortController();
+        ctrl.abort();
+        const t0 = Date.now();
+        let err: unknown = null;
+        let result: unknown = null;
+        try {
+          result = await executeTool(c.name, JSON.stringify(c.args), undefined, ctrl.signal);
+        } catch (e) {
+          err = e;
+        }
+        const ms = Date.now() - t0;
+        const cancelled = err != null && /已取消/.test(String(err));
+        console.log(`   [DBG] ${c.name}: ${ms}ms, 抛错=${!!err}, 已取消=${cancelled}`);
+        if (!cancelled) notCancellable.push(`${c.name}(${ms}ms, ${err ? String(err).slice(0, 40) : '正常返回'})`);
+      }
+      assert.deepEqual(
+        notCancellable,
+        [],
+        `这些工具在 signal 已取消时仍然照常执行（必须检查 signal 并抛「已取消」）：${notCancellable.join('、')}`,
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

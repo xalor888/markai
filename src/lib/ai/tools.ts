@@ -20,6 +20,19 @@ export interface ToolOutput {
 const ROOT_IDS = new Set<string>();
 
 /** 初始化根文件夹集合（幂等） */
+/**
+ * 取消检查：抛出去交给 executeTool 的 catch。
+ *
+ * 为什么每个长工具都要自己检查：`executeTool` 的 signal 只是**传下去**，
+ * 真正能停下来的是工具内部循环里的检查点。没有检查点的工具会一路跑完——
+ * 用户点「取消」、界面已显示取消，CPU 和网络还在烧。
+ */
+function makeAbortCheck(signal?: AbortSignal): () => void {
+  return () => {
+    if (signal?.aborted) throw new Error('已取消');
+  };
+}
+
 export async function ensureRoots(): Promise<void> {
   if (ROOT_IDS.size > 0) return;
   const tree = await chrome.bookmarks.getTree();
@@ -283,7 +296,14 @@ const createBookmarksSchema = z.object({
 });
 
 /** 批量创建书签（一次最多 50 条；支持 parentId 或 parentPath 定位目标文件夹；非法项单独失败） */
-async function createBookmarks(args: unknown): Promise<ToolOutput> {
+async function createBookmarks(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
+  const throwIfAborted = makeAbortCheck(signal);
+  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
+  // 那些分支在循环之前返回，不检查就等于取消无效。
+  throwIfAborted();
+  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
+  // 那些分支在循环之前返回，不检查就等于取消无效。
+  throwIfAborted();
   const { parentId, parentPath, items } = createBookmarksSchema.parse(args);
   let pid = parentId;
   if (!pid && parentPath) {
@@ -294,6 +314,7 @@ async function createBookmarks(args: unknown): Promise<ToolOutput> {
   const created: { title: string; url: string; id: string }[] = [];
   const failures: { title: string; error: string }[] = [];
   for (const it of items) {
+    throwIfAborted();
     try {
       new URL(it.url); // 逐条校验：非法 URL 只记失败，不影响其他项
       const node = await jCreate({ parentId: pid, title: it.title, url: it.url });
@@ -370,6 +391,9 @@ const checkUrlsSchema = z.object({
 
 async function checkUrls(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
   const throwIfAborted = () => { if (signal?.aborted) throw new Error('已取消'); };
+  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
+  // 那些分支在循环之前返回，不检查就等于取消无效。
+  throwIfAborted();
   const { urls } = checkUrlsSchema.parse(args);
   const unique = [...new Set(urls)].slice(0, 50);
   const valid: string[] = [];
@@ -437,6 +461,9 @@ async function checkUrlsBulk(
   signal?: AbortSignal,
 ): Promise<ToolOutput> {
   const throwIfAborted = () => { if (signal?.aborted) throw new Error('已取消'); };
+  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
+  // 那些分支在循环之前返回，不检查就等于取消无效。
+  throwIfAborted();
   const { urls, maxConcurrent = 20, timeoutMs = 8_000, maxDeadList = 200 } = checkUrlsBulkSchema.parse(args);
   const unique = [...new Set(urls.map((u) => u.trim()).filter(Boolean))];
   if (unique.length === 0) {
@@ -591,7 +618,12 @@ const autoCategorizeSchema = z.object({
 async function autoCategorize(
   args: unknown,
   onProgress?: (text: string) => void,
+  signal?: AbortSignal,
 ): Promise<ToolOutput> {
+  const throwIfAborted = makeAbortCheck(signal);
+  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
+  // 那些分支在循环之前返回，不检查就等于取消无效。
+  throwIfAborted();
   const { folderId, folderPath, minGroupSize = 2, maxGroups = 25, foldOverflow = false, dryRun = false } =
     autoCategorizeSchema.parse(args);
   await ensureRoots();
@@ -675,6 +707,7 @@ async function autoCategorize(
       let cursor = 0;
       const workers = Array.from({ length: Math.min(10, ids.length) }, async () => {
         while (cursor < ids.length) {
+          throwIfAborted();
           const id = ids[cursor++]!;
           await chrome.bookmarks.move(id, { parentId: folderId });
           movedIds.push(id);
@@ -684,6 +717,7 @@ async function autoCategorize(
       await Promise.all(workers);
     };
     for (let i = 0; i < picked.length; i++) {
+      throwIfAborted();
       const g = picked[i]!;
       const folder = await jCreate({ parentId: pid, title: g.domain });
       created++;
@@ -753,6 +787,9 @@ async function cleanupSweep(
   const throwIfAborted = () => {
     if (signal?.aborted) throw new Error('已取消，这一步没有执行完');
   };
+  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
+  // 那些分支在循环之前返回，不检查就等于取消无效。
+  throwIfAborted();
   const {
     folderId,
     folderPath,
@@ -964,6 +1001,7 @@ async function cleanupSweep(
   } else {
     // 确认模式：全部生成待确认提议
     for (const t of targets) {
+      throwIfAborted();
       deletions.push({
         id: uid(),
         bookmarkId: t.id,
@@ -1156,7 +1194,11 @@ const dedupeSchema = z.object({
  * 与 find_duplicates 的分工：后者只报告，清理要靠模型把 id 抄进 propose_deletions（易错且费 token）；
  * 这里把「保留谁」固化成可解释规则（见 dedupe.ts），dryRun=true 时只出计划、不落盘。
  */
-async function dedupeBookmarks(args: unknown): Promise<ToolOutput> {
+async function dedupeBookmarks(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
+  const throwIfAborted = makeAbortCheck(signal);
+  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
+  // 那些分支在循环之前返回，不检查就等于取消无效。
+  throwIfAborted();
   const { folderIds, limit = 100, dryRun = false } = dedupeSchema.parse(args);
   await ensureRoots();
   const tree = await chrome.bookmarks.getTree();
@@ -1199,6 +1241,11 @@ async function dedupeBookmarks(args: unknown): Promise<ToolOutput> {
   let executed = 0;
   if (mode === 'auto') {
     for (const r of toRemove) {
+      /*
+       * 取消检查放在 try **外面**：里面的 catch 会把取消错误也当成"单条失败"吞掉，
+       * 那样取消后它会继续删剩下的书签——比不取消还糟。
+       */
+      throwIfAborted();
       try {
         await jRemove(r.id);
         executed++;
@@ -1218,6 +1265,7 @@ async function dedupeBookmarks(args: unknown): Promise<ToolOutput> {
   } else {
     for (const p of plans) {
       for (const r of p.remove) {
+        throwIfAborted();
         deletions.push({
           id: uid(),
           bookmarkId: r.id,
@@ -1260,7 +1308,11 @@ const sortFolderSchema = z.object({
 });
 
 /** 对文件夹内子项排序（文件夹置顶 + 按指定字段；直接改写真实顺序） */
-async function sortFolder(args: unknown): Promise<ToolOutput> {
+async function sortFolder(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
+  const throwIfAborted = makeAbortCheck(signal);
+  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
+  // 那些分支在循环之前返回，不检查就等于取消无效。
+  throwIfAborted();
   const { parentId, by = 'title' } = sortFolderSchema.parse(args);
   const pid = await assertFolder(parentId);
   const children = await chrome.bookmarks.getChildren(pid);
@@ -1286,6 +1338,7 @@ async function sortFolder(args: unknown): Promise<ToolOutput> {
     }
   });
   for (let i = 0; i < sorted.length; i++) {
+    throwIfAborted();
     const item = sorted[i]!;
     await jMove(item.id, { parentId: pid, index: i });
   }
@@ -1372,6 +1425,9 @@ const moveBookmarksSchema = z.object({
 async function moveBookmarks(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
   const { ids, parentId, index } = moveBookmarksSchema.parse(args);
   const throwIfAborted = () => { if (signal?.aborted) throw new Error('已取消'); };
+  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
+  // 那些分支在循环之前返回，不检查就等于取消无效。
+  throwIfAborted();
   await ensureRoots();
   const pid = await assertFolder(parentId);
   const failures: { id: string; error: string }[] = [];
@@ -1704,7 +1760,11 @@ const mergeSchema = z.object({
  * 合并文件夹：把 source 的全部子项移入 target（保持相对顺序）。
  * source 清空后自动提议删除空文件夹（走确认机制，不直接删）。
  */
-async function mergeFolders(args: unknown): Promise<ToolOutput> {
+async function mergeFolders(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
+  const throwIfAborted = makeAbortCheck(signal);
+  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
+  // 那些分支在循环之前返回，不检查就等于取消无效。
+  throwIfAborted();
   const { sourceId, targetId } = mergeSchema.parse(args);
   await ensureRoots();
   if (sourceId === targetId) throw new Error('源文件夹与目标文件夹相同');
@@ -1724,6 +1784,7 @@ async function mergeFolders(args: unknown): Promise<ToolOutput> {
   let moved = 0;
   let moveFailed = 0;
   for (const child of children) {
+    throwIfAborted();
     // 逐个追加到 target 末尾，保持相对顺序
     try {
       await jMove(child.id, { parentId: targetId });
@@ -1800,7 +1861,11 @@ export async function getDeleteMode(): Promise<'confirm' | 'auto'> {
 }
 
 /** 删除安全机制：默认只生成提议；"无需确认"模式下自动执行 */
-async function proposeDeletions(args: unknown): Promise<ToolOutput> {
+async function proposeDeletions(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
+  const throwIfAborted = makeAbortCheck(signal);
+  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
+  // 那些分支在循环之前返回，不检查就等于取消无效。
+  throwIfAborted();
   const { items } = proposeSchema.parse(args);
   await ensureRoots();
   const mode = await getDeleteMode();
@@ -1811,6 +1876,7 @@ async function proposeDeletions(args: unknown): Promise<ToolOutput> {
     // 同上：顺序删除，检查点属于纵深防御（逐条 index 兜底已足够）
     const parents = new Set<string>();
     for (const item of items) {
+    throwIfAborted();
       const nodes = await chrome.bookmarks.get(item.bookmarkId).catch(() => []);
       const pid = nodes[0]?.parentId;
       if (pid) parents.add(pid);
@@ -1870,7 +1936,11 @@ const deleteAllSchema = z.object({
  * 删除全部书签（清空书签栏 / 其他书签 / 移动设备 的所有子项，根文件夹保留）。
  * 默认模式下生成"删除全部"提议等待用户确认；"无需确认"模式下直接执行。
  */
-async function deleteAllBookmarks(args: unknown): Promise<ToolOutput> {
+async function deleteAllBookmarks(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
+  const throwIfAborted = makeAbortCheck(signal);
+  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
+  // 那些分支在循环之前返回，不检查就等于取消无效。
+  throwIfAborted();
   const { reason } = deleteAllSchema.parse(args);
   await ensureRoots();
   const tree = await chrome.bookmarks.getTree();
@@ -1878,6 +1948,7 @@ async function deleteAllBookmarks(args: unknown): Promise<ToolOutput> {
   // 收集所有根下的直接子项（递归子树由 removeTree 处理）
   const targets: { id: string; title: string; url?: string; parentId?: string }[] = [];
   for (const root of roots) {
+    throwIfAborted();
     for (const child of root.children ?? []) {
       targets.push({
         id: child.id,

@@ -13552,6 +13552,77 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     assert.ok(!j2.note, `不截断时不该有 note，实际 ${j2.note}`);
   });
 
+  /*
+   * 「终态优先」守卫：已被消费过的 runId，其残留 pending **不得**被提升成新撤销点。
+   *
+   * 否则删除类逆操作会被重复回放，造出重复子树——注释里写明这条同时覆盖
+   * 「点已被消费、pending 清理失败、进程又被杀」的完整序列。
+   *
+   * 但 `MAX_TERMINAL_RUN_IDS = 50`：终态列表只留最近 50 条。
+   * 若某个 runId 被挤出这个窗口，而它的 pending 又恰好残留（clearPending 失败过），
+   * 且它的正式点也已掉出 10 步保留窗口——两道守卫就都不认它了，
+   * 陈旧的 pending 会被提升成一个**新的可回放撤销点**。
+   */
+  await okA('终态 runId 的残留 pending 不被提升（墓碑 + 终态列表双守卫）', async () => {
+    const {
+      recoverInterruptedTransaction,
+      takeUndoPoint,
+      writeUndoPoints,
+      rememberTerminalRun,
+      readUndoState,
+      MAX_TERMINAL_RUN_IDS,
+    } = await import('../src/lib/undo/recorder');
+    const { beginUndoTransaction, endUndoTransaction, resetUndoTransactionForTest } =
+      await import('../src/lib/undo/recorder');
+    const { jRemove } = await import('../src/lib/undo/mutations');
+
+    storageMap.delete('markai.undo');
+    storageMap.delete('markai.undo.pending');
+    resetUndoTransactionForTest();
+
+    /* ── A. 基本情形：runId 在终态列表里 → 不提升 ── */
+    const folder = (await mockBookmarks.create({ parentId: '1', title: 'T31-F' })).id;
+    const victim = (await mockBookmarks.create({ parentId: folder, title: 'T31-V', url: 'https://t31.test/v' })).id;
+    await beginUndoTransaction('run-t31-a');
+    await jRemove(victim);
+    const point = await endUndoTransaction();
+    assert.ok(point, '应产生撤销点');
+    const taken = await takeUndoPoint();
+    assert.ok(taken.point, '应能取走撤销点');
+
+    // 消费成功后，pending 槽应已被写成墓碑（这是 0.2.122 新加的守卫）
+    const pend = storageMap.get('markai.undo.pending') as { terminal?: boolean; runId?: string } | undefined;
+    assert.equal(pend?.terminal, true, `消费后 pending 槽应是墓碑，实际 ${JSON.stringify(pend)}`);
+    assert.equal(pend?.runId, 'run-t31-a', '墓碑要记下是哪个 runId');
+
+    const recovered = await recoverInterruptedTransaction();
+    assert.equal(recovered, null, `已终态的 runId 不得被提升，实际 ${JSON.stringify(recovered)}`);
+    assert.equal((await readUndoState()).points.length, 0, '提升被正确阻止：没有新撤销点');
+
+    /* ── B. 墓碑本身就能挡住提升（不依赖终态列表） ── */
+    storageMap.delete('markai.undo');
+    // 终态列表填满"别的" runId，把 run-t31-a 挤出去——墓碑是唯一还认它的东西
+    const crowded = Array.from({ length: MAX_TERMINAL_RUN_IDS }, (_, i) => `filler-${i}`);
+    await writeUndoPoints([], undefined, crowded);
+    // pending 保持墓碑内容（不清掉）
+    const recovered2 = await recoverInterruptedTransaction();
+    assert.equal(recovered2, null, `墓碑应独立挡住提升，实际 ${JSON.stringify(recovered2)}`);
+    assert.equal(
+      (await readUndoState()).points.length,
+      0,
+      '墓碑挡住提升：没有新的可回放撤销点（陈旧改动不会被重复回放）',
+    );
+
+    /* ── C. 墓碑是惰性的：不挡新轮次 ── */
+    resetUndoTransactionForTest();
+    const victim2 = (await mockBookmarks.create({ parentId: folder, title: 'T31-V2', url: 'https://t31.test/v2' })).id;
+    await beginUndoTransaction('run-t31-c');
+    await jRemove(victim2);
+    const pointC = await endUndoTransaction();
+    assert.ok(pointC, '新轮次应能正常产生撤销点（墓碑不该把它挡掉）');
+    assert.equal(pointC!.runId, 'run-t31-c');
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

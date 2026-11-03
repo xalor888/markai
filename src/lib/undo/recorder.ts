@@ -38,6 +38,17 @@ interface PendingTransaction {
   containsDelete: boolean;
   orderCheckpoints: { parentId: string; order: string[] }[];
   updatedAt: number;
+  /**
+   * 这个 runId 已终结（撤销点被消费过）——pending 是陈旧残留，**不得**再被提升。
+   *
+   * 为什么需要它：`terminalRunIds` 只有最近 50 条（MAX_TERMINAL_RUN_IDS）。
+   * 一个 runId 被挤出那个窗口后，若它的 pending 又恰好残留（clearPending 失败过），
+   * 且正式点也已掉出 10 步保留窗口，`recoverInterruptedTransaction` 的两道守卫
+   * 就都不认它了——陈旧 pending 会被提升成一个**新的可回放撤销点**，
+   * 用户可以对一个已经发生且已经撤销过的操作再撤一次（删除类会重复重建子树）。
+   * 墓碑只占一个 key、不随轮次增长，所以没有上界问题。
+   */
+  terminal?: boolean;
 }
 
 interface ActiveTransaction {
@@ -467,6 +478,16 @@ export async function takeUndoPoint(id?: string): Promise<{ point: UndoPoint | n
   // 保留原有 notice：消费一个点不该抹掉"曾丢弃过更早点"的记录。
   const terminal = point ? rememberTerminalRun(state.terminalRunIds, point.runId) : state.terminalRunIds;
   const written = await writeUndoPoints(remaining, state.notice, terminal);
+  if (written.ok && point) {
+    /*
+     * 消费成功就地把 pending 槽改成墓碑。
+     *
+     * `terminalRunIds` 只有 50 条上界，会被后续轮次挤掉；正式点也会掉出 10 步保留窗口。
+     * 两道守卫同时失效时，残留的 pending 会被提升成一个新的可回放撤销点——
+     * 用户能对一个已经发生且已经撤销过的操作再撤一次（删除类重复重建子树）。
+     */
+    await tombstonePending(point.runId);
+  }
   // 如实回报是否真的移除：消费失败时点仍在存储里，调用方据此阻止重复回放
   return { point, removed: written.ok };
 }
@@ -476,7 +497,33 @@ async function clearPending(): Promise<void> {
   try {
     await chrome.storage.local.remove(UNDO_PENDING_KEY);
   } catch {
-    // 清不掉最多是多一次无害的重复提升（提升逻辑会消费掉它）
+    // 清不掉不是无害的：残留的 pending 可能被提升成新的可回放撤销点（见 tombstonePending）
+  }
+}
+
+/**
+ * 把 pending 槽改成"这个 runId 已终结"的墓碑。
+ *
+ * 撤销点被消费时调用。用**写墓碑**代替 `clearPending()` 的删除：
+ * 删除可能失败，而失败之后就没有任何按 runId 的痕迹了（terminalRunIds 有 50 条上界，
+ * 会被后续轮次挤掉）。墓碑只占一个 key、不随轮次增长，没有上界问题。
+ *
+ * 墓碑是惰性的：`ops` 为空，任何读取路径都不会把它当成在途事务；
+ * 下一轮 `savePendingFrom` 会用新事务覆盖它。
+ */
+async function tombstonePending(runId: string): Promise<void> {
+  try {
+    const snap: PendingTransaction = {
+      runId,
+      ops: [],
+      containsDelete: false,
+      orderCheckpoints: [],
+      updatedAt: Date.now(),
+      terminal: true,
+    };
+    await chrome.storage.local.set({ [UNDO_PENDING_KEY]: snap });
+  } catch {
+    // 写不进去就退回 terminalRunIds 那道守卫（它有 50 条上界，但总比没有好）
   }
 }
 

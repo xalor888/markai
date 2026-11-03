@@ -13395,6 +13395,59 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     storageMap.delete(MEMORY_STORAGE_KEY);
   });
 
+  /*
+   * 记忆注入超出上限时，提示词必须说清"还有没列出的"。
+   *
+   * 提示词措辞是「以下是已记录的用户长期偏好与规则」——一句"完整"的断言。
+   * 原来只截断不提示，于是用户有 40 条记忆时模型只看到 30 条，却以为那就是全部，
+   * 剩下 10 条被默默忽略（用户以为"我说过别再动这个站点"）。
+   * 这跟 forget_memory 只删一条却汇报"已忘掉"是同一类假汇报。
+   */
+  await okA('记忆注入超上限时说清"还有未列出的"，不冒充完整清单', async () => {
+    const { formatMemoriesForPrompt } = await import('../src/lib/ai/memory');
+    const mk = (i: number) => ({
+      id: `m${i}`,
+      content: `记忆${i}`,
+      category: 'custom' as const,
+      enabled: true,
+      createdAt: i,
+      updatedAt: i,
+    });
+
+    // 正好等于上限：不该有截断提示（不制造噪音）
+    const exact = Array.from({ length: 30 }, (_, i) => mk(i));
+    const pExact = formatMemoriesForPrompt(exact, 30);
+    assert.ok(pExact.includes('记忆29'), '上限内的最后一条应注入');
+    assert.ok(!pExact.includes('未在此列出'), `正好等于上限时不该有截断提示：${pExact.slice(-200)}`);
+
+    // 超出一条：必须说出来，并给出条数与补救动作
+    const over = Array.from({ length: 41 }, (_, i) => mk(i));
+    const pOver = formatMemoriesForPrompt(over, 30);
+    assert.ok(pOver.includes('记忆29'), '第 30 条（下标 29）应注入');
+    assert.ok(!pOver.includes('记忆30'), '第 31 条起不注入');
+    assert.ok(
+      pOver.includes('另有 11 条已启用的记忆因单次注入上限未在此列出'),
+      `必须说清还有几条没列出，实际：${pOver.slice(-300)}`,
+    );
+    assert.ok(
+      pOver.includes('recall_memories'),
+      '必须告诉模型可以主动查，否则它只能假设上面就是全部',
+    );
+    assert.ok(
+      pOver.includes('不要假设上面就是全部'),
+      `措辞要直接点破"这不一定是全部"，实际：${pOver.slice(-300)}`,
+    );
+
+    // 停用的不计入"未列出"（它们本来就不该生效）
+    // 31 条启用 + 1 条停用：停用不该计入"未列出"
+    const withDisabled = [...Array.from({ length: 31 }, (_, i) => mk(i)), { ...mk(99), enabled: false }];
+    const pDisabled = formatMemoriesForPrompt(withDisabled, 30);
+    assert.ok(
+      pDisabled.includes('另有 1 条已启用的记忆'),
+      `只数已启用的，实际：${pDisabled.slice(-200)}`,
+    );
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

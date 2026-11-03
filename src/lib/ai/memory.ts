@@ -160,7 +160,8 @@ export function searchMemories(query: string, memories: MemoryItem[]): MemoryIte
  * 遵循条数上限，以精简清晰的格式注入。
  */
 export function formatMemoriesForPrompt(memories: MemoryItem[], maxItems = 30): string {
-  const active = memories.filter((m) => m.enabled).slice(0, maxItems);
+  const enabled = memories.filter((m) => m.enabled);
+  const active = enabled.slice(0, maxItems);
   if (active.length === 0) return '';
 
   const lines = active.map((m, idx) => {
@@ -168,11 +169,26 @@ export function formatMemoriesForPrompt(memories: MemoryItem[], maxItems = 30): 
     return `${idx + 1}. [${tag}] ${m.content}`;
   });
 
+  /*
+   * 超出注入上限的部分必须**说出来**。
+   *
+   * 原来这里只截断，不提示。提示词的措辞是「以下是已记录的用户长期偏好与规则」——
+   * 一句"完整"的断言。于是用户有 40 条记忆时，模型只看到 30 条，
+   * 却以为那就是全部，剩下 10 条被默默忽略（用户以为"我说过别再动这个站点"）。
+   * 这跟 forget_memory 只删一条却汇报"已忘掉"是同一类假汇报。
+   */
+  const omitted = enabled.length - active.length;
+  const truncationNote =
+    omitted > 0
+      ? `（注意：另有 ${omitted} 条已启用的记忆因单次注入上限未在此列出。当用户的指令可能与未列出的记忆相关时，请调用 recall_memories 查询，不要假设上面就是全部。）`
+      : '';
+
   return [
     '',
     '【长期记忆 / 用户长期偏好与规则】',
     '以下是已记录的用户长期偏好与规则。在进行书签归类、整理、重命名、去重或清理时，请严格遵守以下偏好与规则，无需重复询问用户：',
     ...lines,
+    ...(truncationNote ? [truncationNote] : []),
     '（如用户提出与上述记忆相违背的新指令，以本次用户的最新具体指令为准；若用户要求记住新偏好或删除旧偏好，请调用相应记忆工具）',
     '',
   ].join('\n');

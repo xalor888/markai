@@ -13164,6 +13164,69 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     }
   });
 
+  /*
+   * 「纯函数」模块的不变承诺，必须由契约守着。
+   *
+   * 这几个模块的文件头都写着同一类承诺：
+   *   diagnostics.ts  —— 「不碰 chrome、不发网络请求、不写任何东西」
+   *   journal.ts      —— 「刻意不碰 chrome.*，必须能在 node 测试里被直接证伪」
+   *   chat-width.ts   —— 「纯函数，不碰 React/chrome」
+   *   delayed-open.ts —— 「不碰 React、不碰 chrome，为了能直接单测」
+   *
+   * 目前都是真的。但**单测里装着 chrome 替身、也 mock 了 fetch**，
+   * 所以谁往里加一句 `chrome.storage...` 或 `fetch(...)`，测试照样全绿——
+   * 而「诊断是只读的」这条边界一旦破了，用户点一下健康检查就可能被动到数据。
+   *
+   * 所以用源码契约把这些文件钉在纯函数上。
+   */
+  await okA('承诺「纯函数」的模块真的不碰 chrome / 不发请求', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+
+    /** 每个条目：文件 + 它承诺的不变性 */
+    const pure: { file: string; promises: RegExp[] }[] = [
+      {
+        file: 'src/lib/health/diagnostics.ts',
+        promises: [/不碰 chrome/, /不发网络请求/, /不写任何东西/],
+      },
+      { file: 'src/lib/undo/journal.ts', promises: [/不碰 .?chrome/i] },
+      { file: 'src/lib/chat-width.ts', promises: [/不碰 React\/chrome/i] },
+      { file: 'src/lib/bookmarks/delayed-open.ts', promises: [/不碰 React、不碰 chrome/] },
+    ];
+
+    // 先确认这些承诺还在文件里：承诺被删掉时，契约要能发现（否则守的就是空气）
+    for (const { file, promises } of pure) {
+      const src = readFileSync(resolve(root, file), 'utf8');
+      for (const p of promises) {
+        assert.ok(p.test(src), `${file} 的头部承诺「${p}」不见了——要么把承诺写回去，要么把契约条目删掉并说明原因`);
+      }
+    }
+
+    // 再确认代码里没有 chrome / fetch / XMLHttpRequest
+    const banned = [
+      /\bchrome\s*\.\s*(storage|bookmarks|tabs|runtime|action|windows|contextMenus|notifications)\b/,
+      /\bfetch\s*\(/,
+      /\bXMLHttpRequest\b/,
+      /\bawait\s+chrome\b/,
+    ];
+    for (const { file } of pure) {
+      const src = readFileSync(resolve(root, file), 'utf8');
+      const code = src
+        .split('\n')
+        .filter((l) => {
+          const t = l.trim();
+          return !t.startsWith('*') && !t.startsWith('//') && !t.startsWith('/*');
+        })
+        .join('\n');
+      for (const re of banned) {
+        const hit = code.match(re);
+        assert.ok(!hit, `${file} 承诺是纯函数，却出现了 ${JSON.stringify(hit?.[0])}`);
+      }
+    }
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

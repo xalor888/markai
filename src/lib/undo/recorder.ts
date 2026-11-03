@@ -644,6 +644,15 @@ export async function recoverInterruptedTransaction(): Promise<UndoPoint | null>
     ops: pending.ops,
     ...(pending.orderCheckpoints?.length ? { orderCheckpoints: pending.orderCheckpoints } : {}),
     containsDelete: !!pending.containsDelete,
+    /*
+     * **这一条就是"被中断"的定义**：pending 只可能来自已经死掉的进程，
+     * 所以恢复出来的点必然是被中断的那一轮。
+     *
+     * 0.2.145 加 `interrupted` 时只接到了 `endUndoTransaction`（正常收尾时看
+     * signal.aborted），漏了这条产生路径——于是最彻底的中断（整轮被浏览器回收）
+     * 反而在撤销历史里显示成普通的一步，用户分不清它是做完的还是断掉的。
+     */
+    interrupted: true,
   };
   const allRecovered = [point, ...state.points];
   const cappedRecovered = allRecovered.slice(0, MAX_UNDO_POINTS);

@@ -14748,7 +14748,52 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     for (const tool of b) {
       assert.ok(a.has(tool), `${tool} 在 turn-plan.ts 的 READ_TOOLS 里，但 agent.ts 没有`);
     }
-  });  console.log(`\n全部通过：${passed} 项 ✔`);
+  });
+  /*
+   * 进程被杀后恢复出来的撤销点，才是最该标「已中断」的那一种。
+   *
+   * 0.2.145 只覆盖了 `endUndoTransaction`（正常收尾时按 signal.aborted 判断）那条路径。
+   * 但撤销点还有**第二条产生路径**：`recoverInterruptedTransaction()`——SW 启动时把
+   * 死掉进程留下的 pending 提升成撤销点。那是"整轮被浏览器回收"的场景，
+   * 比用户手动点取消更彻底地"中断"，却没有被标记。
+   *
+   * 结果：用户在撤销历史里看到一条普通的「删除 5 项」，分不清它是做完的还是断掉的。
+   */
+  await okA('进程被杀后恢复出来的撤销点也要标「已中断」', async () => {
+    const { beginUndoTransaction, dropActiveForTest, recoverInterruptedTransaction, readUndoState, resetUndoTransactionForTest } =
+      await import('../src/lib/undo/recorder');
+    const { jRemove } = await import('../src/lib/undo/mutations');
+    const { describeUndoHistory } = await import('../src/lib/undo/journal');
+
+    storageMap.delete('markai.undo');
+    storageMap.delete('markai.undo.pending');
+    resetUndoTransactionForTest();
+
+    const folder = (await mockBookmarks.create({ parentId: '1', title: 'T42-F' })).id;
+    const a = (await mockBookmarks.create({ parentId: folder, title: 'T42-a', url: 'https://t42-a.test/' })).id;
+    const b = (await mockBookmarks.create({ parentId: folder, title: 'T42-b', url: 'https://t42-b.test/' })).id;
+
+    await beginUndoTransaction('run-killed');
+    await jRemove(a);
+    await jRemove(b);
+    // 等节流窗口过去，让 pending 追上这两条操作
+    await new Promise((r) => setTimeout(r, 320));
+    dropActiveForTest(); // ← 等价于 SW 被杀：内存没了，pending 还在
+
+    const recovered = await recoverInterruptedTransaction();
+    assert.ok(recovered, '应能恢复出撤销点');
+
+    const st = await readUndoState();
+    const row = describeUndoHistory(st.points)[0];
+    console.log(`   [DBG] 恢复出的撤销点摘要: ${row?.summary}`);
+    assert.match(
+      String(row?.summary),
+      /已中断/,
+      `进程被杀后恢复的撤销点必须标「已中断」，否则用户分不清它是做完的还是断掉的。实际：${row?.summary}`,
+    );
+  });
+
+  console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);
   process.exit(1);

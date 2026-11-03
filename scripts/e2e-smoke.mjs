@@ -4278,7 +4278,8 @@ async function run() {
         hasSection: text.includes('健康检查'),
         score: m ? Number(m[1]) : null,
         hasCopyReport: text.includes('复制诊断报告'),
-        hasFixAll: /修复全部（\d+）/.test(text),
+        // 双反斜杠：模板字面量里单个 \d 会被丢掉，正则变成 /修复全部（d+）/，恒不匹配
+        hasFixAll: /修复全部（\\d+）/.test(text),
       };
     })()`);
     check('设置页打开即给出健康分与结论', health.hasSection && health.score !== null, JSON.stringify(health));
@@ -4362,9 +4363,21 @@ async function run() {
       const after = (await chrome.bookmarks.search({})).length;
       return { ok: true, clicked: true, before, after };
     })()`);
+    /*
+     * 前置必须先钉住：按钮**真的被找到并点到了**。
+     *
+     * 上面那段注释早就写明「!btn → clicked:false 会让这条用例静默空转」，
+     * 但断言只查 `after === before`——按钮没找到时两个数必然相同，用例照样绿。
+     * 一个从没执行过主体动作的测试，比没有测试更危险（它会一直报绿）。
+     */
+    check(
+      '「修复全部」按钮确实存在并被点到（否则这条用例是空转）',
+      repaired.clicked === true,
+      JSON.stringify(repaired),
+    );
     check(
       '一键修复不改动任何书签（只碰 MarkAI 自己的配置与记录）',
-      repaired.after === repaired.before,
+      repaired.clicked === true && repaired.after === repaired.before,
       JSON.stringify(repaired),
     );
   }

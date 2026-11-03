@@ -1520,20 +1520,52 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.ok(rj.every((r) => r.status === 'ok'));
     });
 
-    // 4. 提议删除：选中 1 条提交 propose_deletions
-    const target = cj.items.find((i) => i.type === 'deep');
-    if (target) {
-      // 找到对应书签 id
+    /*
+     * 4. 提议删除：选中 1 条提交 propose_deletions。
+     *
+     * 这里原来是 `const target = cj.items.find(i => i.type === 'deep')` 然后两层
+     * `if (target)` / `if (hit)` 嵌套——夹具里没有 deep 类型、或搜索没命中时，
+     * 那一步**静默不跑**，而下面那条汇总用例的函数体是 `() => true`，
+     * 名字却叫「任务链路走通（导出→分类→检测→提议）」。
+     * 也就是说：整条链路从没被真正验证过，却一直报绿。
+     *
+     * 现在：优先取 deep，取不到就退到任意一条（这一步必须真的执行），
+     * 并把"四步是否都真的跑了"变成可断言的事实。
+     */
+    const target = cj.items.find((i) => i.type === 'deep') ?? cj.items[0];
+    let proposed = 0;
+    let proposeSkip = '';
+    if (!target) {
+      proposeSkip = 'classify_urls 没有返回任何条目，无法提议删除';
+    } else {
       const sr = await executeTool('search_bookmarks', JSON.stringify({ query: target.url.slice(0, 30) }));
       const sj = JSON.parse(sr.result) as { items: { id: string; url: string }[] };
-      const hit = sj.items.find((n) => n.url === target.url);
-      if (hit) {
+      const hit = sj.items.find((n) => n.url === target.url) ?? sj.items[0];
+      if (!hit) {
+        proposeSkip = `搜索 ${target.url} 没找到对应书签`;
+      } else {
         const pr = await executeTool('propose_deletions', JSON.stringify({ items: [{ bookmarkId: hit.id, reason: '测试：深层子页面' }] }));
         const pj = JSON.parse(pr.result) as { submitted: number };
-        ok('propose_deletions 提交删除提议', () => assert.equal(pj.submitted, 1));
+        proposed = pj.submitted;
       }
     }
-    ok('任务链路走通（导出→分类→检测→提议）', () => true);
+    ok('propose_deletions 提交删除提议', () => {
+      assert.equal(proposeSkip, '', `这一步被静默跳过了：${proposeSkip}`);
+      assert.equal(proposed, 1);
+    });
+
+    /*
+     * 汇总：四步**都真的跑了**才算走通。
+     * 原来这里是 `() => true`——一条永远不会红的"汇总"，
+     * 比没有这条更糟：它让人以为链路已被覆盖。
+     */
+    ok('任务链路走通（导出→分类→检测→提议）', () => {
+      assert.ok(all.length >= 5, `导出这步没取回书签：${all.length}`);
+      assert.equal(cj.items.length, all.length, '分类这步没有覆盖全部书签');
+      assert.equal(rj.length, all.length, '存活检测这步没有覆盖全部书签');
+      assert.ok(rj.every((r) => r.status === 'ok'), '存活检测这步有非 ok 结果');
+      assert.equal(proposed, 1, `提议删除这步没有真的执行（${proposeSkip || 'submitted=' + proposed}）`);
+    });
   }
 
   /* ── T17: 查重归一化（www / 查询参数；协议差异按设计保留） ── */
@@ -7860,8 +7892,15 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     // 注意：所有含 await 的操作都在块级顶层顺序执行，ok() 只做同步断言——
     // 把 async 函数直接塞给 ok() 会变成"脱缰的 Promise"，与后续语句并发跑，
     // 写存储的用例会在 storageMap.delete 之后把旧数据写回来（真实踩过的坑）。
-    await assert.rejects(() => memMod.addMemoryItem('   '), /不能为空/);
-    ok('addMemoryItem：空内容拒绝', () => {});
+    /*
+     * 断言必须收在 okA 里。
+     * 原来是 `await assert.rejects(...)` 挂在块级顶层、外面套一个 `ok(name, () => {})`
+     * 占位（恒真）——真断言一旦失败会**抛穿整个 IIFE**，把后面八百多项一起吞掉，
+     * 只留下一条崩溃信息，看不出是哪条用例红。用 await okA 收敛成单项失败。
+     */
+    await okA('addMemoryItem：空内容拒绝', async () => {
+      await assert.rejects(() => memMod.addMemoryItem('   '), /不能为空/);
+    });
 
     let added: MemoryItem | undefined;
     await memMod.addMemoryItem('技术类书签按语言分类').then((r) => (added = r));
@@ -7954,8 +7993,10 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.equal(out.item.category, 'rule');
     });
 
-    await assert.rejects(() => executeTool('remember', JSON.stringify({ content: '' })), /参数不合法/);
-    ok('remember：内容为空被 zod 拒绝（参数不合法）', () => {});
+    // 同上：断言收进 okA，别让它的失败抛穿整个套件
+    await okA('remember：内容为空被 zod 拒绝（参数不合法）', async () => {
+      await assert.rejects(() => executeTool('remember', JSON.stringify({ content: '' })), /参数不合法/);
+    });
 
     const rec = await executeTool('recall_memories', JSON.stringify({ query: 'GitHub' }));
     ok('recall_memories：按关键词命中', () => {

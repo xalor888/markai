@@ -1079,11 +1079,22 @@ async function findDuplicates(args: unknown): Promise<ToolOutput> {
     count: arr.length,
     bookmarks: arr.map((b) => ({ id: b.id, title: b.title })),
   }));
+  const omitted = dupes.length - items.length;
   return {
     result: JSON.stringify({
       total: dupes.length,
       shown: items.length,
-      note: '重复组按数量降序；如需清理请用 propose_deletions 提交删除提议（保留其中一个）。',
+      ...(omitted > 0
+        ? {
+            omittedGroups: omitted,
+            /*
+             * `total` 与 `shown` 不一致时必须解释，否则模型看到两个对不上的数
+             * 只会自由发挥。它可能据此断言"只有 50 组重复"（漏掉后面 150 组），
+             * 也可能反复用同一个 limit 重试。
+             */
+            note: `共发现 ${dupes.length} 组重复，本次按数量降序只返回前 ${items.length} 组，另有 ${omitted} 组未列出（limit 默认 50）。如需看完请调大 limit 再查一次。`,
+          }
+        : { note: '重复组按数量降序；如需清理请用 propose_deletions 提交删除提议（保留其中一个）。' }),
       items,
     }),
   };

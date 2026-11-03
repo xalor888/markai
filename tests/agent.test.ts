@@ -13448,6 +13448,60 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     );
   });
 
+  /*
+   * find_duplicates 的 `total` 与 `shown` 不一致时必须解释。
+   *
+   * 原来只返回两个数字（total: 全部组数 / shown: 本次给出的组数），没有任何说明。
+   * 模型看到两个对不上的数只会自由发挥：可能据此断言"只有 50 组重复"
+   * （漏掉后面 150 组），也可能反复用同一个 limit 重试。
+   * 这跟 forget_memory / formatMemoriesForPrompt 是同一类假汇报——
+   * **给了一部分，却不说还有一部分**。
+   */
+  await okA('find_duplicates 截断时说清"还有几组没列出"', async () => {
+    const { executeTool } = await import('../src/lib/ai/tools');
+
+    // 造 60 组互不相同的重复（每组 2 条）：默认 limit 50，必然截断
+    for (let g = 0; g < 60; g++) {
+      const folder = (await mockBookmarks.create({ parentId: '1', title: `DUP-${g}` })).id;
+      for (let k = 0; k < 2; k++) {
+        await mockBookmarks.create({ parentId: folder, title: `d${g}-${k}`, url: `https://dup${g}.test/p` });
+      }
+    }
+
+    const out = await executeTool('find_duplicates', '{}');
+    const j = JSON.parse(out.result) as {
+      total: number;
+      shown: number;
+      omittedGroups?: number;
+      note?: string;
+      items: unknown[];
+    };
+
+    assert.ok(j.total >= 60, `应至少发现 60 组，实际 ${j.total}`);
+    assert.equal(j.shown, 50, `默认 limit 50，实际给出 ${j.shown}`);
+    assert.ok(j.total > j.shown, '前置：确实发生了截断');
+
+    assert.equal(j.omittedGroups, j.total - j.shown, `omittedGroups 应等于 total-shown，实际 ${j.omittedGroups}`);
+    assert.ok(
+      (j.note || '').includes(`另有 ${j.omittedGroups} 组未列出`),
+      `note 必须说清还有几组没列出，实际：${j.note}`,
+    );
+    assert.ok(
+      (j.note || '').includes('调大 limit'),
+      `必须给出补救动作，实际：${j.note}`,
+    );
+
+    // 不截断时不该有这些字段（不制造噪音）
+    const out2 = await executeTool('find_duplicates', JSON.stringify({ limit: 500 }));
+    const j2 = JSON.parse(out2.result) as { total: number; shown: number; omittedGroups?: number; note?: string };
+    assert.equal(j2.shown, j2.total, 'limit 够大时不该截断');
+    assert.equal(j2.omittedGroups, undefined, `不截断时不该有 omittedGroups，实际 ${j2.omittedGroups}`);
+    assert.ok(
+      !(j2.note || '').includes('未列出'),
+      `不截断时不该有截断说明，实际：${j2.note}`,
+    );
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

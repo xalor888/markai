@@ -467,10 +467,24 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
       tc: ApiToolCall,
     ): Promise<{ out?: ToolOutput; error?: string }> => {
       try {
+        /*
+         * 取消必须能停住工具。
+         *
+         * 原来 abort 信号只传给了 LLM 请求，`executeTool` 完全拿不到。用户在
+         * cleanup_sweep 扫几千条链接时点「停止」，这一次工具会**跑到底**——
+         * 书签照搬、删除提议照提交，而用户已经看到「已取消」。
+         *
+         * 两道闸：
+         *   ① 开跑前查一次：把越界压到"最多一个工具"以内；
+         *   ② 进度回调里查：批量任务（cleanup_sweep / check_urls_bulk /
+         *      auto_categorize）每处理一批都会调 onProgress，在这里抛出让它们中途真停。
+         */
+        if (signal.aborted) return { error: '已取消，这一步没有执行' };
         return {
           out: await executeTool(tc.function.name, tc.function.arguments, (text) => {
             // 长任务进度：转发为 tool_progress 事件（工具块实时显示，同时构成 SW 活跃信号）
             safePost(onEvent, { type: 'chat:tool_progress', messageId, recordId: tc.id, text });
+            if (signal.aborted) throw new Error('已取消，任务中断');
           }),
         };
       } catch (e) {

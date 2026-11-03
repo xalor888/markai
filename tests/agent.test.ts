@@ -13943,6 +13943,93 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     }
   });
 
+  /*
+   * 取消必须能停住工具。
+   *
+   * 原来 abort 信号只传给了 LLM 请求，`executeTool` 完全拿不到。用户在
+   * cleanup_sweep 扫几千条链接时点「停止」，这一次工具会跑到底——
+   * 书签照搬、删除提议照提交，而用户已经看到「已取消」。
+   */
+  await okA('取消能停住工具：点「停止」后不再继续跑、也不再烧额度', async () => {
+    const { runAgentTurn } = await import('../src/lib/ai/agent');
+
+    /*
+     * 走 **agent 真实路径**（不是直接调 executeTool——那样测不到 agent 侧的闸）。
+     *
+     * 原来 abort 信号只传给 LLM 请求，`executeTool` 完全拿不到。用户在
+     * cleanup_sweep 扫几千条链接时点「停止」，这一次工具会跑到底——
+     * 书签照搬、删除提议照提交，而用户已经看到「已取消」。
+     *
+     * 判据（都与累计 store 无关，稳定）：
+     *   ① 工具结果必须是"已取消"的错误，而不是一份正常完成的结果；
+     *   ② 取消后**不再发第二次 LLM 请求**——否则就是在白烧用户的额度。
+     */
+    const ac = new AbortController();
+    let progress = 0;
+    const events: string[] = [];
+    fetchCalls.length = 0;
+    sseQueue = [
+      sseResponse([
+        sseEvent(
+          JSON.stringify({
+            choices: [{ delta: { tool_calls: [{ index: 0, id: 'c-cancel', function: { name: 'auto_categorize', arguments: '{"parentId":"1","minGroupSize":1}' } }] } }],
+          }),
+        ),
+        sseEvent('[DONE]'),
+      ]),
+      // 若没有取消闸，这一份会被用上，于是出现第二次请求
+      sseResponse([sseEvent(JSON.stringify({ choices: [{ delta: { content: '做完了。' } }] })), sseEvent('[DONE]')]),
+    ];
+
+    await runAgentTurn({
+      config: { ...TEST_CONFIG, contextWindow: 128000, autoCompress: false },
+      messageId: 'm-canceltool',
+      history: [],
+      text: '分类书签栏',
+      signal: ac.signal,
+      onEvent: (e) => {
+        events.push(e.type);
+        if (e.type === 'chat:tool_progress') {
+          progress++;
+          if (progress >= 3) ac.abort();
+        }
+      },
+    });
+
+    assert.ok(progress >= 3, `前置：至少应收到 3 次进度，实际 ${progress}`);
+
+    /*
+     * 核心判据：工具**没有跑完**。
+     *
+     * 实测两种形态（同一条用例，只差 agent 侧那行闸）：
+     *   有闸：progress=3，事件 tool_start → tool_progress → tool_error → cancelled
+     *   无闸：progress=20，事件 tool_start → tool_progress → tool_done → cancelled
+     * 无闸时工具照样把整批做完、还上报 tool_done——用户点了「停止」，
+     * 书签照搬、删除提议照提交，那就是"取消了个寂寞"。
+     */
+    assert.ok(
+      events.includes('chat:tool_error'),
+      `取消后工具应报 tool_error（被打断），实际事件：${[...new Set(events)].join(',')}`,
+    );
+    assert.ok(
+      !events.includes('chat:tool_done'),
+      `取消后工具不该报 tool_done（那等于告诉用户"这一步做完了"），实际事件：${[...new Set(events)].join(',')}`,
+    );
+
+    // 轮次以 cancelled 收尾，而不是 done
+    assert.ok(
+      events.includes('chat:cancelled'),
+      `取消后应以 chat:cancelled 收尾，实际事件：${[...new Set(events)].join(',')}`,
+    );
+    assert.ok(
+      !events.includes('chat:done'),
+      `取消后不该再报 chat:done，实际事件：${[...new Set(events)].join(',')}`,
+    );
+
+    // 取消后不再发第二次 LLM 请求（不白烧额度）
+    assert.equal(fetchCalls.length, 1, `取消后不该再发第二次请求，实际发了 ${fetchCalls.length} 次`);
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

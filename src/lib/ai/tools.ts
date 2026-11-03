@@ -368,7 +368,8 @@ const checkUrlsSchema = z.object({
   urls: z.array(z.string()).min(1).max(50),
 });
 
-async function checkUrls(args: unknown): Promise<ToolOutput> {
+async function checkUrls(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
+  const throwIfAborted = () => { if (signal?.aborted) throw new Error('已取消'); };
   const { urls } = checkUrlsSchema.parse(args);
   const unique = [...new Set(urls)].slice(0, 50);
   const valid: string[] = [];
@@ -384,10 +385,26 @@ async function checkUrls(args: unknown): Promise<ToolOutput> {
   // 并发池限 5：避免一次性打满 20 个并发请求（宿主网络/站点压力），顺序保持原输入
   const results: Record<string, unknown>[] = new Array(valid.length);
   let cursor = 0;
+  /*
+   * 进度上报：此前 check_urls **既不报进度也不检查取消**——
+   * 用户看不到"正在检测 12/50"，也就无从判断该不该点取消；
+   * 而点了取消，50 个 URL × 5 并发 × 8s 超时最坏要跑 **80 秒**。
+   *
+   * 与 check_urls_bulk 一样节流上报（每 250ms 一次），并检查取消。
+   */
+  let done = 0;
+  let lastReport = 0;
   const workers = Array.from({ length: Math.min(5, valid.length) }, async () => {
     while (cursor < valid.length) {
+      throwIfAborted();
       const i = cursor++;
       results[i] = await checkOneUrl(valid[i]!);
+      done++;
+      const now = Date.now();
+      if (onProgress && (now - lastReport > 250 || done === valid.length)) {
+        lastReport = now;
+        onProgress(`正在检测链接 ${done}/${valid.length}…`);
+      }
     }
   });
   await Promise.all(workers);
@@ -417,7 +434,9 @@ const checkUrlsBulkSchema = z.object({
 async function checkUrlsBulk(
   args: unknown,
   onProgress?: (text: string) => void,
+  signal?: AbortSignal,
 ): Promise<ToolOutput> {
+  const throwIfAborted = () => { if (signal?.aborted) throw new Error('已取消'); };
   const { urls, maxConcurrent = 20, timeoutMs = 8_000, maxDeadList = 200 } = checkUrlsBulkSchema.parse(args);
   const unique = [...new Set(urls.map((u) => u.trim()).filter(Boolean))];
   if (unique.length === 0) {
@@ -439,6 +458,7 @@ async function checkUrlsBulk(
   };
   const workers = Array.from({ length: Math.min(maxConcurrent, unique.length) }, async () => {
     while (cursor < unique.length) {
+      throwIfAborted();
       const i = cursor++;
       results[i] = await checkOneUrl(unique[i]!, timeoutMs);
       tick();
@@ -1349,8 +1369,9 @@ const moveBookmarksSchema = z.object({
 });
 
 /** 批量移动书签/文件夹到目标文件夹（一次调用替代多轮 move_bookmark） */
-async function moveBookmarks(args: unknown): Promise<ToolOutput> {
+async function moveBookmarks(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
   const { ids, parentId, index } = moveBookmarksSchema.parse(args);
+  const throwIfAborted = () => { if (signal?.aborted) throw new Error('已取消'); };
   await ensureRoots();
   const pid = await assertFolder(parentId);
   const failures: { id: string; error: string }[] = [];
@@ -1359,6 +1380,11 @@ async function moveBookmarks(args: unknown): Promise<ToolOutput> {
   const ordered = [...ids];
   if (index !== undefined) ordered.reverse();
   for (const id of ordered) {
+    /*
+     * 取消检查放在每条**之前**：已移动的那些已经由 jMove 记进撤销点，
+     * 中断后用户仍能撤销已移动的部分——不需要额外的补偿逻辑。
+     */
+    throwIfAborted();
     try {
       if (isRoot(id)) throw new Error('浏览器根文件夹不可移动');
       // 文件夹批量移动同样校验循环嵌套（与 move_bookmark 一致，给出中文错误而非 Chrome 英文报错）

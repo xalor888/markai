@@ -14363,6 +14363,72 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     }
   });
 
+  /*
+   * 取消必须能打断**每一个**长工具，不只是 cleanup_sweep。
+   *
+   * `executeTool` 的 signal 是 0.2.141 才加的，但当时只接进了 cleanup_sweep 的
+   * 两处循环。批量检测类工具（check_urls / check_urls_bulk）也是纯网络往返：
+   * check_urls 上限 50 个 URL、5 并发、每个 8s 超时 → 最坏 80 秒；
+   * check_urls_bulk 不限条数、20 并发 → 500 个就是 200 秒。
+   * 用户点「取消」，界面已经显示取消了，检测还在跑。
+   */
+  await okA('取消能打断所有批量长工具（不只 cleanup_sweep）', async () => {
+    const { executeTool } = await import('../src/lib/ai/tools');
+
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      await new Promise((r) => setTimeout(r, 20));
+      return new Response(null, { status: 200 });
+    }) as typeof fetch;
+
+    // check_urls 的 schema 上限是 50 个 URL
+    const urls = Array.from({ length: 50 }, (_, i) => 'https://cancel-' + i + '.test/');
+
+    /**
+     * 每个工具：跑到一半时取消，必须立刻抛错而不是跑完全程。
+     *
+     * 不用"一开始就 abort"——那样工具可能还没进入循环就抛了，测不到循环里的检查。
+     * 这里让 fetch 慢一点（20ms/次），等第一个进度回调到达再取消。
+     */
+    const cases: { name: string; args: unknown }[] = [
+      { name: 'check_urls', args: { urls } },
+      { name: 'check_urls_bulk', args: { urls } },
+    ];
+
+    try {
+      for (const c of cases) {
+        const ctrl = new AbortController();
+        let cancelled = false;
+        const t0 = Date.now();
+        const p = executeTool(
+          c.name,
+          JSON.stringify(c.args),
+          () => {
+            if (!cancelled) {
+              cancelled = true;
+              ctrl.abort();
+            }
+          },
+          ctrl.signal,
+        );
+        let err: unknown = null;
+        let result: unknown = null;
+        try {
+          result = await p;
+        } catch (e) {
+          err = e;
+        }
+        const ms = Date.now() - t0;
+        console.log(`   [DBG] ${c.name}: ${ms}ms, 抛错=${!!err}, 有结果=${result != null}`);
+        assert.ok(err, `${c.name} 在运行中被取消后必须抛错，而不是照常返回完整结果`);
+        assert.match(String(err), /已取消/, `${c.name} 的错误信息应说明被取消，实际：${String(err)}`);
+        assert.equal(result, null, `${c.name} 取消后不该有结果`);
+      }
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

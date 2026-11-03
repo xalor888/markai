@@ -50,8 +50,19 @@ function isUsableLogEntry(value: unknown): boolean {
   return typeof e.id === 'string' && typeof e.at === 'number' && typeof e.title === 'string';
 }
 
-export const MAX_LOG_ENTRIES = 200;
-export const MAX_UNDO_POINTS = 10;
+/*
+ * 这两个上限**从执行方导入，不在这里另写一份**。
+ *
+ * 曾经这里各写了一个字面量（200 / 10），而真正执行保留的是
+ * `ORGANIZE_LOG_LIMIT`（organize-log.ts）和 `MAX_UNDO_POINTS`（recorder.ts）。
+ * 同一个数写在两处，改一个忘一个就只有两种结果：
+ *   - 执行方调大、诊断不变 → **误报**（"整理记录超出上限（450/200）"，可 500 才是真上限）
+ *   - 诊断调大、执行方不变 → **永不触发**（死诊断，0.2.101 那类）
+ * 单测各自绿着，因为两边都"是对的"。
+ */
+import { MAX_UNDO_POINTS } from '@/lib/undo/recorder';
+import { ORGANIZE_LOG_LIMIT as MAX_LOG_ENTRIES } from '@/lib/ai/organize-log';
+export { MAX_UNDO_POINTS, MAX_LOG_ENTRIES };
 /** 存储用量告警线：Chrome 的 local 配额是 10MB（unlimitedStorage 未申请时） */
 const STORAGE_WARN_BYTES = 8 * 1024 * 1024;
 

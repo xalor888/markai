@@ -13278,6 +13278,57 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     assert.ok(!hardcoded, `还在用硬编码字面量当边界：${JSON.stringify(hardcoded?.[0])}，请改用导出的常量`);
   });
 
+  /*
+   * 同一个上限只能有一个定义。
+   *
+   * `MAX_LOG_ENTRIES`（诊断阈值）和 `ORGANIZE_LOG_LIMIT`（写入方真正保留的条数）
+   * 曾是**两个各自写死 200 的常量**；`MAX_UNDO_POINTS` 也在 recorder.ts（真正保留）
+   * 和 diagnostics.ts（诊断阈值）各写一个 10。
+   *
+   * 同一个数写在两处，改一个忘一个只有两种结果：
+   *   - 执行方调大、诊断不变 → 误报（"整理记录超出上限（450/200）"，可 500 才是真上限）
+   *   - 诊断调大、执行方不变 → 永不触发（死诊断）
+   * 单测各自绿着，因为两边都"是对的"。
+   *
+   * 这条契约从源码确认：诊断模块是**再导出**，不是自己定义。
+   */
+  await okA('保留上限只有一处定义，诊断只是再导出', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const read = (rel: string) => readFileSync(resolve(root, rel), 'utf8');
+
+    const diag = read('src/lib/health/diagnostics.ts');
+
+    // 不能再有 `export const MAX_... = <数字>` 这种自定义
+    const selfDefined = diag.match(/export\s+const\s+MAX_(?:LOG_ENTRIES|UNDO_POINTS)\s*=\s*\d+/);
+    assert.ok(!selfDefined, `诊断模块自己定义了上限：${JSON.stringify(selfDefined?.[0])}。必须从执行方导入，否则又会漂移。`);
+
+    // 必须真的是从执行方导入的
+    assert.ok(
+      /import\s*\{\s*MAX_UNDO_POINTS\s*\}\s*from\s*'@\/lib\/undo\/recorder'/.test(diag),
+      'MAX_UNDO_POINTS 必须从 recorder.ts（真正执行保留的那里）导入',
+    );
+    assert.ok(
+      /import\s*\{\s*ORGANIZE_LOG_LIMIT\s+as\s+MAX_LOG_ENTRIES\s*\}\s*from\s*'@\/lib\/ai\/organize-log'/.test(diag),
+      'MAX_LOG_ENTRIES 必须从 organize-log.ts（真正执行保留的那里）导入',
+    );
+
+    // 运行时也要对得上：两边拿到的必须是同一个值
+    const { MAX_UNDO_POINTS, MAX_LOG_ENTRIES } = await import('../src/lib/health/diagnostics');
+    const { MAX_UNDO_POINTS: recorderLimit } = await import('../src/lib/undo/recorder');
+    const { ORGANIZE_LOG_LIMIT } = await import('../src/lib/ai/organize-log');
+    assert.equal(MAX_UNDO_POINTS, recorderLimit, '撤销上限：诊断与执行方必须是同一个值');
+    assert.equal(MAX_LOG_ENTRIES, ORGANIZE_LOG_LIMIT, '日志上限：诊断与执行方必须是同一个值');
+
+    /*
+     * 反证一遍"改一边会怎样"：把执行方的值改掉，诊断必须跟着变。
+     * 这里不真的改源码，而是直接验证两者是同一条引用链——上面的相等断言已经覆盖。
+     * 真正防回归的是源码契约：谁再写一份自定义，这条就红。
+     */
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

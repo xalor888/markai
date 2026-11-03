@@ -886,7 +886,7 @@ async function run() {
      * 它跑在页面脚本之前，`preapplyTheme()` 一定读得到，完全不受先前时序影响。
      * 带一次性标记：反向用例（用户选深色）那次 reload 不能再被它盖回去。
      */
-    await cdp.send(
+    const { identifier: seedId } = await cdp.send(
       'Page.addScriptToEvaluateOnNewDocument',
       {
         source: `if (!localStorage.getItem('markai.theme.seeded')) {
@@ -918,8 +918,39 @@ async function run() {
     );
 
     await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier }, sid).catch(() => {});
+    await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: seedId }, sid).catch(() => {});
+    /*
+     * 还要清掉 localStorage 里留下的两个 key。
+     * 扩展 origin 是**所有扩展页面共享的**：这一节把 markai.theme 留成了 'dark'、
+      markai.theme.seeded 留成了 '1'，后面每一节打开 page.html 时 preapplyTheme()
+     都会读到它们——首帧全变深色。目前没有用例断言浅色样式所以没暴露，
+     但这是实打实的跨节污染，必须在这里收尾。
+     */
+    await ev2(`(() => {
+      try {
+        localStorage.removeItem('markai.theme');
+        localStorage.removeItem('markai.theme.seeded');
+      } catch (e) {}
+      return true;
+    })()`);
     await cdp.send('Emulation.setEmulatedMedia', { features: [] }, sid).catch(() => {});
     await cdp.send('Target.closeTarget', { targetId: t }).catch(() => {});
+
+    /*
+     * 守卫：这一节不许把主题状态留给后面的用例。
+     *
+     * 扩展 origin 是**所有扩展页面共享的**——markai.theme 和 markai.theme.seeded
+     * 只要留一个，后面每一节打开 page.html 时 preapplyTheme() 都会读到它。
+     * 实测（去掉上面的清理）：主题节之后 localStorage 是
+     *   {"theme":"system","seeded":"1"}
+     * 加了清理才是 {"theme":null,"seeded":null}。
+     * 目前没有用例断言浅色样式所以没暴露，但这是实打实的跨节污染。
+     */
+    const leak = await ev(`(() => ({
+      theme: localStorage.getItem('markai.theme'),
+      seeded: localStorage.getItem('markai.theme.seeded'),
+    }))()`);
+    check('主题节不留 localStorage 污染（扩展 origin 是所有页面共享的）', leak.theme === null && leak.seeded === null, JSON.stringify(leak));
   }
 
   /* ══════════ 9.287 键盘能进书签树并移动选中项 ══════════ */

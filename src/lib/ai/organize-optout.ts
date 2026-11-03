@@ -11,8 +11,19 @@
  */
 
 export const ORGANIZE_OPTOUT_KEY = 'markai.organize.optout';
-/** 名单上限：用户可能撤销很多次，但没必要无限增长 */
-export const ORGANIZE_OPTOUT_LIMIT = 100;
+/**
+ * 名单上限。
+ *
+ * 从 100 提到 1000：100 条时**静默挤出最旧一条**，而这条名单记的是用户明确说过
+ * 「这个站点别自动整理」。一个重度用户撤销 100 次之后，最早那条指令就悄悄失效了——
+ * 那个站点又会被自动搬，而用户以为自己说过的话一直算数。
+ * 模块文档写的规则是无条件的：「之后新书签不再自动整理」，上限不能把它变成假的。
+ *
+ * 1000 条 × 约 60 字节 ≈ 60 KB，相对 10 MB 配额可以忽略；而现实中
+ * 一个用户撤销过的注册域数量远到不了这个量级，所以它实际上不可达，
+ * 同时仍然给存储留了一道硬边界。
+ */
+export const ORGANIZE_OPTOUT_LIMIT = 1000;
 
 export interface OptOutEntry {
   domain: string;
@@ -46,16 +57,29 @@ export async function isOrganizeOptedOut(domain: string): Promise<boolean> {
   return list.some((e) => e.domain === target);
 }
 
-/** 把某个注册域加入免打扰（重复添加只更新时间，不产生重复项） */
-export async function addOptOutDomain(domain: string, now: number = Date.now()): Promise<void> {
+/**
+ * 把某个注册域加入免打扰（重复添加只更新时间，不产生重复项）。
+ *
+ * 返回被挤出去的那条（若有）：调用方必须把它告诉用户。
+ * 静默丢弃一条「用户明确要求别再自动整理」的记录，比不记更糟——
+ * 用户会以为自己的话一直算数（0.2.123）。
+ */
+export async function addOptOutDomain(
+  domain: string,
+  now: number = Date.now(),
+): Promise<{ evicted?: OptOutEntry }> {
   const target = (domain || '').trim().toLowerCase();
-  if (!target) return;
+  if (!target) return {};
   try {
     const list = await readOptOutDomains();
-    const next = [{ domain: target, at: now }, ...list.filter((e) => e.domain !== target)].slice(0, ORGANIZE_OPTOUT_LIMIT);
+    const merged = [{ domain: target, at: now }, ...list.filter((e) => e.domain !== target)];
+    const next = merged.slice(0, ORGANIZE_OPTOUT_LIMIT);
+    const evicted = merged.length > next.length ? merged[next.length] : undefined;
     await chrome.storage.local.set({ [ORGANIZE_OPTOUT_KEY]: next });
+    return evicted ? { evicted } : {};
   } catch {
     // 写不进去不该影响「撤销」本身已经完成的事实
+    return {};
   }
 }
 

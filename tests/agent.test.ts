@@ -64,6 +64,7 @@ import {
   removeOptOutDomain,
   isOrganizeOptedOut,
   ORGANIZE_OPTOUT_KEY,
+  ORGANIZE_OPTOUT_LIMIT,
   readOptOutDomains,
 } from '../src/lib/ai/organize-optout';
 import {
@@ -9464,19 +9465,37 @@ async function okA(name: string, fn: () => Promise<void> | void) {
    * 而且没有任何报警。 */
   console.log('\n[T95] 防护性上限');
   {
-    /* ① 免打扰名单上限 100：第 101 个不该被静默塞进去，也不该撑爆 storage */
+    /*
+     * ① 免打扰名单上限（0.2.123 从 100 提到 1000）。
+     *
+     * 原来是 100 且**静默挤出最旧一条**——可这条名单记的是用户明确说过
+     * 「这个站点别自动整理」。重度用户撤销 100 次之后，最早那条指令悄悄失效，
+     * 那个站点又会被自动搬，而用户以为自己的话一直算数。
+     * 模块文档写的规则是无条件的：「之后新书签不再自动整理」。
+     *
+     * 现在上限提到实际上不可达的 1000，并且**万一真的撞上，必须把被挤掉的那条
+     * 回给调用方**去告知用户，而不是静默丢弃。
+     */
     await clearOptOutDomains();
-    for (let i = 0; i < 100; i++) await addOptOutDomain(`site${i}.example.com`);
+    for (let i = 0; i < ORGANIZE_OPTOUT_LIMIT; i++) await addOptOutDomain(`site${i}.example.com`);
     const atLimit = (await readOptOutDomains()).length;
-    await addOptOutDomain('one-more.example.com');
+    const overflow = await addOptOutDomain('one-more.example.com');
     const afterOverflow = (await readOptOutDomains()).map((e) => e.domain);
-    ok('免打扰名单封顶 100 条，且保留的是「最近的」（LRU 而不是拒绝新的）', () => {
-      assert.equal(atLimit, 100);
-      assert.equal(afterOverflow.length, 100, '超出上限后长度必须仍是 100');
+    ok('免打扰名单有硬上界，且挤出时必须把那条回给调用方（不静默丢用户指令）', () => {
+      assert.equal(atLimit, ORGANIZE_OPTOUT_LIMIT);
+      assert.equal(afterOverflow.length, ORGANIZE_OPTOUT_LIMIT, '超出上限后长度必须仍在上界内');
       // 新撤销的站点必须生效——否则「我刚撤销了它，自动整理还在搬」，那才是真事故
       assert.equal(afterOverflow.includes('one-more.example.com'), true, '最新撤销的站点必须在名单里');
       // 被挤掉的是最老的那条
       assert.equal(afterOverflow.includes('site0.example.com'), false, '最老的站点应被挤出');
+      // 关键：不能静默。调用方要拿到它是谁，才能去告诉用户"这条免打扰已失效"
+      assert.ok(overflow.evicted, `撞上上限必须回传被挤掉的那条，实际 ${JSON.stringify(overflow)}`);
+      assert.equal(overflow.evicted!.domain, 'site0.example.com', `回传的应是最老那条，实际 ${overflow.evicted?.domain}`);
+    });
+    await okA('未撞上上限时不回传 evicted（不制造噪音）', async () => {
+      await clearOptOutDomains();
+      const r = await addOptOutDomain('solo.example.com');
+      assert.deepEqual(r, {}, `没挤出时不该有 evicted，实际 ${JSON.stringify(r)}`);
     });
 
     /* ② 重复添加不占额度 */

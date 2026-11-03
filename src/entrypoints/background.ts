@@ -38,7 +38,7 @@ import {
   updateOrganizeLogEntry,
 } from '@/lib/ai/organize-log';
 import { registrableDomain } from '@/lib/bookmarks/domain';
-import { addOptOutDomain, clearOptOutDomains, readOptOutDomains, removeOptOutDomain } from '@/lib/ai/organize-optout';
+import { addOptOutDomain, clearOptOutDomains, readOptOutDomains, removeOptOutDomain, ORGANIZE_OPTOUT_LIMIT } from '@/lib/ai/organize-optout';
 import { normalizeBaseUrl, resolveConfig } from '@/lib/providers';
 import { CONFIG_STORAGE_KEY } from '@/stores/configStore';
 import { applyUndo } from '@/lib/undo/apply';
@@ -507,7 +507,20 @@ async function handleOneShot(msg: OneShotInbound): Promise<OneShotOutbound> {
         // 标记原记录：否则用户会对着同一条反复点，每次只得到「已不存在」
         await updateOrganizeLogEntry(entry.id, { undoneAt: Date.now() });
         // 撤销 = 用户否定了这个站点的归类方式 → 该站点不再自动整理（可在面板里恢复）
-        if (entry.domain) await addOptOutDomain(entry.domain);
+        if (entry.domain) {
+          const { evicted } = await addOptOutDomain(entry.domain);
+          /*
+           * 名单撞上上限时，最旧那条会被挤掉。**必须说出来**：那是用户明确讲过
+           * 「这个站点别自动整理」，静默失效等于把用户的话当耳旁风（0.2.123）。
+           */
+          if (evicted) {
+            notifyAutoOrganized(
+              false,
+              `免打扰名单已满（${ORGANIZE_OPTOUT_LIMIT} 个站点），「${evicted.domain}」的免打扰已失效，将被重新自动整理。可在整理记录里清空名单后重新设置。`,
+              true,
+            );
+          }
+        }
       }
       return {
         type: 'organize:undo:result',

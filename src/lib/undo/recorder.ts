@@ -26,7 +26,17 @@ export const UNDO_PENDING_KEY = 'markai.undo.pending';
  * 被杀时丢掉——这正是第一版的问题。折中成"最多落后 5 条或 250ms"：
  * 750 条删除约 150 次写入（约 3MB），而落后窗口小到几乎无感。
  */
-const PENDING_MAX_LAG_OPS = 5;
+/**
+ * pending 快照最多落后几个操作。
+ *
+ * 从 5 降到 2：落盘是节流的（「滞后 N 个操作」或「距上次写 250ms」），
+ * 所以**进程在窗口内被杀**时，那几个已经作用到书签上的操作会**不在 pending 里**。
+ * 恢复出来的撤销点因此**少于实际改动**，撤销它也撤不干净——而 `applyUndo`
+ * 无从知道少了几条，仍会返回 ok:true。
+ * 实测（6 条删除、不等节流窗口就杀）：实际删 6 条，撤销点只记 5 条，撤销后只回来 5/6。
+ * 降到 2 只是把窗口减半（5→2），并不能消除——真正的兜底是恢复时**如实告知**。
+ */
+const PENDING_MAX_LAG_OPS = 2;
 const PENDING_THROTTLE_MS = 250;
 /** 保留最近多少个撤销点（够用即可，避免无限增长） */
 export const MAX_UNDO_POINTS = 10;
@@ -597,9 +607,21 @@ export async function recoverInterruptedTransaction(): Promise<UndoPoint | null>
     droppedRecovered > 0
       ? `；撤销记录最多保留 ${MAX_UNDO_POINTS} 步，更早的 ${droppedRecovered} 步已被丢弃`
       : '';
+  /*
+   * 必须说明「可能少记了几个操作」。
+   *
+   * pending 是节流落盘的，进程在节流窗口内被杀时，最多 PENDING_MAX_LAG_OPS 个
+   * 已经生效的操作不在快照里。恢复出来的点因此可能少于实际改动，而 `applyUndo`
+   * 无从知道少了哪些，仍会报 ok:true —— 用户会以为"全撤回了"。
+   * 实测：6 条删除不等窗口就杀，撤销点只记 5 条，撤销后只回来 5/6。
+   *
+   * 这道残余风险消不掉（要消掉就得每个操作都同步落盘，5000 条的整理会被拖垮），
+   * 所以**只能如实说**。
+   */
+  const lagNote = `；快照是节流落盘的，最后最多 ${PENDING_MAX_LAG_OPS} 个操作可能没有被记录，撤销时可能少还原几条`;
   const written = await writeUndoPoints(
     trim.kept,
-    `上一轮被中断，已把当时已完成的改动保留为可撤销记录（${summarizeOps(point.ops)}）${recoveredNote}`,
+    `上一轮被中断，已把当时已完成的改动保留为可撤销记录（${summarizeOps(point.ops)}）${recoveredNote}${lagNote}`,
     state.terminalRunIds,
   );
   // 写失败时**保留 pending**，下次启动重试——绝不能在正式点落盘前就把它删掉

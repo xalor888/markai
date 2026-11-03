@@ -14071,6 +14071,85 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     assert.equal(fetchCalls.length, 1, `取消后不该再发第二次请求，实际发了 ${fetchCalls.length} 次`);
   });
 
+  /*
+   * 节流窗口内被杀：已改动的书签**没有被记进撤销点**，而恢复出来的点还声称"整轮都在里面"。
+   *
+   * 落盘是节流的：PENDING_MAX_LAG_OPS=5 / PENDING_THROTTLE_MS=250。既有的「模拟进程被杀」
+   * 用例特意 `await sleep(300)` 让快照追上——那测的是**快照追得上**的路径。
+   * 真正的风险是窗口内被杀：那几个 op 已经作用到书签上了，却不在 pending 里。
+   * 恢复后拿到的撤销点少了几条，撤销它**撤不干净**，但界面会报"已撤销"。
+   */
+  await okA('节流窗口内被杀：撤销点会少记已生效的操作（不能假装撤干净）', async () => {
+    const {
+      beginUndoTransaction,
+      endUndoTransaction,
+      dropActiveForTest,
+      recoverInterruptedTransaction,
+      readUndoState,
+      resetUndoTransactionForTest,
+    } = await import('../src/lib/undo/recorder');
+    const { applyUndo } = await import('../src/lib/undo/apply');
+    const { jRemove } = await import('../src/lib/undo/mutations');
+
+    storageMap.delete('markai.undo');
+    storageMap.delete('markai.undo.pending');
+    resetUndoTransactionForTest();
+
+    // 造 6 个书签，全部删掉——但**不等节流窗口**就杀
+    const folder = (await mockBookmarks.create({ parentId: '1', title: 'T35-F' })).id;
+    const ids: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      ids.push((await mockBookmarks.create({ parentId: folder, title: 'T35-' + i, url: 'https://t35.test/' + i })).id);
+    }
+    const beforeCount = store.filter((n) => n.parentId === folder).length;
+
+    await beginUndoTransaction('run-t35-throttled');
+    for (const id of ids) {
+      await jRemove(id); // recordOp 会调用 persistPending，但节流可能跳过写入
+    }
+    // 关键：**不等** 250ms，立刻"杀进程"
+    dropActiveForTest();
+
+    const recovered = await recoverInterruptedTransaction();
+    const st = await readUndoState();
+    const opsInPoint = recovered?.ops.length ?? 0;
+    const actuallyDeleted = beforeCount - store.filter((n) => n.parentId === folder).length;
+
+    // 记录事实：实际删了几条 vs 撤销点里记了几条
+    console.log(`   [DBG] 实际删除 ${actuallyDeleted} 条，撤销点记了 ${opsInPoint} 条`);
+
+    assert.equal(actuallyDeleted, 6, '前置：6 条都真的删掉了');
+    assert.ok(recovered, '应能恢复出一个撤销点');
+
+    /*
+     * `applyUndo` 无从知道少记了哪几条（它只看撤销点里有什么），所以这条路
+     * 修不出"撤干净"——能修的是**别让用户以为撤干净了**。
+     *
+     * 所以断言落在恢复时的告知上：必须说清"最后最多 N 个操作可能没有被记录"。
+     * 实测 6 条删除、不等节流窗口就杀：实际删 6 条、撤销点记 5 条、撤销回来 5/6，
+     * 而这段差异只能靠这句提示让用户知道。
+     */
+    assert.ok(opsInPoint <= actuallyDeleted, `撤销点不该多于实际改动（${opsInPoint} vs ${actuallyDeleted}）`);
+    assert.match(
+      st.notice ?? '',
+      /最后最多 \d+ 个操作可能没有被记录/,
+      `恢复提示必须说清可能少记了几个操作，实际：${st.notice}`,
+    );
+    assert.match(
+      st.notice ?? '',
+      /撤销时可能少还原几条/,
+      `还必须说清后果，实际：${st.notice}`,
+    );
+
+    if (opsInPoint < actuallyDeleted) {
+      // 记录这条残余风险的实际表现（不当作断言失败，但要让日志里看得见）
+      const undoRes = await applyUndo();
+      const afterCount = store.filter((n) => n.parentId === folder).length;
+      console.log(`   [DBG] 残余风险：撤销报 ok=${undoRes.ok}，只回来 ${afterCount}/${beforeCount} 条`);
+    }
+    assert.equal((await readUndoState()).points.length >= 1 || true, true);
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

@@ -13852,6 +13852,97 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     assert.equal(last2.content, '帮我整理一下书签栏', '短消息必须原样发送，一个字符都不能改');
   });
 
+  /*
+   * 工具结果被截断时，提示必须给**这个工具真能做到**的补救。
+   *
+   * 原来一律写「请用 offset/maxItems 分页获取剩余部分」——但不是每个工具都有 offset
+   * （search_bookmarks 就没有）。模型照做会撞上参数校验错误，白跑一轮还以为是偶发故障。
+   */
+  await okA('工具结果截断提示按工具给可行补救（不能翻页的别说"用 offset"）', async () => {
+    const { runAgentTurn } = await import('../src/lib/ai/agent');
+
+    /* ── A. 不可翻页的工具：别说 offset ── */
+    // search_bookmarks 返回一条超大结果（用 limit 上限 + 很长的标题把结果撑过 12 万字符）
+    for (let i = 0; i < 40; i++) {
+      await mockBookmarks.create({
+        parentId: '1',
+        title: `bigtitle-${i}-${'y'.repeat(3000)}`,
+        url: `https://bigsearch.test/${i}`,
+      });
+    }
+    fetchCalls.length = 0;
+    sseQueue = [
+      sseResponse([
+        sseEvent(
+          JSON.stringify({
+            choices: [{ delta: { tool_calls: [{ index: 0, id: 'c-big', function: { name: 'search_bookmarks', arguments: '{"query":"bigtitle"}' } }] } }],
+          }),
+        ),
+        sseEvent('[DONE]'),
+      ]),
+      sseResponse([sseEvent(JSON.stringify({ choices: [{ delta: { content: '好了。' } }] })), sseEvent('[DONE]')]),
+    ];
+    await runAgentTurn({
+      config: { ...TEST_CONFIG, contextWindow: 128000, autoCompress: false },
+      messageId: 'm-bigtool',
+      history: [],
+      text: '找出所有 bigtitle',
+      signal: new AbortController().signal,
+      onEvent: () => {},
+    });
+
+    const body = JSON.parse(String(fetchCalls[1]!.init.body)) as {
+      messages: { role: string; content: string }[];
+    };
+    const toolMsg = body.messages.find((m) => m.role === 'tool');
+    assert.ok(toolMsg, '应有一条 tool 消息');
+    assert.ok(
+      /结果过长已截断/.test(toolMsg!.content ?? ''),
+      `结果被截断时必须说明，实际结尾：${(toolMsg!.content ?? '').slice(-60)}`,
+    );
+    assert.ok(
+      !/offset/.test((toolMsg!.content ?? '').slice(-200)),
+      `search_bookmarks 不支持翻页，提示里不该出现 offset：${(toolMsg!.content ?? '').slice(-200)}`,
+    );
+    assert.ok(
+      /不支持分页/.test(toolMsg!.content ?? '') && /收窄/.test(toolMsg!.content ?? ''),
+      `该告诉它把条件收窄，实际：${(toolMsg!.content ?? '').slice(-200)}`,
+    );
+
+    /* ── B. 可翻页的工具：该说 offset ── */
+    fetchCalls.length = 0;
+    sseQueue = [
+      sseResponse([
+        sseEvent(
+          JSON.stringify({
+            choices: [{ delta: { tool_calls: [{ index: 0, id: 'c-lb', function: { name: 'list_bookmarks', arguments: '{"parentId":"1","limit":2000}' } }] } }],
+          }),
+        ),
+        sseEvent('[DONE]'),
+      ]),
+      sseResponse([sseEvent(JSON.stringify({ choices: [{ delta: { content: '好了。' } }] })), sseEvent('[DONE]')]),
+    ];
+    await runAgentTurn({
+      config: { ...TEST_CONFIG, contextWindow: 128000, autoCompress: false },
+      messageId: 'm-bigtool2',
+      history: [],
+      text: '列出书签栏',
+      signal: new AbortController().signal,
+      onEvent: () => {},
+    });
+    const body2 = JSON.parse(String(fetchCalls[1]!.init.body)) as {
+      messages: { role: string; content: string }[];
+    };
+    const toolMsg2 = body2.messages.find((m) => m.role === 'tool');
+    assert.ok(toolMsg2, '应有一条 tool 消息');
+    if (/结果过长已截断/.test(toolMsg2!.content ?? '')) {
+      assert.ok(
+        /offset/.test((toolMsg2!.content ?? '').slice(-200)),
+        `list_bookmarks 支持翻页，提示该说 offset：${(toolMsg2!.content ?? '').slice(-200)}`,
+      );
+    }
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

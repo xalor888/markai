@@ -18,6 +18,14 @@ const MAX_MESSAGE_CHARS = 6000;
  *  120K 字符 ≈ 1000+ 条书签清单，配合 limit=2000 让模型一次拿到足够数据；
  *  仍超长时用 offset/maxItems 分页让模型分批消化 */
 const MAX_TOOL_RESULT_CHARS = 120_000;
+/** 支持 offset 翻页的工具：截断提示只能对这些说"用 offset 继续" */
+const PAGINATED_TOOLS: ReadonlySet<string> = new Set([
+  'list_bookmarks',
+  'list_all_folders',
+  'cleanup_sweep',
+  'get_folder_content',
+  'export_bookmarks',
+]);
 /** 每条消息的固定开销（角色标记、元数据等） */
 const PER_MESSAGE_OVERHEAD = 40;
 
@@ -602,9 +610,20 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
       const r = results.get(i);
       if (r?.out) {
         const truncated = r.out.result.length > MAX_TOOL_RESULT_CHARS;
-        const content =
-          r.out.result.slice(0, MAX_TOOL_RESULT_CHARS) +
-          (truncated ? '\n（结果过长已截断：请用 offset/maxItems 分页获取剩余部分）' : '');
+        /*
+         * 截断提示要**按工具给可行的补救**。
+         *
+         * 原来一律写「请用 offset/maxItems 分页获取剩余部分」——但不是每个工具都有
+         * offset（search_bookmarks 就没有）。模型照做会撞上参数校验错误，白跑一轮。
+         * 对不能翻页的工具，唯一可行的是把条件收窄。
+         */
+        const paginated = PAGINATED_TOOLS.has(tc.function.name);
+        const hint = truncated
+          ? paginated
+            ? `\n（结果过长已截断：请用 offset 分页获取剩余部分${tc.function.name === 'list_bookmarks' ? '（并可调大 limit）' : ''}）`
+            : `\n（结果过长已截断：该工具不支持分页，请把查询条件收窄（更具体的关键词/更小的文件夹）后再查一次）`
+          : '';
+        const content = r.out.result.slice(0, MAX_TOOL_RESULT_CHARS) + hint;
         const record: ToolCallRecord = {
           id: tc.id,
           name: tc.function.name,

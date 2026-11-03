@@ -670,7 +670,7 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
           id: tc.id,
           name: tc.function.name,
           args: tc.function.arguments,
-          status: 'error',
+          status: signal.aborted ? 'canceled' : 'error',
           error: msg,
         };
         safePost(onEvent, { type: 'chat:tool_error', messageId, record });

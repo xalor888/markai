@@ -11186,9 +11186,15 @@ async function okA(name: string, fn: () => Promise<void> | void) {
      */
     const { retrySafety, mutatedEmptyReplyNote } = await import('../src/lib/chat/retry-safety');
 
-    const toolBlock = (name: string, status: 'done' | 'error' = 'done'): any => ({
+    const toolBlock = (name: string, status: 'done' | 'error' | 'canceled' = 'done'): any => ({
       kind: 'tool',
-      record: { id: 't', name, args: '{}', status, ...(status === 'done' ? { result: 'ok' } : { error: 'x' }) },
+      record: {
+        id: 't',
+        name,
+        args: '{}',
+        status,
+        ...(status === 'done' ? { result: 'ok' } : status === 'error' ? { error: 'x' } : {}),
+      },
     });
 
     ok('没有工具调用 → 可以安全重新生成', () => {
@@ -11211,6 +11217,26 @@ async function okA(name: string, fn: () => Promise<void> | void) {
 
     ok('写类工具**失败**不算改动（什么都没落地，重试是安全的）', () => {
       const r = retrySafety([toolBlock('create_bookmark', 'error')]);
+      assert.equal(r.mutations, 0);
+      assert.equal(r.safeToRegenerate, true);
+    });
+
+    /*
+     * 被取消的写类工具**必须**算改动。
+     *
+     * 取消发生在工具执行中途时，前面的部分已经改到书签上了：批量移动 100 条移到
+     * 第 40 条时点取消，那 40 条是真移走的，撤销点里也有。
+     * 只认 `done` 的话 mutation 会是 0 → 界面认为"这轮什么都没做、可以安全重来"，
+     * 用户重发同一句就再移一遍。
+     */
+    ok('写类工具被取消也算改动（否则重试会重复执行已落地的那部分）', () => {
+      const r = retrySafety([toolBlock('move_bookmarks', 'canceled')]);
+      assert.equal(r.mutations, 1, '取消的写类工具没有被算作改动');
+      assert.equal(r.safeToRegenerate, false, '有已落地的改动时不该允许重新生成');
+    });
+
+    ok('只读工具被取消不算改动（它本来就改不了东西）', () => {
+      const r = retrySafety([toolBlock('search_bookmarks', 'canceled')]);
       assert.equal(r.mutations, 0);
       assert.equal(r.safeToRegenerate, true);
     });

@@ -3,7 +3,15 @@
 import type { UndoApplyResult, UndoPoint } from '@/lib/undo/types';
 
 /** 工具执行状态 */
-export type ToolStatus = 'running' | 'done' | 'error';
+/**
+ * running/done/error/canceled。
+ *
+ * 取消要单列出来：
+ *  - user 主动停止 → canceled（已完成的工作量可撤销）
+ *  - 工具内部抛错 → error（不可用，因为不知道完成了多少）
+ * 这样用户才能判断该不该撤销、撤销的是哪一步。
+ */
+export type ToolStatus = 'running' | 'done' | 'error' | 'canceled';
 
 /** 待删除提议状态 */
 export type DeletionStatus = 'pending' | 'confirmed' | 'declined' | 'executed';

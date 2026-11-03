@@ -26,6 +26,7 @@ import {
   Trash2,
   Upload,
   Wrench,
+  CircleStop,
   type LucideIcon,
 } from 'lucide-react';
 import { memo, useCallback, useState, type ReactNode } from 'react';
@@ -96,7 +97,7 @@ function summarize(record: ToolCallRecord): string {
 /** 工具调用 chip：状态 + 摘要，点击展开详情（memo 化避免流式重渲染） */
 const ToolChip = memo(function ToolChip({ record }: { record: ToolCallRecord }) {
   // 错误时自动展开详情，问题立即可见
-  const [expanded, setExpanded] = useState(record.status === 'error');
+  const [expanded, setExpanded] = useState(record.status === 'error'); // canceled 不自动展开
   const Icon = TOOL_ICONS[record.name] ?? Wrench;
   const meta = TOOL_META[record.name];
 
@@ -111,6 +112,8 @@ const ToolChip = memo(function ToolChip({ record }: { record: ToolCallRecord }) 
           <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
         ) : record.status === 'done' ? (
           <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-success" />
+        ) : record.status === 'canceled' ? (
+          <CircleStop className="h-3.5 w-3.5 shrink-0 text-muted-foreground/60" />
         ) : (
           <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-destructive" />
         )}
@@ -126,13 +129,16 @@ const ToolChip = memo(function ToolChip({ record }: { record: ToolCallRecord }) 
         {record.status === 'error' && (
           <span className="min-w-0 truncate text-2xs text-destructive">{record.error}</span>
         )}
+        {record.status === 'canceled' && (
+          <span className="min-w-0 truncate text-2xs text-muted-foreground">已停止</span>
+        )}
       </button>
       {expanded && (record.result || record.error) && (
         <div className="border-t border-border bg-muted/30">
           <div className="flex items-center justify-end px-2 pt-1.5">
             <button
               type="button"
-              onClick={() => void copyText(record.result ?? record.error ?? '', '工具结果已复制')}
+              onClick={() => void copyText(record.result ?? record.error ?? (record.status === 'canceled' ? '已停止生成' : ''), '工具结果已复制')}
               className="flex items-center gap-1 rounded-sm p-1 text-2xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               title="复制结果"
               aria-label="复制结果"

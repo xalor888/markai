@@ -33,8 +33,20 @@ export function retrySafety(blocks: ChatBlock[]): RetrySafety {
   let mutations = 0;
   for (const b of blocks) {
     if (b.kind !== 'tool') continue;
-    if (b.record.status !== 'done') continue;
-    if (MUTATING_TOOLS.has(b.record.name)) mutations++;
+    if (!MUTATING_TOOLS.has(b.record.name)) continue;
+    /*
+     * `canceled` 必须和 `done` 一样算作"改过了"。
+     *
+     * 取消发生在工具执行**中途**时，前面的部分已经改到了书签上（批量移动 100 条
+     * 移到第 40 条时点取消，那 40 条是真的移走了，撤销点里也有）。
+     * 只认 `done` 的话 mutation 数会是 0 → 界面认为"这轮什么都没做、可以安全重来"，
+     * 用户重发同一句就会**再移一遍**。
+     *
+     * 取舍：宁可多提示一次"已经改过、要退回请点撤销"，也不能让用户重复执行。
+     * 这一点点误报（取消时其实一条都没动）远小于重复执行造成的数据错乱。
+     */
+    if (b.record.status !== 'done' && b.record.status !== 'canceled') continue;
+    mutations++;
   }
   return { mutations, safeToRegenerate: mutations === 0 };
 }

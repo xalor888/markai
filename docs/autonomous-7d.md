@@ -57,6 +57,34 @@
 
 ## 四、已完成（按时间倒序）
 
+### 第 108 批（D5 质量 · 取消覆盖整类）— 2026-11-04
+
+**126. 取消只对 4 个工具有效**（0.2.143）★ 真缺陷（整类兜底）
+
+- 0.2.141 加了 `executeTool` 的 signal，0.2.142 补了 3 个——但**其余 14 个含长循环的工具一个都没接**。
+  系统性扫 `src/lib/ai/tools.ts` 才看清范围：
+
+  | 工具 | 长循环 |
+  |---|---|
+  | `auto_categorize` | 156 行，双层循环 + 10 并发池（移 1 万条书签） |
+  | `dedupe_bookmarks` | 104 行批量删除 |
+  | `merge_folders` / `sort_folder` / `delete_all_bookmarks` / `propose_deletions` / `create_bookmarks` / `export_bookmarks` | 逐条写或全树遍历 |
+
+- 修法：全部接 signal，并在**两个位置**检查——
+  ① **入口**：堵住所有早退分支（如 `sort_folder` 的「子项不足，无需排序」），
+     那些分支在循环之前返回，不检查就等于取消无效；
+  ② **循环内**：每轮一次。
+  抽 `makeAbortCheck(signal)` 避免 11 处重复。
+  `dedupe_bookmarks` 的 `catch {}` 会把取消当「单条失败」吞掉 → 检查点放 `try` **外面**。
+- 新增**整类兜底**测试：枚举所有长循环工具，signal 已取消时必须抛「已取消」。
+  **这条测试当场抓出 4 个漏网的**（`sort_folder` / `auto_categorize` / `dedupe_bookmarks` /
+  `propose_deletions`）——正是入口检查缺失导致的。
+  **证伪**：去掉 `sort_folder` 的入口检查 → 转红 `sort_folder(6ms, 正常返回)`。
+- **跟头**：批量插入入口检查时，把 `throwIfAborted()` 插进了**它自己的函数体**里 →
+  `RangeError: Maximum call stack size exceeded`。
+
+**当前状态**：tsc ✅ / 单测 **856** / build ✅ / e2e **199/199 · 116s** · 已发 **0.2.143**
+
 ### 第 107 批（D5 质量 · 取消只对一半工具有效）— 2026-11-04
 
 **125. 取消只对一半工具有效**（0.2.142）★ 真缺陷
@@ -81,7 +109,7 @@
   ② `check_urls` 的 schema 上限是 50 个 URL，我传了 60 个，被 zod 挡掉报「参数不合法」
   而不是「已取消」——**断言测的是别的东西**。
 
-**当前状态**：tsc ✅ / 单测 **855** / build ✅ / e2e **199/199 · 118s** · 已发 **0.2.142**
+**状态**（当批）：tsc ✅ / 单测 855 ✅ / build ✅ / e2e 199 项 · 118s · 已发 0.2.142
 
 ### 第 106 批（D5 质量 · 取消不停）— 2026-11-03
 

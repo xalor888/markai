@@ -14714,7 +14714,41 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     );
   });
 
-  console.log(`\n全部通过：${passed} 项 ✔`);
+
+
+  /*
+   * READ_TOOLS 定义分散在两处（agent.ts + turn-plan.ts），这是重复维护的隐患。
+   * 如果只在一边增改，另一边没同步——模型可能会把本该并行的读任务串行执行，或者把写任务误当 read 做掉。
+   */
+  await okA('READ_TOOLS 在两处的定义必须完全一致', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+
+    // 解析两处定义（正则匹配 Set([...]) 里的字符串）
+    const files = [
+      ['src/lib/ai/agent.ts', readFileSync(resolve(process.cwd(), 'src/lib/ai/agent.ts'), 'utf8')],
+      ['src/lib/ai/turn-plan.ts', readFileSync(resolve(process.cwd(), 'src/lib/ai/turn-plan.ts'), 'utf8')],
+    ];
+
+    const sets: Set<string>[] = [];
+    for (const [fn, content] of files) {
+      const m = content?.match(/const READ_TOOLS[^=]*=\s*new Set\(\[([\s\S]*?)\]\)/);
+      if (!m?.[1]) throw new Error(`${fn}: 没能从源码里解析出 READ_TOOLS`);
+      const names = [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]).filter((x): x is string => !!x);
+      sets.push(new Set(names));
+      console.log(`   [DBG] ${fn}: ${names.length} 个工具`);
+    }
+
+    const a = sets[0]!;
+    const b = sets[1]!;
+    assert.equal(a.size, b.size, `两个文件的工具数不同（agent.ts ${a.size} / turn-plan.ts ${b.size}）`);
+    for (const tool of a) {
+      assert.ok(b.has(tool), `${tool} 在 agent.ts 的 READ_TOOLS 里，但 turn-plan.ts 没有`);
+    }
+    for (const tool of b) {
+      assert.ok(a.has(tool), `${tool} 在 turn-plan.ts 的 READ_TOOLS 里，但 agent.ts 没有`);
+    }
+  });  console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);
   process.exit(1);

@@ -13502,6 +13502,56 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     );
   });
 
+  /*
+   * search_bookmarks 截断时必须给**补救动作**，不能只丢一个 `truncated: true`。
+   *
+   * 模型看到那个布尔值只知道"没给全"，不知道该干什么——而搜索没有 offset 翻页，
+   * 唯一的补救是把关键词收窄。list_bookmarks 有 nextOffset、find_duplicates 有 note，
+   * 只有 search_bookmarks 一直都是光秃秃一个 true。
+   */
+  await okA('search_bookmarks 截断时给出补救动作（不只是 truncated:true）', async () => {
+    const { executeTool } = await import('../src/lib/ai/tools');
+
+    // 造 12 条都含同一关键词的书签，用 limit=5 强制截断
+    for (let i = 0; i < 12; i++) {
+      await mockBookmarks.create({ parentId: '1', title: `scap-${i}`, url: `https://scap.test/${i}` });
+    }
+
+    const r = await executeTool('search_bookmarks', JSON.stringify({ query: 'scap', limit: 5 }));
+    const j = JSON.parse(r.result) as {
+      total: number;
+      shown: number;
+      truncated: boolean;
+      omitted?: number;
+      note?: string;
+    };
+
+    assert.ok(j.total >= 12, `应至少匹配 12 条，实际 ${j.total}`);
+    assert.equal(j.shown, 5, `limit=5 应只返回 5 条，实际 ${j.shown}`);
+    assert.equal(j.truncated, true, '应标记截断');
+
+    assert.equal(j.omitted, j.total - j.shown, `omitted 应等于 total-shown，实际 ${j.omitted}`);
+    assert.ok(
+      (j.note || '').includes(`另有 ${j.omitted} 条未返回`),
+      `note 必须说清还有几条没返回，实际：${j.note}`,
+    );
+    assert.ok(
+      (j.note || '').includes('关键词收窄'),
+      `必须给出补救动作（收窄关键词），实际：${j.note}`,
+    );
+    assert.ok(
+      (j.note || '').includes('list_bookmarks'),
+      `该给另一条路（到文件夹里逐层看），实际：${j.note}`,
+    );
+
+    // 不截断时不该有这些字段
+    const r2 = await executeTool('search_bookmarks', JSON.stringify({ query: 'scap', limit: 2000 }));
+    const j2 = JSON.parse(r2.result) as { total: number; shown: number; omitted?: number; note?: string };
+    assert.equal(j2.shown, j2.total, 'limit 够大时不该截断');
+    assert.equal(j2.omitted, undefined, `不截断时不该有 omitted，实际 ${j2.omitted}`);
+    assert.ok(!j2.note, `不截断时不该有 note，实际 ${j2.note}`);
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

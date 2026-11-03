@@ -183,11 +183,23 @@ async function searchBookmarks(args: unknown): Promise<ToolOutput> {
   const nodes = await chrome.bookmarks.search(query);
   const items = nodes.slice(0, useLimit);
   const paths = await resolvePaths(items.map((n) => n.id));
+  const omitted = nodes.length - items.length;
   const out = {
     query,
     total: nodes.length,
     shown: items.length,
-    truncated: nodes.length > items.length,
+    truncated: omitted > 0,
+    /*
+     * `truncated: true` 是个光秃秃的布尔值——模型知道"没给全"，但不知道该怎么办。
+     * 搜索没有 offset 翻页，唯一的补救是把关键词收窄，这句话必须说出来。
+     * （list_bookmarks 有 nextOffset、find_duplicates 有 note，只有这里什么都没有。）
+     */
+    ...(omitted > 0
+      ? {
+          omitted,
+          note: `共匹配 ${nodes.length} 条，本次只返回前 ${items.length} 条，另有 ${omitted} 条未返回。搜索不支持翻页，请把关键词收窄（加站点名、加年份、用更具体的词）再查一次，或用 list_bookmarks 到具体文件夹里逐层看。`,
+        }
+      : {}),
     items: items.map((n) => ({ ...serializeBookmark(n), path: paths.get(n.id) })),
   };
   return { result: JSON.stringify(out) };

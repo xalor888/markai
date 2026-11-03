@@ -491,7 +491,7 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
             // 长任务进度：转发为 tool_progress 事件（工具块实时显示，同时构成 SW 活跃信号）
             safePost(onEvent, { type: 'chat:tool_progress', messageId, recordId: tc.id, text });
             if (signal.aborted) throw new Error('已取消，任务中断');
-          }),
+          }, signal),
         };
         } finally {
           setRecordingOwner(null);

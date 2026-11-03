@@ -727,7 +727,12 @@ const cleanupSweepSchema = z.object({
 async function cleanupSweep(
   args: unknown,
   onProgress?: (text: string) => void,
+  signal?: AbortSignal,
 ): Promise<ToolOutput> {
+  /** 取消检查：抛出去交给 executeTool 的 catch，agent 据此把这一步记为错误 */
+  const throwIfAborted = () => {
+    if (signal?.aborted) throw new Error('已取消，这一步没有执行完');
+  };
   const {
     folderId,
     folderPath,
@@ -755,6 +760,7 @@ async function cleanupSweep(
   // 遍历收集全部书签节点（递归时只删书签本身，文件夹保留）
   const collected: chrome.bookmarks.BookmarkTreeNode[] = [];
   const walk = async (folderId: string) => {
+    throwIfAborted();
     const children = await chrome.bookmarks.getChildren(folderId);
     for (const c of children) {
       if (c.url) collected.push(c);
@@ -762,6 +768,7 @@ async function cleanupSweep(
     }
   };
   await walk(pid);
+  throwIfAborted();
 
   // 年份过滤（dateAdded 为毫秒时间戳；beforeYear=2026 → 2026-01-01 0:00 之前）
   const cutoff = beforeYear !== undefined ? Date.UTC(beforeYear, 0, 1) : 0;
@@ -790,6 +797,8 @@ async function cleanupSweep(
     let lastReport = 0;
     const workers = Array.from({ length: Math.min(20, keptByType.length) }, async () => {
       while (cursor < keptByType.length) {
+        // 存活检测是这里最慢的一段（每个 URL 一次网络往返），必须能被取消
+        throwIfAborted();
         const i = cursor++;
         results[i] = await checkOneUrl(keptByType[i]!.node.url ?? '');
         done++;
@@ -2001,7 +2010,7 @@ async function forgetMemoryTool(args: unknown): Promise<ToolOutput> {
 
 interface ToolEntry {
   name: string;
-  handler: (args: unknown, onProgress?: (text: string) => void) => Promise<ToolOutput>;
+  handler: (args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal) => Promise<ToolOutput>;
 }
 
 const TOOL_MAP: Record<string, ToolEntry> = {
@@ -2095,6 +2104,7 @@ export async function executeTool(
   name: string,
   argsJson: string,
   onProgress?: (text: string) => void,
+  signal?: AbortSignal,
 ): Promise<ToolOutput> {
   const entry = TOOL_MAP[name];
   if (!entry) throw new Error(`未知工具：${name}`);
@@ -2106,7 +2116,15 @@ export async function executeTool(
   }
   const args = normalizeToolArgs(rawArgs);
   try {
-    return await entry.handler(args, onProgress);
+    /*
+     * 把取消信号透传给工具。
+     *
+     * 此前 `executeTool` 没有 signal：abort 只挡在**工具之间**（每次工具调用前后
+     * 各有一道门），正在执行的长工具会**一路跑完**。`cleanup_sweep` 要递归遍历整棵树
+     * 再对每个保留候选做并发 HTTP 存活检测——用户点「取消」之后它还在烧 CPU 和网络，
+     * 界面上却已经显示取消了。
+     */
+    return await entry.handler(args, onProgress, signal);
   } catch (e) {
     if (e instanceof z.ZodError) {
       throw new Error(`参数不合法：${e.issues.map((i) => i.message).join('；')}`);

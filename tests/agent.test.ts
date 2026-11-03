@@ -14290,6 +14290,79 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
 });
 
 
+  /*
+   * 点「取消」时，正在执行的长工具必须真的停下来。
+   *
+   * `executeTool` 此前没有 signal 参数：abort 只挡在**工具之间**（每次工具调用前后
+   * 各有一道门），正在跑的长工具会一路跑完。`cleanup_sweep` 要递归遍历整棵树
+   * 再对每个保留候选做并发 HTTP 存活检测——用户点了取消，它还在烧 CPU 和网络，
+   * 界面上却已经显示取消了。
+   */
+  await okA('取消能打断正在执行的长工具（不是等它跑完）', async () => {
+    const { executeTool } = await import('../src/lib/ai/tools');
+
+    // 造一棵足够大的树：40 个文件夹 × 25 条 = 1000 个候选
+    const rootId = (await mockBookmarks.create({ parentId: '1', title: 'T37-root' })).id;
+    for (let i = 0; i < 40; i++) {
+      const fid = (await mockBookmarks.create({ parentId: rootId, title: 'T37-f' + i })).id;
+      for (let j = 0; j < 25; j++) {
+        // 用**根路径** URL：cleanup_sweep 默认 keepOnly='root'，带路径的会被分到
+        // deep/sub 从而跳过存活检测——那样就测不到「并发池里取消」这条路径了
+        await mockBookmarks.create({ parentId: fid, title: 'T37-b' + i + '-' + j, url: 'https://t37-' + i + '-' + j + '.test/' });
+      }
+    }
+
+    // 让每个 URL 检测都慢一点，好让 abort 有机会插进来
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async () => {
+      await new Promise((r) => setTimeout(r, 5));
+      return new Response(null, { status: 200 });
+    }) as typeof fetch;
+
+    try {
+      const ctrl = new AbortController();
+      let abortedAt = 0;
+      const t0 = Date.now();
+      // 第一次收到进度就取消
+      const p = executeTool(
+        'cleanup_sweep',
+        JSON.stringify({ folderId: rootId, checkReachable: true, limit: 1000, dryRun: true }),
+        () => {
+          if (!abortedAt) {
+            abortedAt = Date.now() - t0;
+            ctrl.abort();
+          }
+        },
+        ctrl.signal,
+      );
+
+      let err: unknown = null;
+      let result: unknown = null;
+      try {
+        result = await p;
+      } catch (e) {
+        err = e;
+      }
+      const total = Date.now() - t0;
+
+      console.log(`   [DBG] 首次进度 ${abortedAt}ms，整体结束 ${total}ms，抛错=${!!err}, 有结果=${result != null}`);
+
+      /*
+       * 期望：取消后抛「已取消」，而不是返回一份完整结果。
+       * 若 signal 没被检查，cleanup_sweep 会把 1000 个 URL 全部检测完再正常返回。
+       */
+      assert.ok(err, `取消后应当抛错而不是正常返回（实际返回了结果，说明长工具的循环没检查 signal）`);
+      assert.match(String(err), /已取消/, `错误信息应说明被取消，实际：${String(err)}`);
+      assert.equal(result, null, '取消后不该有结果');
+      assert.ok(
+        total < abortedAt + 300,
+        `取消后应在短时间内停下，实际用了 ${total}ms（abortAt ${abortedAt}）`,
+      );
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

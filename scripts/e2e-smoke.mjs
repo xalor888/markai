@@ -3815,6 +3815,72 @@ async function run() {
   })()`);
   await sleep(300);
 
+  /* ══════════ 9.5-pre 侧边栏自身：主界面此前零覆盖 ══════════
+   *
+   * 侧边栏是点扩展图标打开的那个界面，也是本扩展的主界面。e2e 此前覆盖了
+   * page / popup / options，**唯独没有 sidepanel**——它要是白屏、崩在挂载、
+   * 或者三栏少一栏，整套 152 项一项都抓不到，而用户点开图标就是一片空白。
+   */
+  console.log('\n[9.5-pre] 侧边栏挂载与三栏');
+  {
+    const { targetId: st } = await cdp.send('Target.createTarget', {
+      url: `chrome-extension://${EXT_ID}/sidepanel.html`,
+    });
+    const { sessionId: ssid } = await cdp.send('Target.attachToTarget', { targetId: st, flatten: true });
+    await cdp.send('Page.enable', {}, ssid);
+    await cdp.send('Runtime.enable', {}, ssid);
+
+    const spEval = async (expr) => {
+      const r = await cdp.send('Runtime.evaluate', { expression: expr, returnByValue: true, awaitPromise: true }, ssid);
+      return r.result?.value;
+    };
+    // 挂载 + 数据加载需要一点时间（loadTree / load / load 三个 store）
+    await waitFor(() => spEval(`!!document.querySelector('[data-testid="tree"], [data-testid="list"], [data-testid="chat"]')`), 10000);
+    await sleep(600);
+
+    /*
+     * compact 模式的布局是**树 + 列表双栏，Agent 面板为右侧抽屉**（见 workspace.tsx 头部注释），
+     * 且树默认收起（"compact 才需要默认收起、用时展开"）。所以这里不能按 full 模式的
+     * "三栏常驻"来断言——那会把设计当成缺陷。
+     */
+    const sp = await spEval(`(() => {
+      const has = (sel) => !!document.querySelector(sel);
+      return {
+        root: !!document.getElementById('root')?.firstElementChild,
+        treeNodes: document.querySelectorAll('[data-testid="tree-node"]').length,
+        list: has('[data-testid="list"]'),
+        chatToggle: has('[aria-label*="Agent"], [aria-label*="对话"], [title*="Agent"]'),
+        rows: document.querySelectorAll('[data-testid="row"]').length,
+        topbar: has('[data-testid="topbar"]'),
+        errorText: (document.body.innerText.match(/ErrorBoundary|应用出错|出了点问题/g) || []).length,
+      };
+    })()`);
+    check('侧边栏真的挂载了（不是白屏）', sp.root === true, JSON.stringify(sp));
+    check('侧边栏有顶栏与书签列表（compact 双栏成立）', sp.topbar && sp.list, JSON.stringify(sp));
+    check('侧边栏没有错误边界被触发', sp.errorText === 0, JSON.stringify(sp));
+    check('侧边栏列出了书签（store 已加载）', sp.rows > 0, JSON.stringify(sp));
+
+    // 侧边栏是紧凑布局：不能出现横向滚动条（Arc 风格窄工作区）
+    const spOverflow = await spEval(`document.documentElement.scrollWidth - document.documentElement.clientWidth`);
+    // 找出到底是谁溢出：宽 tab 里打开 sidepanel.html 不等于真实侧边栏宽度，
+    // 但"某个元素横向超出视口"本身要能定位到具体节点，否则只能看到一个大数。
+    const spWho = await spEval(`(() => {
+      const vw = document.documentElement.clientWidth;
+      const bad = [];
+      for (const el of document.querySelectorAll('*')) {
+        const r = el.getBoundingClientRect();
+        if (r.width > vw + 1 || r.right > vw + 1) {
+          bad.push({ tag: el.tagName.toLowerCase, cls: (el.className || '').toString().slice(0, 90), w: Math.round(r.width), right: Math.round(r.right) });
+        }
+      }
+      return { vw, count: bad.length, first: bad.slice(0, 4) };
+    })()`);
+    check('侧边栏没有横向溢出（紧凑布局成立）', spOverflow <= 1, JSON.stringify({ spOverflow, spWho }));
+
+    await cdp.send('Target.closeTarget', { targetId: st });
+    await sleep(200);
+  }
+
   /* ══════════ 9.5 无障碍：可点元素必须有可访问名称 ══════════ */
   console.log('\n[9.5] 无障碍守卫');
   {

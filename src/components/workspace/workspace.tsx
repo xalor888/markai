@@ -386,8 +386,16 @@ export function Workspace({
         />
       </header>
 
-      {/* 主体三栏 */}
-      <div className="relative flex min-h-0 flex-1">
+      {/*
+        主体三栏。
+
+        `overflow-hidden` 不是装饰：compact 模式下 Agent 面板是右侧抽屉，收起时
+        `translate-x-full` 把它整体平移到容器右外侧。它虽然 pointer-events-none，
+        却仍然撑出 320px 的文档横向滚动——用户能把整个应用横向拖进一片空白
+        （实测 document.scrollWidth - clientWidth = 320）。
+        打开态锚在 right-0 向内生长，永远在容器内，所以剪不到它。
+      */}
+      <div className="relative flex min-h-0 flex-1 overflow-hidden">
         {mode === 'full' ? (
           <ErrorBoundary area="书签树" className="w-56 shrink-0">
             <BookmarkTree className="h-full border-r border-border" />

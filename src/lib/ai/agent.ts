@@ -201,6 +201,34 @@ function selectHistory(
         createdAt: early[0]?.createdAt ?? 0,
       });
     }
+  } else if (selected.length < history.length) {
+    /*
+     * 没开 autoCompress（**默认就是关的**）时，超预算的早期消息被直接丢掉。
+     *
+     * 原来这里静默返回：模型只看到最近几条，**它自己不知道还有更早的**。
+     * 用户那边的症状是「我前面说过别动那个文件夹，你怎么还搬」——
+     * 而模型并不是不听，是那条消息根本没进它的上下文。
+     * 不说清楚，模型只会基于不完整信息自信地行动，用户以为它忘了自己的话。
+     *
+     * 所以塞一条系统说明进去：让模型知道有缺失，被问到早期内容时如实说"我看不到"，
+     * 而不是猜或者硬答。
+     */
+    const dropped = history.length - selected.length;
+    selected.unshift({
+      id: 'context-truncated',
+      role: 'user',
+      blocks: [
+        {
+          kind: 'text',
+          text:
+            `【系统提示】本次请求因上下文窗口限制，只包含了最近 ${selected.length} 条消息，` +
+            `更早的 ${dropped} 条消息未包含在内。` +
+            `如果用户引用了更早的对话内容（例如"我之前说过…"），请如实说明你看不到那段对话，` +
+            `不要猜测其内容，也不要假装记得。`,
+        },
+      ],
+      createdAt: 0,
+    });
   }
   return selected;
 }

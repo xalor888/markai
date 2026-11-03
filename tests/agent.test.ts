@@ -13642,6 +13642,76 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     assert.equal(pointC!.runId, 'run-t31-c');
   });
 
+  /*
+   * 历史被截断且**没开 autoCompress（默认就是关的）**时，必须告诉模型"有缺失"。
+   *
+   * 原来静默返回：模型只看到最近几条，它自己不知道还有更早的。
+   * 用户那边的症状是「我前面说过别动那个文件夹，你怎么还搬」——
+   * 而模型并不是不听，是那条消息根本没进它的上下文。
+   * 不说清楚，模型只会基于不完整信息自信地行动，用户以为它忘了自己的话。
+   */
+  await okA('历史被截断时明确告知模型有缺失（不让他自信地基于半边信息行动）', async () => {
+    const { runAgentTurn } = await import('../src/lib/ai/agent');
+
+    // 造一段很长的历史：每条 2000 字符，20 条 ≈ 远超任何小窗口
+    const long = (t: string) => 'x'.repeat(2000) + t;
+    const history = Array.from({ length: 20 }, (_, i) => ({
+      id: `h${i}`,
+      role: (i % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+      blocks: [{ kind: 'text' as const, text: long(`第${i}条`) }],
+      createdAt: 1000 + i,
+    }));
+
+    // 小窗口 + 不开压缩：必然截断
+    fetchCalls.length = 0;
+    sseQueue = [sseResponse([sseEvent(JSON.stringify({ choices: [{ delta: { content: '好。' } }] })), sseEvent('[DONE]')])];
+    await runAgentTurn({
+      config: { ...TEST_CONFIG, contextWindow: 4000, autoCompress: false },
+      messageId: 'm-trunc',
+      history,
+      text: '继续',
+      signal: new AbortController().signal,
+      onEvent: () => {},
+    });
+
+    const body = JSON.parse(String(fetchCalls[0]!.init.body)) as { messages: { role: string; content: string }[] };
+    const first = body.messages.find((m) => (m.content || '').includes('系统提示'));
+    assert.ok(first, `应有一条说明"上下文被截断"的消息，实际首条：${JSON.stringify(body.messages[1]?.content?.slice(0, 80))}`);
+    assert.ok(
+      /只包含了最近 \d+ 条消息/.test(first!.content),
+      `必须说清保留了几条，实际：${first!.content}`,
+    );
+    assert.ok(
+      /更早的 \d+ 条消息未包含在内/.test(first!.content),
+      `必须说清丢了几条，实际：${first!.content}`,
+    );
+    assert.ok(
+      /不要猜测其内容/.test(first!.content),
+      `必须要求模型别猜，实际：${first!.content}`,
+    );
+
+    /* ── 开了压缩时不该有这条（摘要已经在做同样的事） ── */
+    fetchCalls.length = 0;
+    sseQueue = [sseResponse([sseEvent(JSON.stringify({ choices: [{ delta: { content: '好。' } }] })), sseEvent('[DONE]')])];
+    await runAgentTurn({
+      config: { ...TEST_CONFIG, contextWindow: 4000, autoCompress: true },
+      messageId: 'm-trunc2',
+      history,
+      text: '继续',
+      signal: new AbortController().signal,
+      onEvent: () => {},
+    });
+    const body2 = JSON.parse(String(fetchCalls[0]!.init.body)) as { messages: { role: string; content: string }[] };
+    assert.ok(
+      !body2.messages.some((m) => (m.content || '').includes('更早的') && (m.content || '').includes('未包含在内')),
+      '开了 autoCompress 时不该再出现"未包含在内"（摘要已在承担这件事）',
+    );
+    assert.ok(
+      body2.messages.some((m) => (m.content || '').includes('早期对话摘要')),
+      '开了 autoCompress 时应出现摘要',
+    );
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

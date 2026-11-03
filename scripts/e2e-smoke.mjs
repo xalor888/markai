@@ -871,13 +871,31 @@ async function run() {
       if (r.exceptionDetails) return null;
       return r.result?.value;
     };
-    const seeded = await ev2(`(() => {
-      localStorage.setItem('markai.theme', 'light');
-      chrome.storage.local.remove('markai.theme');
-      return localStorage.getItem('markai.theme');
-    })()`);
-    check('测试前置：localStorage 里确实写进了 light', seeded === 'light', JSON.stringify({ seeded }));
-
+    /*
+     * 用户选了浅色这件事，必须在**新文档里**生效，而不是靠 reload 前的时序。
+     *
+     * 原来的写法是 reload 前 `localStorage.setItem('light')`。问题在于
+     * `mirrorTheme()` 会在页面自己的 `load()`（异步读 storage）回来后把当前主题
+     * 写回 localStorage——storage 里没有用户选择时它是 'system'，
+     * 于是先种的 'light' 被盖成 'system'，`shouldStartDark('system', true)`
+     * 返回 true，首帧就成了深色。这是纯时序竞争，与产品逻辑无关
+     * （`shouldStartDark('light', true)` 本来就返回 false），
+     * 实测复现：reload 前把 localStorage 盖回 'system' → firstFrameClass 立刻变 "dark"。
+     *
+     * 现在用 addScriptToEvaluateOnNewDocument 在新文档**启动时**就写入 'light'：
+     * 它跑在页面脚本之前，`preapplyTheme()` 一定读得到，完全不受先前时序影响。
+     * 带一次性标记：反向用例（用户选深色）那次 reload 不能再被它盖回去。
+     */
+    await cdp.send(
+      'Page.addScriptToEvaluateOnNewDocument',
+      {
+        source: `if (!localStorage.getItem('markai.theme.seeded')) {
+          try { localStorage.setItem('markai.theme.seeded', '1'); } catch (e) {}
+          try { localStorage.setItem('markai.theme', 'light'); } catch (e) {}
+        }`,
+      },
+      sid,
+    );
     await cdp.send('Page.reload', {}, sid);
     await waitFor(async () => (await ev2(`typeof window.__firstFrame !== 'undefined'`)) === true, 10000);
     const cls = await ev2(`window.__firstFrame`);

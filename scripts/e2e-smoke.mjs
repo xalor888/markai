@@ -4004,6 +4004,164 @@ async function run() {
       })()`);
       await sleep(400);
     }
+      /*
+       * 对话框在窄侧栏里也要完整可见。
+       * 对话框是 `fixed inset-0 ... max-w-[calc(100vw-32px)]` + 各自固定宽度
+       * （默认 420px、整理记录 520px）。理论上 max-width 会压过 width，
+       * 但"理论上对"和"实测对"是两回事——侧栏这个窄视口此前从没测过对话框。
+       */
+      for (const w of [360, 300, 260]) {
+        await cdp.send('Emulation.setDeviceMetricsOverride', {
+          width: w, height: 640, deviceScaleFactor: 1, mobile: false,
+        }, ssid);
+        await sleep(300);
+        // F2 打开重命名对话框（快捷键在窄宽度下同样要能用）
+        const dlg = await spEval(`(() => {
+          const list = document.querySelector('[data-testid="list"]') || document.body;
+          list.dispatchEvent(new KeyboardEvent('keydown', { key: 'F2', bubbles: true, cancelable: true }));
+          return true;
+        })()`);
+        await sleep(500);
+        const dlgInfo = await spEval(`(() => {
+          const d = document.querySelector('[role="dialog"]');
+          if (!d) return { open: false };
+          const r = d.getBoundingClientRect();
+          const vw = document.documentElement.clientWidth;
+          return {
+            open: true,
+            vw,
+            w: Math.round(r.width),
+            left: Math.round(r.left),
+            right: Math.round(r.right),
+            scrollOver: document.documentElement.scrollWidth - vw,
+          };
+        })()`);
+        check(
+          `侧边栏 ${w}px 下能打开对话框（快捷键没被窄布局破坏）`,
+          dlgInfo.open === true,
+          JSON.stringify({ dlg, dlgInfo }),
+        );
+        check(
+          `侧边栏 ${w}px 下对话框完整可见（不超出视口）`,
+          dlgInfo.open === true && dlgInfo.left >= -1 && dlgInfo.right <= w + 1 && dlgInfo.scrollOver <= 1,
+          JSON.stringify(dlgInfo),
+        );
+        // Esc 关掉，进入下一档
+        await spEval(`(() => {
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+          return true;
+        })()`);
+        await sleep(400);
+      }
+      /*
+       * 更窄也不代表安全：宽度钳住了，**内容**可能被挤坏。
+       * 整理记录对话框声明的是 w-[520px]，是内容最密的一个（撤销按钮、免打扰名单、
+       * 时间线）。在 228px 实际宽度下，逐项检查有没有元素被挤出面板。
+       */
+      for (const w of [300, 260]) {
+        await cdp.send('Emulation.setDeviceMetricsOverride', {
+          width: w, height: 640, deviceScaleFactor: 1, mobile: false,
+        }, ssid);
+        await sleep(300);
+        // 顶栏「更多」→ 整理记录
+        await spEval(`(() => { const m = document.querySelector('[aria-label="更多"]'); if (m) m.click(); return true; })()`);
+        await sleep(300);
+        const openLog = await spEval(`(() => {
+          const items = [...document.querySelectorAll('button, [role="menuitem"]')];
+          const t = items.find((b) => (b.textContent || '').includes('整理记录'));
+          if (!t) return 'no-item';
+          t.click();
+          return 'clicked';
+        })()`);
+        await sleep(700);
+        const logInfo = await spEval(`(() => {
+          const d = document.querySelector('[role="dialog"]');
+          if (!d) return { open: false };
+          const dr = d.getBoundingClientRect();
+          const bad = [];
+          for (const el of d.querySelectorAll('button, input, [role="button"]')) {
+            const r = el.getBoundingClientRect();
+            if (r.width === 0 && r.height === 0) continue;
+            if (r.right > dr.right + 1 || r.left < dr.left - 1) {
+              bad.push({ text: (el.textContent || el.getAttribute('aria-label') || '').slice(0, 24), left: Math.round(r.left), right: Math.round(r.right) });
+            }
+          }
+          return {
+            open: true,
+            dialogW: Math.round(dr.width),
+            panelLeft: Math.round(dr.left),
+            panelRight: Math.round(dr.right),
+            escapedCount: bad.length,
+            escaped: bad.slice(0, 4),
+            canScroll: d.scrollHeight > d.clientHeight,
+          };
+        })()`);
+        check(
+          `侧边栏 ${w}px 下整理记录对话框能打开`,
+          logInfo.open === true,
+          JSON.stringify({ openLog, logInfo }),
+        );
+        check(
+          `侧边栏 ${w}px 下整理记录里的控件都没被挤出面板`,
+          logInfo.open === true && logInfo.escapedCount === 0,
+          JSON.stringify(logInfo),
+        );
+        await spEval(`(() => {
+          document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+          return true;
+        })()`);
+        await sleep(400);
+      }
+      /*
+       * 「更多」菜单是窄栏下最容易溢出的东西：一个下拉，十几项，
+       * 其中还有「收藏后自动整理已开启」这种长文案。它一旦超出视口，
+       * 右边几项就点不到——而它是待删清单/整理记录/健康检查的唯一入口。
+       */
+      for (const w of [360, 300, 260]) {
+        await cdp.send('Emulation.setDeviceMetricsOverride', {
+          width: w, height: 640, deviceScaleFactor: 1, mobile: false,
+        }, ssid);
+        await sleep(300);
+        const menu = await spEval(`(() => {
+          const m = document.querySelector('[aria-label="更多"]');
+          if (!m) return { open: false };
+          m.click();
+          return { open: true };
+        })()`);
+        // 等菜单项真的出现，不要用固定 sleep：窄档位下渲染更慢，
+        // 450ms 曾抓到 0 项（360px 和 260px 却正常）——那是时序抖动，不是布局问题。
+        await waitFor(
+          () => spEval(`[...document.querySelectorAll('button, [role="menuitem"]')].filter((b) => /整理记录/.test(b.textContent || '')).length > 0`),
+          4000,
+        );
+        await sleep(150);
+        const menuInfo = await spEval(`(() => {
+          const vw = document.documentElement.clientWidth;
+          const items = [...document.querySelectorAll('[role="menu"] *, [role="menuitem"], button')]
+            .filter((e) => /收藏当前页面|待删除清单|整理记录|自动整理|Agent 面板|健康检查|快捷键|浅色|深色|跟随系统|设置/.test(e.textContent || ''));
+          const bad = [];
+          for (const el of items) {
+            const r = el.getBoundingClientRect();
+            if (r.width === 0 && r.height === 0) continue;
+            if (r.right > vw + 1 || r.left < -1) {
+              bad.push({ text: (el.textContent || '').trim().slice(0, 20), left: Math.round(r.left), right: Math.round(r.right) });
+            }
+          }
+          return { vw, itemCount: items.length, escapedCount: bad.length, escaped: bad.slice(0, 4), scrollOver: document.documentElement.scrollWidth - vw };
+        })()`);
+        check(
+          `侧边栏 ${w}px 下「更多」菜单完整可见（入口没被挤溢出）`,
+          menu.open === true && menuInfo.itemCount > 0 && menuInfo.escapedCount === 0 && menuInfo.scrollOver <= 1,
+          JSON.stringify(menuInfo),
+        );
+        // 菜单听的是 document 上的 mousedown（more-menu.tsx），body.click() 关不掉它——
+        // 关不掉的话下一轮的点击就变成"切换关闭"，只会在中间档位偶发 0 项。
+        await spEval(`(() => {
+          document.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+          return true;
+        })()`);
+        await sleep(300);
+      }
     await cdp.send('Emulation.clearDeviceMetricsOverride', {}, ssid);
     await sleep(200);
 

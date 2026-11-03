@@ -225,6 +225,19 @@ async function run() {
       return true;
     })()`);
     await sleep(300);
+    /*
+     * 种子书签也必须删掉：它们留在书签栏会把列表拉长，
+     * 后面用 Home + 12 次 ArrowDown 找"后台打开靶"的用例就再也找不着（实测踩过）。
+     */
+    await ev(`(async () => {
+      const hits = await chrome.bookmarks.search('bulkcap');
+      for (const h of hits) {
+        if (!h.url || !h.url.includes('bulkcap.example')) continue;
+        await chrome.bookmarks.remove(h.id).catch(() => {});
+      }
+      return true;
+    })()`);
+    await sleep(500);
     const clicked = await ev(`(() => {
       const hit = [...document.querySelectorAll('[role="menuitem"]')]
         .find((b) => (b.textContent || '').includes(${JSON.stringify(label)}));
@@ -3694,6 +3707,113 @@ async function run() {
     );
     check('点重试后恢复正常（错误提示消失）', recovered === true, JSON.stringify({ recovered }));
   }
+
+  /* ══════════ 9.3511 搜索上限：Ctrl+A 不能说「全选了」 ══════════
+   *
+   * 放在套件后段：它会种 105 条书签、改搜索框与多选状态，
+   * 放在中间会把后面依赖「当前高亮行」的用例带偏（实测踩过）。
+   */
+  /* 自带一个按键替身：本用例已从原 section 移出，不能再用那里的局部 press */
+  const pressKey = async (key, opts = {}) => {
+    await ev(`(() => {
+      const el = document.querySelector('[data-testid="list"]') || document.body;
+      el.dispatchEvent(new KeyboardEvent('keydown', {
+        key: ${JSON.stringify(key)},
+        bubbles: true,
+        cancelable: true,
+        ...${JSON.stringify(opts)},
+      }));
+      return true;
+    })()`);
+    await sleep(250);
+  };
+
+  /*
+   * 浏览模式下不该弹"结果有上限"的提示（那是在制造噪音）。
+   * 上面这一按就是在浏览模式下做的，此时 toast 数应为 0。
+   */
+  const browseToasts = await ev(`
+    (() => {
+      const t = [...document.querySelectorAll('[data-sonner-toast], [role="status"]')].map(e => e.textContent || '');
+      return t.filter(x => x.includes('可能还有更多匹配项')).length;
+    })()
+  `);
+  check('浏览模式 Ctrl+A 不弹"结果有上限"提示（不制造噪音）', browseToasts === 0, JSON.stringify({ browseToasts }));
+
+  /*
+   * 搜索模式下必须弹——且要说清"可能还有更多匹配项未被选中"。
+   * 这条正是本次修的行为：不说明的话，用户搜出 250 条、按 Ctrl+A
+   * 看到"已选 100 项"，会以为自己把全部匹配都选了。
+   */
+  /*
+   * 先造 105 条都含同一个关键词的书签：搜索结果显示上限是 100，
+   * 不到 100 条就触发不了"可能还有更多匹配项"那条提示（不能为凑测试改产品阈值）。
+   */
+  await ev(`(async () => {
+    const bar = (await chrome.bookmarks.getTree())[0].children.find(c => c.title === '书签栏');
+    const existing = await chrome.bookmarks.search('bulkcap');
+    if (existing.length < 105) {
+      for (let i = existing.length; i < 105; i++) {
+        await chrome.bookmarks.create({ parentId: bar.id, title: 'bulkcap-' + i, url: 'https://bulkcap.example/' + i });
+      }
+    }
+    return true;
+  })()`);
+  await sleep(600);
+  /*
+   * 必须走 value setter：直接 `el.value = ...` 再派原生 input 事件，
+   * React 的受控组件不认（实测 search-count 一直是空的）。
+   */
+  await ev(`(() => {
+    const input = document.querySelector('[data-testid="search"]');
+    if (!input) return false;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(input, 'bulkcap');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    return true;
+  })()`);
+  await waitFor(() => ev(`(document.querySelectorAll('[data-testid="row"]').length) >= 100`), 8000);
+  await sleep(400);
+  const capped = await ev(`(() => {
+    const c = document.querySelector('[data-testid="search-count"]');
+    return c ? c.textContent : '';
+  })()`);
+  check('前置：搜索结果确实触达 100 条上限', /100\+/.test(capped || ''), JSON.stringify({ capped }));
+  await pressKey('a', { ctrlKey: true });
+  await sleep(400);
+  const searchToast = await ev(`
+    (() => {
+      const t = [...document.querySelectorAll('[data-sonner-toast], [role="status"]')].map(e => e.textContent || '');
+      return t.filter(x => x.includes('可能还有更多匹配项')).length;
+    })()
+  `);
+  check(
+    '搜索模式 Ctrl+A 提示"可能还有更多匹配项未被选中"',
+    searchToast >= 1,
+    JSON.stringify({ searchToast }),
+  );
+
+  /*
+   * 收尾：清掉搜索与多选。否则留着的 bulkcap 搜索/100 项选中会改变
+   * 后续用例的"当前高亮行"，把 Shift+Enter、F2 那些用例带偏（实测踩过）。
+   */
+  await ev(`(() => {
+    const input = document.querySelector('[data-testid="search"]');
+    if (input) {
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(input, '');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    }
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+    return true;
+  })()`);
+  await sleep(500);
+  await ev(`(() => {
+    const list = document.querySelector('[data-testid="list"]') || document.body;
+    list.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }));
+    return true;
+  })()`);
+  await sleep(300);
 
   /* ══════════ 9.5 无障碍：可点元素必须有可访问名称 ══════════ */
   console.log('\n[9.5] 无障碍守卫');

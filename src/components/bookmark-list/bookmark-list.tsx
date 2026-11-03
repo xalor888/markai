@@ -351,7 +351,19 @@ export function BookmarkList({ className, compact = false }: { className?: strin
       case 'a':
         if (e.ctrlKey || e.metaKey) {
           e.preventDefault();
-          selectMany(items.filter((n) => n.url).map((n) => n.id));
+          const picked = items.filter((n) => n.url).map((n) => n.id);
+          selectMany(picked);
+          /*
+           * 搜索模式下列表有 100 条上限（见 setSearchResults 的 slice）。
+           * 不说明的话，用户搜出 250 条、按 Ctrl+A 看到"已选 100 项"，
+           * 会以为自己把全部匹配都选了——随后只删/搬动了其中 100 条。
+           * 与「打开过多」那条提示同一立场：做了多少、还剩多少，都要说出来。
+           */
+          if (!browsing && (searchResults?.length ?? 0) >= 100) {
+            pushToast(`已选 ${picked.length} 项`, {
+              description: '搜索结果显示上限为 100 条，可能还有更多匹配项未被选中。可缩小关键词或到文件夹里全选。',
+            });
+          }
         }
         break;
       case 'c':

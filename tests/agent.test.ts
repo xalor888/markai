@@ -13712,6 +13712,83 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     );
   });
 
+  /*
+   * **单条**消息被截断时也必须留下痕迹。
+   *
+   * `selectHistory` 里两条截断路径都是静默的：
+   *   ① 超过 MAX_MESSAGE_CHARS(6000) 直接 slice
+   *   ② 极小窗口时再截到预算的一半
+   * 原来直接换成一个截断文本的新消息对象，没有任何标记——模型看到一条半句话
+   * 戛然而止的消息，却不知道它被切过。
+   *
+   * 最常见的场景：用户粘一份几百条的书签清单（远超 6000 字符），模型只读到
+   * 前 6000 字符，然后自信地说「我已看过你列的 500 条」。
+   * 用户完全有理由相信它看全了——那是他刚发出去的消息。
+   */
+  await okA('单条消息被截断时明确标记（别让模型以为看全了用户粘的长清单）', async () => {
+    const { runAgentTurn } = await import('../src/lib/ai/agent');
+
+    // 一条远超 6000 字符上限的用户消息（模拟粘贴的书签清单）
+    const huge = Array.from({ length: 2000 }, (_, i) => `${i + 1}. https://example${i}.test/`).join('\n');
+    assert.ok(huge.length > 6000, `前置：消息应超过 6000 字符上限，实际 ${huge.length}`);
+
+    const history = [
+      {
+        id: 'huge-1',
+        role: 'user' as const,
+        blocks: [{ kind: 'text' as const, text: huge }],
+        createdAt: 1000,
+      },
+    ];
+
+    // 窗口足够放进这条被截断的消息
+    fetchCalls.length = 0;
+    sseQueue = [sseResponse([sseEvent(JSON.stringify({ choices: [{ delta: { content: '好。' } }] })), sseEvent('[DONE]')])];
+    await runAgentTurn({
+      config: { ...TEST_CONFIG, contextWindow: 32000, autoCompress: false },
+      messageId: 'm-bigmsg',
+      history,
+      text: '帮我整理这些',
+      signal: new AbortController().signal,
+      onEvent: () => {},
+    });
+
+    const body = JSON.parse(String(fetchCalls[0]!.init.body)) as { messages: { role: string; content: string }[] };
+    const sent = body.messages.find((m) => (m.content || '').includes('example0.test'));
+    assert.ok(sent, '那条长消息应被发送');
+
+    // 关键：必须带截断标记，且写清原长与实际发送长度
+    assert.ok(
+      /内容被截断/.test(sent!.content),
+      `截断的长消息必须带标记，实际结尾：${sent!.content.slice(-80)}`,
+    );
+    assert.ok(
+      new RegExp(`原有 ${huge.length} 字符`).test(sent!.content),
+      `必须说清原有长度（${huge.length}），实际：${sent!.content.slice(-120)}`,
+    );
+    assert.ok(
+      /只发送了前 \d+ 字符/.test(sent!.content),
+      `必须说清实际发送了多少，实际：${sent!.content.slice(-120)}`,
+    );
+
+    /* ── 反向：短消息不该有标记（不制造噪音） ── */
+    fetchCalls.length = 0;
+    sseQueue = [sseResponse([sseEvent(JSON.stringify({ choices: [{ delta: { content: '好。' } }] })), sseEvent('[DONE]')])];
+    await runAgentTurn({
+      config: { ...TEST_CONFIG, contextWindow: 32000, autoCompress: false },
+      messageId: 'm-smallmsg',
+      history: [{ id: 's1', role: 'user', blocks: [{ kind: 'text', text: '很短的一条' }], createdAt: 1 }],
+      text: '在吗',
+      signal: new AbortController().signal,
+      onEvent: () => {},
+    });
+    const body2 = JSON.parse(String(fetchCalls[0]!.init.body)) as { messages: { role: string; content: string }[] };
+    assert.ok(
+      !body2.messages.some((m) => (m.content || '').includes('内容被截断')),
+      '短消息不该出现截断标记',
+    );
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

@@ -160,16 +160,33 @@ function selectHistory(
   const selected: ChatMessage[] = [];
   let used = 0;
   for (const m of [...history].reverse()) {
-    let text = extractText(m).slice(0, MAX_MESSAGE_CHARS);
+    const full = extractText(m);
+    let text = full.slice(0, MAX_MESSAGE_CHARS);
+    let cut = full.length > text.length;
     let cost = estimateTokens(text) + PER_MESSAGE_OVERHEAD;
     // 单条消息自身超预算（极小窗口）：截断到预算的一半，保证能纳入最近一条
     if (selected.length === 0 && cost > budget) {
       const maxChars = Math.max(100, Math.floor((budget / 2) / 0.75));
-      text = text.slice(0, maxChars);
+      if (maxChars < text.length) {
+        text = text.slice(0, maxChars);
+        cut = true;
+      }
       cost = estimateTokens(text) + PER_MESSAGE_OVERHEAD;
     }
     if (selected.length > 0 && used + cost > budget) break;
-    selected.unshift(text === extractText(m) ? m : { ...m, blocks: [{ kind: 'text', text }] });
+    /*
+     * 单条消息被截断时**必须留下痕迹**。
+     *
+     * 原来直接换成一个截断文本的新消息对象，没有任何标记——模型看到一条
+     * 半句话戛然而止的消息，却不知道它被切过。
+     * 最常见的场景：用户粘一份几百条的书签清单（远超 6000 字符），
+     * 模型只读到前 6000 字符，然后自信地说「我已看过你列的 500 条」。
+     * 用户完全有理由相信它看全了——那是他刚发出去的消息。
+     */
+    if (cut) {
+      text = `${text}\n[…该消息原有 ${full.length} 字符，此处因上下文限制只发送了前 ${text.length} 字符，内容被截断]`;
+    }
+    selected.unshift(text === full ? m : { ...m, blocks: [{ kind: 'text', text }] });
     used += cost;
   }
 
@@ -281,7 +298,15 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
   const systemContent = baseSystem + buildTimeContext() + memoryPrompt;
   const apiMessages: ApiMessage[] = [{ role: 'system', content: systemContent }];
   for (const m of apiHistory) {
-    const content = extractText(m).slice(0, MAX_MESSAGE_CHARS);
+    /*
+     * 这里**不能再 slice**。
+     *
+     * `selectHistory` 已经把每条消息收窄到 MAX_MESSAGE_CHARS 以内，所以这行切片
+     * 对普通消息是空操作——它唯一的实际作用是把 `selectHistory` 追加的
+     * 「内容被截断」标记切掉（标记接在 6000 字符之后），让模型重新看不到"被切过"。
+     * 0.2.125 修的就是这个：加了标记却被下一行悄悄抹掉。
+     */
+    const content = extractText(m);
     apiMessages.push({ role: m.role, content: content || null });
   }
   apiMessages.push({ role: 'user', content: text.slice(0, 8000) });

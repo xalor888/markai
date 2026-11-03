@@ -14654,6 +14654,66 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.ok(!/已中断/.test(String(normal!.summary)), `正常完成的轮次不该标「已中断」，实际：${normal!.summary}`);
   });
 
+  /*
+   * `get_folder_content` 会被截断提示引导去用 offset——但它根本没有 offset 参数。
+   *
+   * `agent.ts` 的截断提示按 `PAGINATED_TOOLS` 分流：在集合里就说「请用 offset 分页」，
+   * 不在就说「请收窄查询」。而 `get_folder_content` 被放进了集合，schema 里却只有
+   * folderId/folderPath/limit/depth。
+   *
+   * 且 zod 对未知键是**静默剥离**（不是报错）——模型传 offset 不会失败，
+   * 而是拿到**和第一次一模一样的第一页**。它以为自己翻页了，实际在原地打转。
+   */
+  await okA('PAGINATED_TOOLS 里每个工具都必须真的支持 offset（否则模型翻页翻不动）', async () => {
+    const { executeTool } = await import('../src/lib/ai/tools');
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+
+    // 从源码里取 PAGINATED_TOOLS 集合（与 agent.ts 保持单一事实来源）
+    const agentSrc = readFileSync(resolve(process.cwd(), 'src/lib/ai/agent.ts'), 'utf8');
+    const m = agentSrc.match(/const PAGINATED_TOOLS[^=]*=\s*new Set\(\[([\s\S]*?)\]\)/);
+    assert.ok(m, '没能从 agent.ts 里解析出 PAGINATED_TOOLS');
+    const names = [...m![1]!.matchAll(/'([^']+)'/g)].map((x) => x[1]!);
+    assert.ok(names.length >= 3, `解析到的工具太少（${names.length}），正则可能失效`);
+
+    // 造一个文件夹，然后用 offset 调用每个工具，看它是否真的改变了返回
+    const folder = (await mockBookmarks.create({ parentId: '1', title: 'T41-F' })).id;
+    for (let i = 0; i < 12; i++) {
+      await mockBookmarks.create({ parentId: folder, title: 'T41-' + i, url: 'https://t41-' + i + '.test/' });
+    }
+
+    const baseArgsFor = (n: string): Record<string, unknown> => {
+      switch (n) {
+        case 'list_bookmarks':
+          return { parentId: folder, limit: 5 };
+        case 'list_all_folders':
+          return { limit: 5 };
+        case 'cleanup_sweep':
+          return { folderId: folder, limit: 5, dryRun: true, checkReachable: false };
+        case 'get_folder_content':
+          return { folderId: folder, limit: 5 };
+        case 'export_bookmarks':
+          return { folderId: folder, limit: 5, format: 'json' };
+        default:
+          return {};
+      }
+    };
+
+    const notPaginating: string[] = [];
+    for (const n of names) {
+      const base = await executeTool(n, JSON.stringify(baseArgsFor(n)));
+      const shifted = await executeTool(n, JSON.stringify({ ...baseArgsFor(n), offset: 5 }));
+      const same = base.result === shifted.result;
+      console.log(`   [DBG] ${n}: offset 生效=${!same}`);
+      if (same) notPaginating.push(n);
+    }
+    assert.deepEqual(
+      notPaginating,
+      [],
+      `这些工具在 PAGINATED_TOOLS 里，但传 offset 拿到的还是同一份结果（zod 把 offset 静默丢了）：${notPaginating.join('、')}`,
+    );
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

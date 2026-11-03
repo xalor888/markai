@@ -19,11 +19,19 @@ const MAX_MESSAGE_CHARS = 6000;
  *  仍超长时用 offset/maxItems 分页让模型分批消化 */
 const MAX_TOOL_RESULT_CHARS = 120_000;
 /** 支持 offset 翻页的工具：截断提示只能对这些说"用 offset 继续" */
+/**
+ * 支持 offset 分页的**写类/列表**工具。截断提示据它分流：
+ * 在集合里说「请用 offset 分页」，不在就说「请收窄查询」。
+ *
+ * 这份名单必须与各工具 schema 里的 `offset` 参数**严格一致**：
+ * zod 对未知键是**静默剥离**，模型传了不收的 offset 不会报错，
+ * 而是拿到和第一次一模一样的页——它以为自己翻页了，实际在原地打转。
+ * （`get_folder_content` 就因为被误列在这里踩过：它只有 limit/depth，没有 offset。）
+ */
 const PAGINATED_TOOLS: ReadonlySet<string> = new Set([
   'list_bookmarks',
   'list_all_folders',
   'cleanup_sweep',
-  'get_folder_content',
   'export_bookmarks',
 ]);
 /** 每条消息的固定开销（角色标记、元数据等） */

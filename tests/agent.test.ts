@@ -11184,7 +11184,7 @@ async function okA(name: string, fn: () => Promise<void> | void) {
      * 移动幂等看不出，但 create_bookmark / copy_bookmark 会**造出重复书签**。
      * 更糟的是那条带工具记录的消息会被删掉，用户再也看不到"其实执行过了"。
      */
-    const { retrySafety, mutatedEmptyReplyNote } = await import('../src/lib/chat/retry-safety');
+    const { retrySafety, mutatedEmptyReplyNote, cancelNote } = await import('../src/lib/chat/retry-safety');
 
     const toolBlock = (name: string, status: 'done' | 'error' | 'canceled' = 'done'): any => ({
       kind: 'tool',
@@ -11239,6 +11239,33 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       const r = retrySafety([toolBlock('search_bookmarks', 'canceled')]);
       assert.equal(r.mutations, 0);
       assert.equal(r.safeToRegenerate, true);
+    });
+
+    /*
+     * 取消后的提示语必须说清「这一轮动没动书签」。
+     *
+     * 只说「已停止生成」的话，用户分不清是被取消的纯读任务（重来即可），
+     * 还是批量移动跑到一半（已经移走了一部分，撤销点里也有，不撤销就以为没动）。
+     */
+    ok('取消提示：只读任务被取消时说明未影响书签', () => {
+      const note = cancelNote([toolBlock('search_bookmarks', 'canceled')]);
+      assert.match(note, /已停止生成/, note);
+      assert.ok(!/撤销/.test(note), `纯读被取消时不该让用户去点撤销：${note}`);
+    });
+
+    ok('取消提示：写类改动被取消时说明去点撤销', () => {
+      const note = cancelNote([toolBlock('move_bookmarks', 'canceled')]);
+      assert.match(note, /已停止生成/, note);
+      assert.match(note, /1 个改动/, `应报出改动数：${note}`);
+      assert.match(note, /撤销/, `应指出去撤销：${note}`);
+    });
+
+    ok('取消提示：多个改动的数量要如实累加', () => {
+      const note = cancelNote([
+        toolBlock('move_bookmarks', 'done'),
+        toolBlock('create_bookmark', 'canceled'),
+      ]);
+      assert.match(note, /2 个改动/, `应报 2 个改动：${note}`);
     });
 
     ok('文案不再提"重新生成"，改为指向撤销', () => {

@@ -59,3 +59,20 @@ export function retrySafety(blocks: ChatBlock[]): RetrySafety {
 export function mutatedEmptyReplyNote(mutations: number): string {
   return `（Agent 没有写回复，但这一轮已经执行了 ${mutations} 个改动。需要继续请直接说下一句；要退回可点「撤销」。）`;
 }
+
+/**
+ * 用户点了「停止」之后，消息末尾该追加什么。
+ *
+ * 只说「已停止生成」是不够的：用户不知道这一轮到底动了书签没有。
+ *   - 纯读工具被取消 → 什么都没改，继续或重来都行（别让他去点撤销白折腾）
+ *   - 写类工具被取消 → **已经有部分落地**（撤销点里也有），必须告诉他可以退回哪
+ *
+ * 这里复用 `retrySafety` 的 mutations 计数，而不是去解析每个工具结果里的
+ * `moved`/`created` 字段——那些字段名各工具不同、还可能缺省，解析出来容易说错数字。
+ * 报「执行了 N 个改动操作」是能确证的。
+ */
+export function cancelNote(blocks: ChatBlock[]): string {
+  const { mutations } = retrySafety(blocks);
+  if (mutations === 0) return '\n（已停止生成）';
+  return `\n（已停止生成；这一轮已执行 ${mutations} 个改动，要退回请点「撤销」。）`;
+}

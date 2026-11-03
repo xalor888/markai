@@ -1,7 +1,7 @@
 /** ── Agent 聊天 store（多会话、流式状态、待删清单，持久化到 chrome.storage.local） ── */
 
 import { create } from 'zustand';
-import { retrySafety } from '@/lib/chat/retry-safety';
+import { retrySafety, cancelNote } from '@/lib/chat/retry-safety';
 import { uid } from '@/lib/format';
 import { pushToast } from '@/lib/toast';
 import { MUTATING_TOOLS } from '@/lib/ai/tools';
@@ -703,11 +703,17 @@ export const useAIStore = create<AIState>((set, get) => ({
           msgs.map((m) => (m.id === evt.messageId ? { ...m, streaming: false } : m)),
         );
         if (evt.type === 'chat:cancelled') {
-          // 明确提示已停止（若消息已有内容则追加小字标记）
+          /*
+           * 取消后的提示要**说清这一轮动没动书签**。
+           *
+           * 原来只说「已停止生成」：用户不知道是被取消的纯读任务（什么都没改，重来即可），
+           * 还是批量移动跑到一半（已经移走了一部分，撤销点里也有）。
+           * 后者不去撤销就会以为"停了就等于没动"。
+           */
           updateActiveMessages(set, (msgs) =>
             msgs.map((m) =>
               m.id === evt.messageId && m.blocks.length > 0
-                ? { ...m, blocks: [...m.blocks, { kind: 'text', text: '\n（已停止生成）' }] }
+                ? { ...m, blocks: [...m.blocks, { kind: 'text', text: cancelNote(m.blocks) }] }
                 : m,
             ),
           );

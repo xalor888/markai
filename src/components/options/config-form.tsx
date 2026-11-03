@@ -7,7 +7,7 @@ import { CATEGORY_LABELS, type MemoryCategory } from '@/lib/ai/memory';
 import { clearUndoPoints } from '@/lib/undo/recorder';
 import { countTree, toJsonExport, toNetscapeHtml } from '@/lib/bookmarks/export-file';
 import { useThemeStore, type Theme } from '@/stores/themeStore';
-import { PROVIDERS, getPreset, getModelContextWindow } from '@/lib/providers';
+import { PROVIDERS, getPreset, getModelContextWindow, MIN_CONTEXT_WINDOW, MAX_CONTEXT_WINDOW } from '@/lib/providers';
 import { parseCustomHeaders } from '@/lib/ai/request-headers';
 import type { OneShotOutbound } from '@/lib/ai/types';
 import { pushToast } from '@/lib/toast';
@@ -358,9 +358,17 @@ export function ConfigForm() {
         if (res.ok && res.models.length > 0) {
           setRemoteModels(res.models);
           pushToast(res.message, { variant: 'success' });
-          // 服务商返回了当前模型上下文长度 → 自动填入设置
-          if (typeof res.contextWindow === 'number' && res.contextWindow >= 8000) {
-            void update({ contextWindow: res.contextWindow });
+          /*
+           * 服务商返回了当前模型上下文长度 → 自动填入设置。
+           *
+           * 必须按 effectiveContextWindow 的同一组边界收窄：以前这里只校验了下限，
+           * 服务商报个 1000 万就原样存进去，随后被静默钳回 200 万——
+           * toast 说「上下文 10000000」、实际生效 2000000，用户被两个数字耍。
+           */
+          if (typeof res.contextWindow === 'number' && res.contextWindow >= MIN_CONTEXT_WINDOW) {
+            void update({
+              contextWindow: Math.min(Math.round(res.contextWindow), MAX_CONTEXT_WINDOW),
+            });
           }
         } else {
           pushToast('获取模型列表失败', { description: res.message, variant: 'destructive' });

@@ -185,6 +185,16 @@ function clamp(n: number | undefined, min: number, max: number, fallback: number
  * 新代码请勿再用它当兜底——兜底一律走 `getModelContextWindow(model)`。
  */
 export const LEGACY_CONTEXT_WINDOW = 1_048_576;
+/**
+ * 上下文窗口的收窄区间。
+ *
+ * 导出是为了让**所有写入点共用同一组边界**：以前只有 effectiveContextWindow
+ * 里钳，而「拉取模型列表时自动填入」那条路径只校验了下限（>= 8000）。
+ * 服务商报个 1000 万就被原样存进去，随后被静默钳回 200 万——
+ * toast 告诉用户一个数、实际用的是另一个。
+ */
+export const MIN_CONTEXT_WINDOW = 2_000;
+export const MAX_CONTEXT_WINDOW = 2_000_000;
 /** 当前配置结构版本（`configVersion`）：写入即代表"contextWindow 语义已是跟随模型" */
 export const CONFIG_VERSION = 1;
 /** 工具默认返回条数：固定 2000+（列表类工具未显式传 limit 时） */
@@ -201,7 +211,7 @@ export function effectiveContextWindow(model: string, saved?: Partial<AIConfig> 
   const known = getModelContextWindow(model);
   const legacy = saved?.configVersion === undefined;
   const explicit = !legacy && typeof saved?.contextWindow === 'number' ? saved.contextWindow : undefined;
-  return clamp(explicit ?? known, 2000, 2_000_000, known);
+  return clamp(explicit ?? known, MIN_CONTEXT_WINDOW, MAX_CONTEXT_WINDOW, known);
 }
 
 /**

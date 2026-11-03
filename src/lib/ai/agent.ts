@@ -5,6 +5,7 @@ import { formatMemoriesForPrompt, getMemories, type MemoryItem } from './memory'
 import { buildTimeContext, PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT, TOOL_DEFINITIONS } from './prompts';
 import { executeTool, type ToolOutput } from './tools';
 import { applyPlan, buildPlan, classifyTool, stepCountOf, type PlannedStep } from './turn-plan';
+import { MAX_CONTEXT_WINDOW, MIN_CONTEXT_WINDOW } from '@/lib/providers';
 import { beginUndoTransaction, endUndoTransaction } from '@/lib/undo/recorder';
 import type { AIConfig, ChatMessage, ChatOutbound, ToolCallRecord } from './types';
 
@@ -235,7 +236,7 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
 
   // 上下文预算 = 用户填写的模型上下文长度 × 压缩阈值，再扣除系统提示与工具定义的固定开销
   // （否则固定约 3k+ token 会把小窗口模型直接撑爆，且工具循环回填会持续膨胀）
-  const window = Math.min(Math.max(config.contextWindow ?? 128000, 2000), 2_000_000);
+  const window = Math.min(Math.max(config.contextWindow ?? 128000, MIN_CONTEXT_WINDOW), MAX_CONTEXT_WINDOW);
   const threshold = Math.min(Math.max(config.compressThreshold ?? 0.8, 0.5), 0.95);
   const budget = Math.max(Math.round(window * threshold) - fixedOverheadTokens(activeMemories), 300);
   const apiHistory = selectHistory(history, budget, config.autoCompress ?? false);

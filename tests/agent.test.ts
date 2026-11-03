@@ -13227,6 +13227,57 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     }
   });
 
+  /*
+   * 上下文窗口的边界必须只有一组，且**所有写入点都按它收窄**。
+   *
+   * 「拉取模型列表时自动填入」那条路径以前只校验了下限（>= 8000），没有上限。
+   * 服务商报个 1000 万就原样存进配置，随后被 effectiveContextWindow 静默钳回 200 万——
+   * toast 说「上下文 10000000」、实际生效 2000000，用户被两个数字耍。
+   *
+   * 所以这里验两件事：常量本身的行为，以及写入路径确实用了这组常量。
+   */
+  await okA('上下文窗口边界只有一组，且自动填入也按它收窄', async () => {
+    const { effectiveContextWindow, MIN_CONTEXT_WINDOW, MAX_CONTEXT_WINDOW } = await import('../src/lib/providers');
+
+    assert.equal(MIN_CONTEXT_WINDOW, 2_000, '下限应为 2000');
+    assert.equal(MAX_CONTEXT_WINDOW, 2_000_000, '上限应为 200 万');
+
+    // 超出上限的显式配置必须被钳回来，而不是静默留下一个用不上的值
+    const huge = effectiveContextWindow('deepseek-v4-flash', {
+      configVersion: 1,
+      contextWindow: 10_000_000,
+    });
+    assert.equal(huge, MAX_CONTEXT_WINDOW, `1000 万应被钳到上限，实际 ${huge}`);
+    // 低于下限同理
+    const tiny = effectiveContextWindow('deepseek-v4-flash', { configVersion: 1, contextWindow: 100 });
+    assert.equal(tiny, MIN_CONTEXT_WINDOW, `100 应被钳到下限，实际 ${tiny}`);
+    // 区间内的值必须原样生效（护栏不该误伤正常配置）
+    const ok = effectiveContextWindow('deepseek-v4-flash', { configVersion: 1, contextWindow: 512_000 });
+    assert.equal(ok, 512_000, `区间内的值必须原样生效，实际 ${ok}`);
+
+    /*
+     * 写入路径也必须用这组常量。config-form 里的自动填入如果只校验下限，
+     * 就会出现「存进去的值和生效的值不是同一个」。这里从源码确认它引用了上限。
+     */
+    const { readFileSync } = await import('node:fs');
+    const { resolve } = await import('node:path');
+    const { fileURLToPath } = await import('node:url');
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const form = readFileSync(resolve(root, 'src/components/options/config-form.tsx'), 'utf8');
+
+    assert.ok(
+      form.includes('MAX_CONTEXT_WINDOW'),
+      '自动填入上下文窗口必须按上限收窄，否则服务商报多大就存多大、随后被静默钳回',
+    );
+    assert.ok(
+      /Math\.min\(Math\.round\(res\.contextWindow\), MAX_CONTEXT_WINDOW\)/.test(form),
+      '自动填入必须真的把 contextWindow 钳到上限（正则没匹配上，写法可能变了）',
+    );
+    // 不该再有用硬编码字面量写的边界（那正是会漂移的根源）
+    const hardcoded = form.match(/contextWindow\s*[<>=!]==?\s*[0-9_]{6,}/);
+    assert.ok(!hardcoded, `还在用硬编码字面量当边界：${JSON.stringify(hardcoded?.[0])}，请改用导出的常量`);
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

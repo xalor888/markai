@@ -1061,6 +1061,62 @@ async function run() {
     await cdp.send('Target.closeTarget', { targetId: t }).catch(() => {});
   }
 
+  /* ══════════ 9.2845 安全说明不能一边让你配中转、一边说没有中转 ══════════
+   *
+   * 设置页的「安全机制」原先无条件写着「请求由后台直发所选服务商，无中间服务器」。
+   * 但同一个页面上就有「自定义（OpenAI 兼容）」预设，文档明写它是给
+   * **中转站/代理** 用的，Base URL 也完全可填。于是这句话在用户真去配了中转时
+   * 就是假的——而它出现在"安全机制"这个最不该说错话的地方。
+   */
+  console.log('\n[9.2845] 安全说明与自定义端点不自相矛盾');
+  {
+    const { targetId: st2 } = await cdp.send('Target.createTarget', {
+      url: `chrome-extension://${EXT_ID}/options.html`,
+    });
+    const { sessionId: ssid2 } = await cdp.send('Target.attachToTarget', { targetId: st2, flatten: true });
+    await cdp.send('Page.enable', {}, ssid2);
+    const optEv = async (expr) => {
+      const r = await cdp.send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true }, ssid2);
+      if (r.exceptionDetails) return null;
+      return r.result?.value;
+    };
+    await waitFor(async () => await optEv(`!!document.body.innerText.includes('安全机制')`), 10000);
+
+    const sec = await optEv(`(() => {
+      const hs = [...document.querySelectorAll('h1,h2,h3,h4')];
+      const h = hs.find((e) => (e.textContent || '').trim() === '安全机制');
+      if (!h) return { found: false };
+      // 取这一节所在的卡片全文
+      let box = h;
+      for (let i = 0; i < 4 && box.parentElement; i++) {
+        box = box.parentElement;
+        if ((box.textContent || '').includes('API Key')) break;
+      }
+      // 注意反斜杠要写双份：这段代码在模板字面量里，单个 \s 会被当成非法转义
+      // 而丢掉反斜杠，发给浏览器的表达式就变成 /s+/g——把字母 s 全换成空格。
+      // 实测症状：Base URL 变成 Ba e URL、Moonshot 变成 Moon hot，
+      // 而断言在查 Base URL，于是莫名转红。
+      const raw = box.textContent || '';
+      return { found: true, text: raw.replace(/\\s+/g, ' ') };
+    })()`);
+
+    check('设置页有「安全机制」这一节', sec.found === true, JSON.stringify(sec));
+    check(
+      '安全说明不再无条件声称「无中间服务器」',
+      sec.found === true && !(sec.text || '').includes('无中间服务器'),
+      JSON.stringify({ text: (sec.text || '').slice(0, 200) }),
+    );
+    check(
+      '安全说明如实说明自定义 Base URL 会经过那个地址',
+      sec.found === true && /Base URL/.test(sec.text || '') && /中转/.test(sec.text || ''),
+      JSON.stringify({ text: (sec.text || '').slice(0, 260) }),
+    );
+
+    await cdp.send('Target.closeTarget', { targetId: st2 });
+    await sleep(200);
+  }
+
+
   /* ══════════ 9.282 设置页能导出书签文件 ══════════ */
   console.log('\n[9.282] 书签导出');
   {
@@ -3511,7 +3567,8 @@ async function run() {
         manifestVersion: manifest.version,
         shownVersion: (ver?.textContent || '').trim(),
         hasPendingCard: !!document.querySelector('[data-testid="popup-pending"]'),
-        organizeText: (org?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 120),
+        // 同上：模板字面量里必须写 \\s，否则反斜杠被丢、变成 /s+/g 把字母 s 换成空格
+        organizeText: (org?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 120),
       };
     })()`);
     /*

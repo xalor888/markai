@@ -6,7 +6,7 @@ import { buildTimeContext, PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT, TOOL_DEFINITION
 import { executeTool, type ToolOutput } from './tools';
 import { applyPlan, buildPlan, classifyTool, stepCountOf, type PlannedStep } from './turn-plan';
 import { MAX_CONTEXT_WINDOW, MIN_CONTEXT_WINDOW } from '@/lib/providers';
-import { beginUndoTransaction, endUndoTransaction } from '@/lib/undo/recorder';
+import { beginUndoTransaction, endUndoTransaction, setRecordingOwner, takeDroppedOpCount } from '@/lib/undo/recorder';
 import type { AIConfig, ChatMessage, ChatOutbound, ToolCallRecord } from './types';
 
 /** 单轮对话中工具调用轮数无上限（由死循环检测与连续失败保护兜底，不限制正常任务） */
@@ -480,6 +480,12 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
          *      auto_categorize）每处理一批都会调 onProgress，在这里抛出让它们中途真停。
          */
         if (signal.aborted) return { error: '已取消，这一步没有执行' };
+        /*
+         * 声明"这一轮正在记账"：两个窗口同时跑时，被抢占的那一轮后续操作不能
+         * 落进新轮次的事务（否则在另一个窗口点撤销会撤错对象）。
+         */
+        setRecordingOwner(messageId);
+        try {
         return {
           out: await executeTool(tc.function.name, tc.function.arguments, (text) => {
             // 长任务进度：转发为 tool_progress 事件（工具块实时显示，同时构成 SW 活跃信号）
@@ -487,6 +493,9 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
             if (signal.aborted) throw new Error('已取消，任务中断');
           }),
         };
+        } finally {
+          setRecordingOwner(null);
+        }
       } catch (e) {
         return { error: e instanceof Error ? e.message : String(e) };
       }

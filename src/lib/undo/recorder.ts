@@ -230,9 +230,45 @@ async function persistPending(force = false): Promise<void> {
   });
 }
 
+/**
+ * 当前正在执行工具、有权往事务里记账的轮次。
+ *
+ * 为什么需要它：两个窗口可能**同时**跑 Agent（各一条 Port，各自 begin）。
+ * `beginUndoTransaction` 遇到已有 active 会先把它收尾，于是**被抢占那一轮的后续操作
+ * 会落进新轮次的事务**——在 B 窗口点撤销，会把 A 窗口的删除也一起还原（撤错对象）。
+ * 实测：A 删 a1 → B begin → A 删 a2 → B 的撤销点里出现了 `delete:a2`。
+ *
+ * `endUndoTransaction(expectedRunId)` 早就有防抢占守卫（迟到的收尾不动别人的事务），
+ * 但记账这一侧没有对称的保护，所以在这里补。
+ */
+let recordingOwner: string | null = null;
+
+/** 由 agent 在每个工具执行前设置、执行后清除 */
+export function setRecordingOwner(runId: string | null): void {
+  recordingOwner = runId;
+}
+
+/** 被抢占后丢弃的操作条数（供调用方如实告知用户） */
+let droppedBecauseSuperseded = 0;
+export function takeDroppedOpCount(): number {
+  const n = droppedBecauseSuperseded;
+  droppedBecauseSuperseded = 0;
+  return n;
+}
+
 /** 记录一条可逆操作。没有活动事务时静默忽略（例如测试或非 Agent 触发的写入）。 */
 export function recordOp(op: UndoOp): void {
-  active?.ops.push(op);
+  if (!active) return;
+  /*
+   * 归属不符 → 丢弃，**不写进别人的事务**。
+   * 丢掉这条撤销记录比"撤错对象"好：前者少一条可撤销，后者会让用户在 B 窗口
+   * 点一下撤销，把 A 窗口刚做的删除也一起还原。
+   */
+  if (recordingOwner !== null && active.runId !== recordingOwner) {
+    droppedBecauseSuperseded++;
+    return;
+  }
+  active.ops.push(op);
   void persistPending();
 }
 

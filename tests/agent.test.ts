@@ -14150,11 +14150,76 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     assert.equal((await readUndoState()).points.length >= 1 || true, true);
   });
 
-  console.log(`\n全部通过：${passed} 项 ✔`);
-})().catch((e) => {
-  console.error('\n❌ 测试失败:', e);
-  process.exit(1);
-});
+  /*
+   * 两个窗口同时整理：B 开始时**强制关掉** A 的事务（`beginUndoTransaction` 里
+   * `if (active) await endUndoTransaction()` 没传 runId），于是 A 后续的操作
+   * 落进了 B 的事务——**撤销 B 会把 A 的操作一起撤掉**。
+   *
+   * `endUndoTransaction(expectedRunId)` 本身有防抢占守卫（迟到的收尾不动别人的事务），
+   * 但 begin 这一侧没有对称的保护。
+   */
+  await okA('两个轮次交错：后开始的不该把先开始的后续操作吞进自己的撤销点', async () => {
+    const {
+      beginUndoTransaction,
+      endUndoTransaction,
+      resetUndoTransactionForTest,
+      setRecordingOwner,
+      readUndoState: readUndoStatePublic2,
+    } = await import('../src/lib/undo/recorder');
+    const { jRemove } = await import('../src/lib/undo/mutations');
+
+    storageMap.delete('markai.undo');
+    storageMap.delete('markai.undo.pending');
+    resetUndoTransactionForTest();
+
+    const folder = (await mockBookmarks.create({ parentId: '1', title: 'T36-F' })).id;
+    const mk = async (t: string) => (await mockBookmarks.create({ parentId: folder, title: t, url: 'https://t36.test/' + t })).id;
+    const a1 = await mk('A-1');
+    const a2 = await mk('A-2');
+
+    // 窗口 A 开始并做一个操作
+    await beginUndoTransaction('run-A');
+    setRecordingOwner('run-A');
+    await jRemove(a1);
+
+    // 窗口 B 插进来开始（这会强制结束 A 的事务）
+    await beginUndoTransaction('run-B');
+
+    // 窗口 A 继续做第二个操作——它不该记进 B 的事务
+    setRecordingOwner('run-A');
+    await jRemove(a2);
+    setRecordingOwner(null);
+
+    // A 收尾（runId 不匹配，应无操作）
+    const pointA = await endUndoTransaction('run-A');
+    // B 收尾
+    const pointB = await endUndoTransaction('run-B');
+
+    console.log('   [DBG] pointA:', pointA ? pointA.ops.length : null, 'pointB:', pointB ? pointB.ops.length : null);
+
+    /*
+     * 期望：A 的第二个操作不该出现在 B 的撤销点里。
+     * 否则用户在 B 窗口点撤销，会把 A 窗口的删除也一起还原（撤错对象）。
+     */
+    /*
+     * 期望：A 的第二个操作**不该出现在 B 的撤销点里**。
+     * 否则用户在 B 窗口点撤销，会把 A 窗口的删除也一起还原（撤错对象）。
+     * B 自己一条操作都没做，所以它可能是 null（空事务 endUndoTransaction 返回 null）——
+     * 那也是合规的。关键是：**B 里不能有 A 的东西**。
+     */
+    const bOps = pointB?.ops ?? [];
+    const bTargetsA2 = bOps.some((o) => o.kind === 'delete' && (o as { id?: string }).id === a2);
+    assert.ok(
+      !bTargetsA2,
+      `B 的撤销点里不该有 A 的第二个操作（否则在 B 点撤销会动到 A 的改动）。pointB ops=${JSON.stringify(bOps.map((o) => o.kind + ':' + ((o as { id?: string }).id ?? '')))}`,
+    );
+    // A 被抢占前完成的那个操作应保留为独立撤销点，不该丢
+    const allPts = await readUndoStatePublic2();
+    const aPoint = allPts.points.find((pt) => pt.runId === 'run-A');
+    assert.ok(aPoint, `A 被抢占前完成的那个操作应保留为独立撤销点，实际 runIds=${allPts.points.map((pt) => pt.runId).join(',')}`);
+    assert.equal(aPoint!.ops.length, 1, `A 的点里应只有它自己的那一条，实际 ${aPoint!.ops.length}`);
+  });
+
 await okA('命令面板派发的自定义事件，都有人接', async () => {
   const { readFileSync } = await import('node:fs');
   const { resolve } = await import('node:path');
@@ -14222,4 +14287,11 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
   // 反向：标签表里多出来的键也是腐烂（工具已不存在）
   const stale = Object.keys(TOOL_META).filter((n) => !IMPLEMENTED_TOOL_NAMES.has(n));
   assert.deepEqual(stale, [], `标签表里这些工具已经不存在了：${JSON.stringify(stale)}`);
+});
+
+
+  console.log(`\n全部通过：${passed} 项 ✔`);
+})().catch((e) => {
+  console.error('\n❌ 测试失败:', e);
+  process.exit(1);
 });

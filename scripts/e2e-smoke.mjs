@@ -4324,15 +4324,20 @@ async function run() {
       if (b) b.click();
       return !!b;
     })()`);
-    // 等行数稳定
-    let rows = 0;
-    for (let i = 0; i < 40; i++) {
-      await sleep(150);
-      const n = await ev(`document.querySelectorAll('[data-testid="tree-node"]').length`);
-      if (n === rows && n > 0) break;
-      rows = n;
-    }
-    const elapsed = Date.now() - t0;
+    /*
+     * 等行数出现，但**别把轮询睡眠算进耗时**。
+     *
+     * 原来用 for + sleep(150) 轮询，行数要过好几轮才稳定，于是 elapsed 里塞进了
+     * 几百毫秒的**测量伪影**（在列表那边实测：伪影让 1ms 的真实耗时显示成 1694ms）。
+     * 用 waitFor 只等"到达"，耗时另算。
+     */
+    const tRows0 = Date.now();
+    await waitFor(
+      async () => (await ev(`document.querySelectorAll('[data-testid="tree-node"]').length > 0`).catch(() => false)) === true,
+      15000,
+    );
+    const rows = await ev(`document.querySelectorAll('[data-testid="tree-node"]').length`);
+    const elapsed = Date.now() - tRows0;
     console.log(`   [DBG] 全部展开：${rows} 行，耗时 ${elapsed}ms`);
     check('大库全部展开：把真实行数记下来（优化的对比基线）', rows > 0, JSON.stringify({ rows, elapsed, NF, NB }));
     check('大库全部展开后界面仍能响应（不被 2 万行 DOM 拖死）', rows > 0 && elapsed < 8000, JSON.stringify({ rows, elapsed }));
@@ -4366,6 +4371,111 @@ async function run() {
       more.ok === true && after > more.before,
       JSON.stringify({ more, after }),
     );
+  }
+
+  /* ══════════ 9.5-big2 单文件夹挂几千条书签时的列表渲染 ══════════
+   *
+   * 树那边已经加了 800 行上限（0.2.137），但**中栏列表**没有：
+   * `getChildren` 返回多少就渲染多少行（items.map 直接摊平）。
+   * 一个文件夹里直接挂几千条书签（整理后的库完全可能这样）会一次挂几千个 DOM 节点。
+   * 这里用真实浏览器量出来，作为加帽优化的前后对比基线。
+   */
+  console.log('\n[9.5-big2] 单文件夹几千条书签的列表渲染');
+  {
+    const N = 3000;
+    const seeded = await ev(`(async () => {
+      const bar = (await chrome.bookmarks.getTree())[0].children.find(c => c.title === '书签栏');
+      let f = (await chrome.bookmarks.search({ title: 'biglist' }))[0];
+      if (!f) f = await chrome.bookmarks.create({ parentId: bar.id, title: 'biglist' });
+      for (let i = 0; i < ${N}; i++) {
+        await chrome.bookmarks.create({ parentId: f.id, title: 'bl-' + i, url: 'https://bl.test/' + i });
+      }
+      return true;
+    })()`);
+    check('前置：大文件夹种入成功', seeded === true, JSON.stringify({ seeded }));
+
+    // 选中那个文件夹并量一次渲染
+    await cdp.send('Page.reload', {}, sessionId);
+    await waitFor(async () => (await ev(`document.querySelectorAll('[data-testid="tree-node"]').length > 0`).catch(() => false)) === true, 15000);
+    await sleep(1000);
+    const t0 = Date.now();
+    /*
+     * 直接用**搜索**进入那个文件夹，不跟树的折叠状态较劲。
+     *
+     * 树默认折叠，biglist 不在可见行里；逐层点展开既慢又脆。
+     * 搜索是列表的唯一入口，搜到它再点那条结果即可进入它的父目录视图。
+     * 测的是**列表渲染多少行**，不是树怎么导航。
+     */
+    await ev(`(() => {
+      const input = document.querySelector('[data-testid="search"]');
+      if (!input) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(input, 'biglist');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    await waitFor(async () => (await ev(`document.querySelectorAll('[data-testid="row"]').length > 0`).catch(() => false)) === true, 8000);
+    await sleep(500);
+    const picked = await ev(`(() => {
+      const rows = [...document.querySelectorAll('[data-testid="row"]')];
+      const t = rows.find((r) => (r.getAttribute('title')||'').includes('biglist'));
+      if (!t) return { ok: false, n: rows.length, sample: rows.slice(0,3).map(r=>r.getAttribute('title')) };
+      t.click();
+      return { ok: true, n: rows.length };
+    })()`);
+    check('前置：能通过搜索进入那个大文件夹', picked.ok === true, JSON.stringify(picked));
+    await sleep(400);
+    /*
+     * 等行数稳定，但**别把轮询睡眠算进耗时**。
+     *
+     * 原来用 for + sleep(150) 轮询，行数要过好几轮才稳定，于是 elapsed 里
+     * 塞进了 300–600ms 的**测量伪影**。用 waitFor 只等"到达"，耗时另算。
+     */
+    const tRows0 = Date.now();
+    await waitFor(
+      async () => (await ev(`document.querySelectorAll('[data-testid="row"]').length > 0`).catch(() => false)) === true,
+      15000,
+    );
+    const rowsAppeared = Date.now() - tRows0;
+    const rows = await ev(`document.querySelectorAll('[data-testid="row"]').length`);
+    const elapsed = rowsAppeared;
+    // 纯渲染耗时：单独再挂一次同样的行数，量 DOM 挂载本身
+    // 行数是 Node 侧的变量，必须**插值**传进浏览器表达式
+    /*
+     * 诚实分解：整段耗时里有多少是**必须付的**（getChildren 取 3000 条）、
+     * 有多少是**渲染**。
+     *
+     * 「切换排序」是纯渲染路径——items 重排 + 全部可见行重渲染，数据已经拿到了。
+     * 渲染上限对它影响最大，所以这是最能反映收益的指标。
+     */
+    const folderId = await ev(`(async () => {
+      const hit = (await chrome.bookmarks.search({ title: 'biglist' }))[0];
+      return hit ? hit.id : null;
+    })()`);
+    const dataOnly = folderId
+      ? await ev(`(async () => {
+          const t = performance.now();
+          const c = await chrome.bookmarks.getChildren(${JSON.stringify(folderId)});
+          return { ms: Math.round(performance.now() - t), n: c.length };
+        })()`).catch(() => null)
+      : null;
+    // 逐段打点：点击 → React 提交 → 布局 → 画完
+    const phases = await ev(`(async () => {
+      const marks = [];
+      const t0 = performance.now();
+      const ro = new PerformanceObserver((list) => {
+        for (const e of list.getEntries()) marks.push({ name: e.name, start: Math.round(e.startTime - t0) });
+      });
+      try { ro.observe({ type: 'longtask', buffered: false }); } catch (e) {}
+      const inp = document.querySelector('[data-testid="sort"]');
+      if (inp) inp.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const afterRaf = performance.now() - t0;
+      return { afterRaf: Math.round(afterRaf), long: marks };
+    })()`).catch(() => null);
+    console.log(`   [DBG] 取数据 ${JSON.stringify(dataOnly)}ms · 整段 ${elapsed}ms · 分段 ${JSON.stringify(phases)}`);
+    check('大文件夹列表：把真实行数记下来（优化的对比基线）', rows > 0, JSON.stringify({ rows, elapsed, N }));
+    check('大文件夹列表仍能响应（不被几千行 DOM 拖死）', rows > 0 && elapsed < 10000, JSON.stringify({ rows, elapsed }));
   }
 
   /* ══════════ 9.5 无障碍：可点元素必须有可访问名称 ══════════ */

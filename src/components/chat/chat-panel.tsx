@@ -289,7 +289,11 @@ export function ChatPanel({
   };
 
   return (
-    <div className={cn('flex h-full min-h-0 flex-col bg-card', className)} style={style}>
+    <div
+      data-testid="chat-panel"
+      className={cn('flex h-full min-h-0 flex-col bg-card', className)}
+      style={style}
+    >
       {/* 头部：紧凑单行，文件夹/模型截断显示，不互相挤压 */}
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
         <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-accent text-accent-foreground">

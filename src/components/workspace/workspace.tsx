@@ -483,14 +483,23 @@ export function Workspace({
             </ErrorBoundary>
           </div>
         ) : (
-          /* 侧边栏：Agent 面板为右侧抽屉，位移动画（移出视口时不可交互） */
+          /*
+            侧边栏：Agent 面板为右侧抽屉，位移动画（移出视口时不可交互）。
+
+            `w-full` 不是多余的：里面 ChatPanel 用 `maxWidth: min(100%, 560px)` 想把自己
+            钳在侧栏宽度内，但抽屉与内层容器原本都没有定宽（靠内容收缩适应），
+            百分比在收缩适应下解析为 auto，钳制**完全失效**。
+            实测：侧栏拖到 300px 时抽屉仍是 320px，左边 20px 被 overflow-hidden 切掉；
+            260px 时切掉 60px——输入框左侧和左对齐控件直接看不见又点不到。
+            给定宽后 `100%` 有了解析基准；`translate-x-full` 移动的是自身全宽，收起态不变。
+          */
           <div
             className={cn(
-              'absolute inset-y-0 right-0 z-20 transition-transform duration-150',
+              'absolute inset-y-0 right-0 z-20 w-full transition-transform duration-150',
               chatOpen ? 'translate-x-0' : 'pointer-events-none translate-x-full',
             )}
           >
-            <div className="relative h-full">
+            <div className="relative h-full w-full">
               {chatOpen && (
                 <ChatResizeHandle
                   onDragStart={() => {

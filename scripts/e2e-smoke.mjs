@@ -3514,6 +3514,33 @@ async function run() {
         organizeText: (org?.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 120),
       };
     })()`);
+    /*
+     * 弹窗真实宽度只有三百多像素。在宽标签页里打开 popup.html 测溢出是测不到的
+     * （视口比内容宽，永远不会溢出）——必须把视口压到真实尺寸。
+     * 侧边栏那次就是这样漏掉的：320px 的抽屉平移出去，宽视口下一样看不出来。
+     */
+    await cdp.send('Emulation.setDeviceMetricsOverride', {
+      width: 380,
+      height: 600,
+      deviceScaleFactor: 1,
+      mobile: false,
+    }, popSession);
+    await sleep(400);
+    const popOverflow = await popEv(`(() => {
+      const vw = document.documentElement.clientWidth;
+      const bad = [];
+      for (const el of document.querySelectorAll('*')) {
+        const r = el.getBoundingClientRect();
+        if (r.right > vw + 1) {
+          bad.push({ cls: (el.className || '').toString().slice(0, 80), w: Math.round(r.width), right: Math.round(r.right) });
+        }
+      }
+      return { vw, scrollOver: document.documentElement.scrollWidth - vw, count: bad.length, first: bad.slice(0, 3) };
+    })()`);
+    check('弹窗在 380px 真实宽度下没有横向溢出', popOverflow.scrollOver <= 1, JSON.stringify(popOverflow));
+    await cdp.send('Emulation.clearDeviceMetricsOverride', {}, popSession);
+    await sleep(200);
+
     check(
       '版本号与 manifest 一致',
       info.shownVersion === `v${info.manifestVersion}`,
@@ -3876,6 +3903,109 @@ async function run() {
       return { vw, count: bad.length, first: bad.slice(0, 4) };
     })()`);
     check('侧边栏没有横向溢出（紧凑布局成立）', spOverflow <= 1, JSON.stringify({ spOverflow, spWho }));
+
+    /*
+     * 侧边栏的宽度**是用户自己拖的**（Chrome 侧边栏可拉到很窄）。
+     * 宽标签页里打开 sidepanel.html 永远测不出溢出——必须把视口压到窄档位。
+     * 弹窗那次就是这样漏掉的：320px 抽屉平移出去，宽视口下一样看不出来。
+     */
+    for (const w of [360, 300, 260]) {
+      await cdp.send('Emulation.setDeviceMetricsOverride', {
+        width: w,
+        height: 640,
+        deviceScaleFactor: 1,
+        mobile: false,
+      }, ssid);
+      await sleep(350);
+      const narrow = await spEval(`(() => {
+        const vw = document.documentElement.clientWidth;
+        const bad = [];
+        for (const el of document.querySelectorAll('*')) {
+          const r = el.getBoundingClientRect();
+          // 只认真正超出视口的：收起态抽屉被 translate-x-full 移到右边是设计，
+          // 容器已 overflow-hidden 剪掉，不贡献 scrollWidth
+          if (r.right > vw + 1 && el.getClientRects().length > 0) {
+            const p = el.parentElement;
+            // 跳过被 overflow-hidden 祖先剪掉的（不可见、不产生滚动）
+            let clipped = false;
+            for (let a = el.parentElement; a; a = a.parentElement) {
+              const st2 = getComputedStyle(a);
+              if (st2.overflowX === 'hidden' || st2.overflowX === 'clip') { clipped = true; break; }
+            }
+            if (!clipped) bad.push({ cls: (el.className || '').toString().slice(0, 80), w: Math.round(r.width), right: Math.round(r.right) });
+          }
+        }
+        return { vw, scrollOver: document.documentElement.scrollWidth - vw, count: bad.length, first: bad.slice(0, 3) };
+      })()`);
+      check(`侧边栏在 ${w}px 窄宽度下没有横向溢出`, narrow.scrollOver <= 1, JSON.stringify(narrow));
+
+      /*
+       * 更要紧的是**抽屉打开时**：流式期间 compact 模式会自动打开 Agent 面板
+       * （workspace.tsx: `if (streaming && mode === 'compact' && !chatOpen) setChatOpen(true)`）。
+       * 面板宽度有 `maxWidth: min(100%, 560px)` 的钳制，但"钳住了"这件事必须实测——
+       * 面板比侧栏还宽的话，窄侧栏下整个应用会被撑出横向滚动。
+       */
+      // 开关在「更多」菜单里（more-menu.tsx: 展开/收起 Agent 面板），要先开菜单再点
+      const opened = await spEval(`(() => {
+        const more = document.querySelector('[aria-label="更多"]');
+        if (!more) return 'no-more-button';
+        more.click();
+        return 'more-opened';
+      })()`);
+      await sleep(300);
+      const clicked = await spEval(`(() => {
+        const items = [...document.querySelectorAll('button, [role="menuitem"]')];
+        const t = items.find((b) => (b.textContent || '').includes('展开 Agent 面板'));
+        if (!t) return 'no-item';
+        t.click();
+        return 'clicked';
+      })()`);
+      await sleep(500);
+      const withDrawer = await spEval(`(() => {
+        const vw = document.documentElement.clientWidth;
+        const d = document.querySelector('[class*="absolute"][class*="right-0"][class*="z-20"]');
+        const panel = document.querySelector('[data-testid="chat-panel"]');
+        return {
+          vw,
+          scrollOver: document.documentElement.scrollWidth - vw,
+          hasPanel: !!panel,
+          drawerW: panel ? Math.round(panel.getBoundingClientRect().width) : null,
+          drawerRight: panel ? Math.round(panel.getBoundingClientRect().right) : null,
+          translated: d ? d.className.includes('translate-x-0') : null,
+        };
+      })()`);
+      check(
+        `侧边栏 ${w}px 下打开 Agent 抽屉也不横向溢出`,
+        withDrawer.scrollOver <= 1,
+        JSON.stringify({ opened, clicked, withDrawer }),
+      );
+      check(
+        `侧边栏 ${w}px 下抽屉真的打开了（前置，否则下面的断言是空过）`,
+        withDrawer.hasPanel === true && withDrawer.translated === true && (withDrawer.drawerW ?? 0) > 0,
+        JSON.stringify({ withDrawer }),
+      );
+      check(
+        `侧边栏 ${w}px 下抽屉宽度不超过侧栏本身`,
+        (withDrawer.drawerW ?? 0) > 0 && withDrawer.drawerW <= w + 1,
+        JSON.stringify({ withDrawer }),
+      );
+      // 收回去，下一轮窄宽度从干净状态开始
+      await spEval(`(() => {
+        const more = document.querySelector('[aria-label="更多"]');
+        if (more) more.click();
+        return true;
+      })()`);
+      await sleep(250);
+      await spEval(`(() => {
+        const items = [...document.querySelectorAll('button, [role="menuitem"]')];
+        const t = items.find((b) => (b.textContent || '').includes('收起 Agent 面板'));
+        if (t) t.click();
+        return true;
+      })()`);
+      await sleep(400);
+    }
+    await cdp.send('Emulation.clearDeviceMetricsOverride', {}, ssid);
+    await sleep(200);
 
     await cdp.send('Target.closeTarget', { targetId: st });
     await sleep(200);

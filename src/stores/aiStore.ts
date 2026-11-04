@@ -47,8 +47,12 @@ const MAX_MESSAGES = 60;
  * 超出时**丢最旧的并明确告知**（见 deletionsCapWarned），不静默截断。
  */
 const PENDING_DELETIONS_LIMIT = 2000;
-/** 上限提示只弹一次：连发多批时不该刷屏 */
+/** 上限提示只在「真的丢了待处理提议」时弹一次：连发多批不该刷屏，但下次真丢要能再提示 */
 let deletionsCapWarned = false;
+/** 仅测试用：把上面的提示标记复位（否则跨用例残留，用例会互相串味） */
+export function resetDeletionsCapWarnedForTest(): void {
+  deletionsCapWarned = false;
+}
 /** 发送给模型的历史条数 */
 const HISTORY_LIMIT = 20;
 
@@ -695,15 +699,31 @@ export const useAIStore = create<AIState>((set, get) => ({
          */
         set((s) => {
           const merged = dedupeProposals([...s.pendingDeletions, ...(evt.record.deletions ?? [])]);
-          const dropped = Math.max(0, merged.length - PENDING_DELETIONS_LIMIT);
-          if (dropped > 0 && !deletionsCapWarned) {
+          const kept = merged.slice(-PENDING_DELETIONS_LIMIT);
+          /*
+           * 只统计**待处理**提议的丢失。
+           *
+           * 数组里混着三种状态：pending（用户还没看到）、executed/declined（早已处理完）。
+           * 超限时 slice(-N) 挤掉的是**最旧**的那批——大多数情况下是死记录，属于正常清理，
+           * 不该弹警报：用户去找「未列出的 100 条」永远找不到，因为那些本来就已经处理过了。
+           *
+           * 但若挤掉的里面有 pending，那是用户**真的少看到了提议**，必须说。
+           * 同时把提示复位：这样下一次真的丢 pending 时还会再提醒（此前是一次性 flag，
+           * 被假警报消耗掉之后，真丢时反而不提示了）。
+           */
+          const keptIds = new Set(kept.map((p) => p.id));
+          const droppedPending = merged.filter((p) => !keptIds.has(p.id) && p.status === 'pending').length;
+          if (droppedPending > 0 && !deletionsCapWarned) {
             deletionsCapWarned = true;
-            pushToast(`待删列表已达上限，${dropped} 条提议未列出`, {
+            pushToast(`待删列表已达上限，${droppedPending} 条提议未列出`, {
               description: `单次最多保留 ${PENDING_DELETIONS_LIMIT} 条待确认项。处理完当前这批后，再让 Agent 整理一次即可看到剩下的。`,
               variant: 'destructive',
             });
+          } else if (droppedPending === 0) {
+            // 这次没有真的丢提议（只清掉了已处理记录）→ 复位，下次真丢时还能提示
+            deletionsCapWarned = false;
           }
-          return { pendingDeletions: merged.slice(-PENDING_DELETIONS_LIMIT) };
+          return { pendingDeletions: kept };
         });
         // 工具改了书签结构 → 刷新书签树
         if (MUTATING_TOOLS.has(evt.record.name)) void useBookmarkStore.getState().loadTree();

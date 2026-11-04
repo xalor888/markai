@@ -14859,6 +14859,124 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     );
   });
 
+
+  /*
+   * 处理完的删除提议**永久占着上限**，于是之后每次整理的新提议都被丢掉。
+   *
+   * `resolveDeletions` 只改 status、不删条目，而 `pendingDeletions` 的 2000 上限
+   * 是按**整个数组**算的（界面显示时再按 status==='pending' 过滤）。
+   *
+   * 所以：一次大的清理把数组填满 → 用户逐条审批完（全变 executed/declined）→
+   * 数组仍然是 2000 条死记录 → 下一次整理的新提议一进来就被 slice 挤掉。
+   * 而且 `deletionsCapWarned` 是模块级一次性 flag，第二次连提示都没有。
+   *
+   * 用户视角：清理完一大批之后再整理，待删列表**永远是空的**——看起来像"没有需要删的"。
+   */
+  await okA('处理完的删除提议不该继续占着待删上限', async () => {
+    const { useAIStore } = await import('../src/stores/aiStore');
+    const { useToastStore } = await import('../src/lib/toast');
+
+    useToastStore.setState({ toasts: [] });
+    const mk = (n: number, tag: string) =>
+      Array.from({ length: n }, (_, i) => ({
+        id: 'q-' + tag + '-' + i,
+        bookmarkId: 'qb-' + tag + '-' + i,
+        title: 't' + i,
+        reason: 'r',
+        status: 'pending' as const,
+        createdAt: i,
+      }));
+
+    // 第一轮：填满 2000 条
+    useAIStore.setState({
+      pendingDeletions: mk(2000, 'old'),
+      conversations: [], activeId: null, messages: [], deletedIds: [], clearedIds: [],
+      streaming: true, streamingMessageId: 'm-dead',
+    });
+    // 用户把这 2000 条全部审批掉（executed / declined 都是终态）
+    useAIStore.setState({
+      pendingDeletions: useAIStore.getState().pendingDeletions.map((p, i) => ({
+        ...p,
+        status: i % 2 === 0 ? ('executed' as const) : ('declined' as const),
+      })),
+    });
+
+    // 第二轮：新的整理提交 100 条提议
+    useAIStore.setState({ streaming: true, streamingMessageId: 'm-new' });
+    useAIStore.getState().handleOutbound({
+      type: 'chat:tool_done',
+      messageId: 'm-new',
+      record: { id: 't-new', name: 'propose_deletions', args: '{}', status: 'done', deletions: mk(100, 'new') },
+    });
+
+    const all = useAIStore.getState().pendingDeletions;
+    const aliveNew = all.filter((p) => p.status === 'pending' && p.id.startsWith('q-new-')).length;
+    console.log(`   [DBG] 数组共 ${all.length} 条，其中新提议存活 ${aliveNew}/100`);
+
+    /*
+     * 关键断言：新的 100 条提议必须都还在。
+     * 如果死记录还占着位置，它们会被 slice(-2000) 挤掉一部分。
+     */
+    assert.equal(
+      aliveNew,
+      100,
+      `新提交的 100 条提议里有 ${100 - aliveNew} 条被丢弃——已处理过的记录还占着上限（数组 ${all.length} 条，大多已终态）`,
+    );
+  });
+
+
+  /*
+   * 假警报：被挤掉的全是**已处理过**的死记录，却提示「N 条提议未列出」。
+   *
+   * `dropped` 算的是 `merged.length - 上限`，不区分被丢的那些是 pending（用户还没看到）
+   * 还是 executed/declined（早就处理完了）。
+   *
+   * 于是：清理完一大批（2000 条全变终态）之后再来新提议，数组被挤出 100 条旧死记录，
+   * 却弹出「100 条提议未列出」——用户去找这 100 条，永远找不到，因为它们本来就已经处理过了。
+   *
+   * 更糟的是这次假警报把 `deletionsCapWarned` 消耗掉了：等真正丢 pending 提议时，反而**不提示**。
+   */
+  await okA('只丢已处理记录时不该弹「提议未列出」的假警报', async () => {
+    const { useAIStore, resetDeletionsCapWarnedForTest } = await import('../src/stores/aiStore');
+    const { useToastStore } = await import('../src/lib/toast');
+
+    // 复位模块级提示标记：否则被前面的用例置 true，这条用例就测不到假警报
+    resetDeletionsCapWarnedForTest();
+    useToastStore.setState({ toasts: [] });
+    const mk = (n: number, tag: string, status: 'pending' | 'executed' = 'pending') =>
+      Array.from({ length: n }, (_, i) => ({
+        id: 'w-' + tag + '-' + i,
+        bookmarkId: 'wb-' + tag + '-' + i,
+        title: 't' + i,
+        reason: 'r',
+        status,
+        createdAt: i,
+      }));
+
+    // 2000 条全部已执行（用户已经处理完）
+    useAIStore.setState({
+      pendingDeletions: mk(2000, 'done', 'executed'),
+      conversations: [], activeId: null, messages: [], deletedIds: [], clearedIds: [],
+      streaming: true, streamingMessageId: 'm-fake',
+    });
+    useAIStore.getState().handleOutbound({
+      type: 'chat:tool_done',
+      messageId: 'm-fake',
+      record: { id: 't-fake', name: 'propose_deletions', args: '{}', status: 'done', deletions: mk(100, 'fresh') },
+    });
+
+    const toasts = useToastStore.getState().toasts.map((t) => t.title);
+    const alive = useAIStore.getState().pendingDeletions.filter((p) => p.status === 'pending').length;
+    console.log(`   [DBG] 待处理 ${alive} 条，toasts=${JSON.stringify(toasts)}`);
+
+    assert.equal(alive, 100, '新的 100 条待处理提议应全部保留');
+    assert.deepEqual(
+      toasts,
+      [],
+      `被挤掉的全是已处理记录（不是用户没看到的提议），不该弹「未列出」的警报。实际 toasts=${JSON.stringify(toasts)}`,
+    );
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

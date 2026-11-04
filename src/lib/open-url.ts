@@ -110,3 +110,88 @@ export async function openUrls(
   }
   return { opened, failed };
 }
+
+/**
+ * 批量打开并**分组**，按实际结果如实提示。
+ *
+ * 为什么单独抽出来：两处调用点（书签树右键「在标签页组中打开」/ 多选多选版）都是
+ * `await Promise.all(list.map(...))` 然后统一提示。而 `Promise.all` 在**第一个失败时
+ * 立刻 reject**——其余的标签页可能已经建好了：
+ *
+ *   - 用户看到「打开失败」，实际开了 9 个（而且这 9 个没被分组）；
+ *   - 分组那一步被整个跳过，标签页散落在窗口里。
+ *
+ * 这里改成逐条结算：成功的照样分组，失败的逐条计数，提示说真话。
+ */
+export interface GroupedOpenOutcome extends OpenOutcome {
+  /** 实际进入标签页组的数量 */
+  grouped: number;
+  /** 分组失败的原因（组不成功不影响标签页已打开的事实） */
+  groupError?: string;
+}
+
+export async function openUrlsInGroup(
+  urls: string[],
+  opts: OpenOptions & { label?: string; groupTitle?: string; collapse?: boolean } = {},
+): Promise<GroupedOpenOutcome> {
+  if (urls.length === 0) return { opened: 0, failed: 0, grouped: 0 };
+
+  const results = await Promise.all(
+    urls.map(async (url) => {
+      try {
+        const tab = await createTab(url, opts);
+        const id = (tab as { id?: number } | undefined)?.id;
+        return { ok: true as const, id };
+      } catch (e) {
+        return { ok: false as const, message: failureMessage(url, e) };
+      }
+    }),
+  );
+
+  const okIds = results.filter((r): r is { ok: true; id: number | undefined } => r.ok).map((r) => r.id);
+  const tabIds = okIds.filter((id): id is number => typeof id === 'number');
+  const opened = results.filter((r) => r.ok).length;
+  const failed = results.length - opened;
+  const what = opts.label ?? '标签页';
+
+  let grouped = 0;
+  let groupError: string | undefined;
+  if (tabIds.length > 0) {
+    try {
+      const groupId = (await chrome.tabs.group({
+        tabIds: tabIds as [number, ...number[]],
+      })) as unknown as number;
+      grouped = tabIds.length;
+      if (opts.groupTitle) {
+        await chrome.tabGroups.update(groupId, { title: opts.groupTitle }).catch(() => {});
+      }
+      if (opts.collapse) {
+        await chrome.tabGroups.update(groupId, { collapsed: true }).catch(() => {});
+      }
+    } catch (e) {
+      // 组没建成，但标签页确实开了——不能因此报「打开失败」
+      groupError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  const firstFail = results.find((r) => !r.ok);
+  if (opened === 0) {
+    pushToast('打开失败', {
+      description: firstFail && !firstFail.ok ? firstFail.message : '浏览器拒绝了这次打开',
+      variant: 'destructive',
+    });
+  } else if (failed === 0) {
+    pushToast(
+      grouped > 0 ? `已在标签页组中打开 ${grouped} 个${what}` : `已打开 ${opened} 个${what}`,
+      grouped > 0 && !groupError ? { variant: 'success' } : { variant: 'default' },
+    );
+  } else {
+    // 部分成功：数字要分行说清，并带上首个失败原因
+    pushToast(`已打开 ${opened} 个，${failed} 个失败`, {
+      description: firstFail && !firstFail.ok ? firstFail.message : undefined,
+      variant: 'destructive',
+    });
+  }
+
+  return { opened, failed, grouped, ...(groupError ? { groupError } : {}) };
+}

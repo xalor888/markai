@@ -45,7 +45,7 @@ import { copyText } from '@/lib/clipboard';
 import { isSelfOrDescendant, resolveDropIndex } from '@/lib/bookmark-dnd';
 import { createDelayedOpen } from '@/lib/bookmarks/delayed-open';
 import { pushToast } from '@/lib/toast';
-import { openUrl, openUrls } from '@/lib/open-url';
+import { openUrl, openUrls, openUrlsInGroup } from '@/lib/open-url';
 import { moveManyWithToast } from '@/lib/bookmarks/bulk';
 import { cn } from '@/lib/utils';
 import { Favicon } from '@/components/common/favicon';
@@ -919,18 +919,17 @@ export function ContextMenuOverlay() {
       return;
     }
     if (urls.length > MAX_OPEN_AT_ONCE) tooManyToast(urls.length);
-    try {
-      const tabs = await Promise.all(list.map((url) => chrome.tabs.create({ url, active: false })));
-      const tabIds = tabs.map((t) => t.id).filter((id): id is number => id !== undefined);
-      if (tabIds.length > 0) {
-        const groupId = (await chrome.tabs.group({ tabIds: tabIds as [number, ...number[]] })) as unknown as number;
-        await chrome.tabGroups.update(groupId, { title: multiSelected ? `所选 ${tabIds.length} 个页面` : node?.title || '(未命名)' }).catch(() => {});
-        await chrome.tabGroups.update(groupId, { collapsed: true }).catch(() => {});
-      }
-      pushToast(`已在标签页组中打开 ${tabIds.length} 个页面`, { variant: 'success' });
-    } catch {
-      pushToast('打开失败', { variant: 'destructive' });
-    }
+    /*
+     * 逐条结算，不用 Promise.all：它在**第一个失败时就 reject**，
+     * 而其余标签页可能已经建好了——用户会看到「打开失败」，实际开了好几个，
+     * 而且分组那一步被整个跳过，标签页散在窗口里。`openUrlsInGroup` 负责说真话。
+     */
+    await openUrlsInGroup(list, {
+      active: false,
+      label: '页面',
+      groupTitle: multiSelected ? `所选 ${list.length} 个页面` : node?.title || '(未命名)',
+      collapse: true,
+    });
   };
   /** 复制网址：多选时批量复制全部选中 */
   const copyUrlsAction = () => {
@@ -1061,21 +1060,13 @@ export function ContextMenuOverlay() {
     }
     const list = urls.slice(0, MAX_OPEN_AT_ONCE);
     if (urls.length > MAX_OPEN_AT_ONCE) tooManyToast(urls.length);
-    try {
-      // 并行创建标签页后统一分组
-      const tabs = await Promise.all(list.map((url) => chrome.tabs.create({ url, active: false })));
-      const tabIds = tabs.map((t) => t.id).filter((id): id is number => id !== undefined);
-      if (tabIds.length > 0) {
-        // @types/chrome 中 group 返回类型为 Promise<number> & void，此处断言取 id
-        const groupId = (await chrome.tabs.group({ tabIds: tabIds as [number, ...number[]] })) as unknown as number;
-        await chrome.tabGroups.update(groupId, { title: node.title || '(未命名)' }).catch(() => {});
-        // 组折叠，避免刷屏（用户可展开）
-        await chrome.tabGroups.update(groupId, { collapsed: true }).catch(() => {});
-      }
-      pushToast(`已在标签页组中打开 ${tabIds.length} 个页面`, { variant: 'success' });
-    } catch {
-      pushToast('打开失败', { variant: 'destructive' });
-    }
+    // 同上：逐条结算，部分失败也要如实说，成功的那部分照样分组
+    await openUrlsInGroup(list, {
+      active: false,
+      label: '页面',
+      groupTitle: node.title || '(未命名)',
+      collapse: true,
+    });
   };
 
   /** 节点当前所在的根文件夹（书签栏/其他书签/移动设备） */

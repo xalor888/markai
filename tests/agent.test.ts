@@ -224,6 +224,8 @@ const mockCalls = {
   storageSet: 0,
   storageRemove: 0,
   tabsCreate: 0,
+  /** 最近一次 chrome.tabs.group 分到几个标签页 */
+  tabsGrouped: 0,
 };
 function resetMockCalls(): void {
   for (const k of Object.keys(mockCalls) as (keyof typeof mockCalls)[]) mockCalls[k] = 0;
@@ -234,7 +236,7 @@ function resetMockCalls(): void {
  * "同一个撤销点的两次回放重叠"这一竞态（否则只能靠 sleep 猜时序）。
  */
 /** 故障注入：tabs.create 整体失败，或只让指定 URL 失败（用于批量部分失败） */
-const tabsFail: { all: boolean; urls: string[] | null } = { all: false, urls: null };
+const tabsFail: { all: boolean; urls: string[] | null; group: boolean } = { all: false, urls: null, group: false };
 
 /** chrome.action 的调用记录（工具栏提示用） */
 const actionCalls: { badgeText: string[]; badgeColor: string[]; titles: string[] } = {
@@ -421,8 +423,18 @@ const mockBookmarks = {
       if (tabsFail.urls && props?.url && tabsFail.urls.includes(props.url)) {
         throw new Error('无法打开该协议');
       }
-      return { id: 1 };
+      // 每个标签页给唯一 id：批量分组要靠它区分
+      return { id: 1000 + mockCalls.tabsCreate };
     },
+    // 分组：记录最后一次分到几个标签页，供「部分失败也要分组」的用例断言
+    group: async (opts: { tabIds: number[] }) => {
+      mockCalls.tabsGrouped = opts.tabIds.length;
+      if (tabsFail.group) throw new Error('group 失败');
+      return 555;
+    },
+  },
+  tabGroups: {
+    update: async () => {},
   },
   storage: {
     local: {
@@ -15036,6 +15048,59 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.ok(
       warnB > 0,
       '新建会话 B 达到上限时也必须提示——否则用户在新会话里被静默截断，不知道早期消息已丢',
+    );
+  });
+
+
+  /*
+   * 批量打开标签页时，部分失败被报成「整体失败」，而已经开出来的那些还没被分组。
+   *
+   * 两处调用点原来是 `await Promise.all(list.map(...))` 然后统一提示。
+   * `Promise.all` 在**第一个失败时立刻 reject** —— 其余标签页可能已经建好了：
+   *   - 用户看到「打开失败」，实际开了 7 个；
+   *   - 分组那一步被整个跳过，这 7 个散落在窗口里。
+   *
+   * 现在是逐条结算：成功的照样分组，失败的逐条计数，提示说真话。
+   */
+  await okA('批量打开部分失败时：如实报数，且成功的那部分照样分组', async () => {
+    const { openUrlsInGroup } = await import('../src/lib/open-url');
+    const { useToastStore } = await import('../src/lib/toast');
+
+    const urls = Array.from({ length: 10 }, (_, i) => 'https://open-' + i + '.test/');
+    // 让第 3、5、8 个失败
+    const failing = [urls[2]!, urls[4]!, urls[7]!];
+    tabsFail.urls = failing;
+    tabsFail.group = false;
+    mockCalls.tabsGrouped = 0;
+    useToastStore.setState({ toasts: [] });
+
+    let out: { opened: number; failed: number; grouped: number };
+    try {
+      out = await openUrlsInGroup(urls, { active: false, label: '页面', groupTitle: 'T', collapse: true });
+    } finally {
+      tabsFail.urls = null;
+    }
+
+    const toasts = useToastStore.getState().toasts.map((t) => t.title + ' | ' + (t.description ?? ''));
+    console.log(`   [DBG] opened=${out.opened} failed=${out.failed} grouped=${out.grouped} toasts=${JSON.stringify(toasts)}`);
+
+    assert.equal(out.opened, 7, `应开 7 个，实际 ${out.opened}`);
+    assert.equal(out.failed, 3, `应失败 3 个，实际 ${out.failed}`);
+    /*
+     * 关键：开出来的 7 个必须被分组。
+     * 原来 Promise.all 一 reject 就跳过分组，这 7 个会散在窗口里。
+     */
+    assert.equal(out.grouped, 7, `已打开的 7 个必须进组，实际 grouped=${out.grouped}`);
+    assert.equal(mockCalls.tabsGrouped, 7, `chrome.tabs.group 应收到 7 个 tabId，实际 ${mockCalls.tabsGrouped}`);
+
+    // 提示必须说清「开了一部分」，而不是「打开失败」
+    assert.ok(
+      toasts.some((t) => /已打开 7 个/.test(t) && /3 个失败/.test(t)),
+      `提示应如实说「已打开 7 个，3 个失败」，实际：${JSON.stringify(toasts)}`,
+    );
+    assert.ok(
+      !toasts.some((t) => t.startsWith('打开失败')),
+      `有 7 个真的打开了，不能报「打开失败」。实际：${JSON.stringify(toasts)}`,
     );
   });
 

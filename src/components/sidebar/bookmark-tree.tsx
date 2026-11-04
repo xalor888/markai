@@ -891,7 +891,15 @@ export function ContextMenuOverlay() {
       }
       return;
     }
-    if (node?.url) void chrome.windows.create({ url: node.url, focused: true }).catch(() => {});
+    if (node?.url) {
+      // 单行「在新窗口打开」：失败必须可见，不能像原来那样 .catch(() => {}) 静默吞掉
+      void chrome.windows.create({ url: node.url, focused: true }).catch((e: unknown) => {
+        pushToast('在新窗口打开失败', {
+          description: e instanceof Error ? e.message : String(e),
+          variant: 'destructive',
+        });
+      });
+    }
   };
   /** 标签页组打开：多选时批量（去重，最多 25 个）；单行为文件夹时递归收集子项 */
   const openGroupAction = async () => {

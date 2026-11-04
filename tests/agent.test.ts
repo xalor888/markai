@@ -15404,6 +15404,29 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
       );
     }
   });
+
+  /*
+   * 「在新窗口打开」单行操作时，chrome.windows.create 失败被 .catch(() => {}) 吞掉。
+   *
+   * 用户右键点「在新窗口打开」→ 浏览器拦截弹窗 / 窗口数超限 → 什么都没发生，
+   * 也不知道为什么。这和 open-url.ts 里已经修过的「打开失败要说清原因」是同一类问题，
+   * 只是这条路径绕开了统一入口。
+   */
+  await okA('新窗口打开失败时必须有可见反馈（不能静默吞错）', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync('src/components/sidebar/bookmark-tree.tsx', 'utf8');
+
+    // 找出所有「单独调 chrome.windows.create」且没有 error toast 的用法
+    const bare = [...src.matchAll(/chrome\.windows\.create\s*\(\s*\{[^}]*\}[^)]*\)\s*\.catch\(\(\)\s*=>\s*\{\s*\}\)/g)];
+    console.log(`   [DBG] 裸 windows.create + .catch(()=>{}) 出现 ${bare.length} 次`);
+
+    assert.equal(
+      bare.length,
+      0,
+      `发现 ${bare.length} 处 chrome.windows.create 用 .catch(() => {}) 静默吞错——` +
+        '用户点「在新窗口打开」失败时不会有任何反馈。请改为给出可见错误提示。',
+    );
+  });
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

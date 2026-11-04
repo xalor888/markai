@@ -57,6 +57,26 @@
 
 ## 四、已完成（按时间倒序）
 
+### 第 123 批（D5 质量 · 自动分类会给「设置页」建一个叫 settings 的文件夹）— 2026-11-04
+
+**140. 自动分类会给「设置页」建一个叫 settings 的文件夹**（0.2.157）★ 真缺陷
+
+- `auto_categorize` 按注册域分组再建同名文件夹，用同一个 `registrableDomain()`，但
+  **少了一道前置过滤**——同一个 helper 的另一处调用方 `auto-organize.ts` 是有的：
+  后者先 `if (!/^https?:\/\//i.test(node.url)) return skipped '非网页书签'`。
+- `registrableDomain` 内部是 `new URL(...).hostname`，非网页书签的 hostname **有值**：
+  `chrome://settings/` → `settings`、`chrome://extensions/` → `extensions`、
+  `chrome-extension://<id>/…` → 一长串扩展 id。
+- 后果：收藏过几个 chrome:// 页面的用户跑一次自动分类，会建出叫 `settings` / `extensions`
+  的文件夹并把书签搬进去。**实测分组**：`["t45.test","settings","extensions"]`。
+- 修法：补上同样的 `^https?://` 过滤，注释说明两处必须一致。
+- 验证：新增单测（873→**874**），跑真实 `auto_categorize`。
+  **证伪**（删掉过滤）→ 转红，分组里重新出现 `settings`/`extensions`。
+- 顺带确认：`a.t45.test` 与 `b.t45.test` 归并到 `t45.test` 是 eTLD+1 的**正确**行为，
+  测试期望据此写。
+
+**当前状态**：tsc ✅ / 单测 **874** / build ✅ / e2e **199/199 · 118s** · 已发 **0.2.157**
+
 ### 第 122 批（D5 质量 · 「搜一个空格」= 搜出几乎所有书签）— 2026-11-04
 
 **139. 「搜一个空格」= 搜出几乎所有书签**（0.2.156）★ 真缺陷

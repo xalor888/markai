@@ -903,9 +903,17 @@ export const useAIStore = create<AIState>((set, get) => ({
         }
         void useBookmarkStore.getState().loadTree();
       } else {
-        // 无有效响应（扩展重载/超时等）：回退为待确认，避免卡死在已确认状态
-        get().resolveDeletions(items.map((it) => [it.proposalId, 'pending']));
-        pushToast('删除执行未返回结果，请重试', { variant: 'destructive' });
+        /*
+         * 无有效响应（扩展重载/超时等）。
+         *
+         * 风险：标记为 confirmed 之后 background 可能已经删了。如果此时用户看到
+         * "未返回结果 → 重试"，会再发一次删除请求，导致**重复删除**——虽然 executor
+         * 对缺失书签的处理是安全的（count++），但提示本身就是假的：明明可能已经
+         * 成功，却说"失败请重试"，误导用户以为东西还在或者操作有误。
+         */
+        // 保持 confirmed 状态（已标记），提示刷新即可；不触发额外的删除请求
+        get().resolveDeletions(items.map((it) => [it.proposalId, 'confirmed']));
+        pushToast('删除执行未返回结果，可能需要刷新以查看最新清单', { variant: 'default' });
       }
     } catch (e) {
       // 消息发送失败同样回退，保持可重试

@@ -15322,6 +15322,46 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     void a; void b; void chrome1; void chrome2;
   });
 
+
+  /*
+   * 删除执行超时的正确处理：不回退 pending，而是保持 confirmed，提示刷新即可。
+   *
+   * 原来回退为 pending → 提示"失败请重试"，用户看到假失败；而实际上 background
+   * 可能已经删了，第二次发请求会重复（虽然 executor 对缺失书签安全，但逻辑不清晰）。
+   * 改为保持 confirmed，提示刷新查看结果——既避免误导，也防止二次发送。
+   */
+  await okA('确认删除超时应保持 confirmed，提示刷新而非失败', async () => {
+    const { useAIStore } = await import('../src/stores/aiStore');
+    const { useToastStore, pushToast } = await import('../src/lib/toast');
+
+    // 设置一个提议
+    const proposal = { id: 'propos-a1', bookmarkId: 'b1', title: 'Test Bookmark', reason: 'r', createdAt: Date.now(), status: 'pending' as const };
+    useAIStore.setState({
+      pendingDeletions: [proposal],
+      conversations: [], activeId: null, messages: [], deletedIds: [], clearedIds: [],
+      streaming: false, streamingMessageId: null,
+    });
+
+    // Mock chrome.runtime.sendMessage
+    chrome.runtime.sendMessage = async () => {}; // 模拟超时（无返回值）
+    useToastStore.setState({ toasts: [] });
+    // 调用 confirmDeletions，超时路径触发
+    await useAIStore.getState().confirmDeletions(['propos-a1']);
+    const statusAfter = useAIStore.getState().pendingDeletions.find((p) => p.id === 'propos-a1');
+    const toasts = useToastStore.getState().toasts.map(t => `${t.title}${t.description ? '|' + t.description : ''}`);
+
+    console.log(`   [DBG] status=${statusAfter?.status} toasts=${JSON.stringify(toasts)}`);
+
+    assert.equal(statusAfter?.status, 'confirmed', `超时后应保持 confirmed，实际 ${statusAfter?.status}`);
+    assert.ok(
+      toasts.some(t => /刷新/.test(t)),
+      `应提示“可能需要刷新”，原话是失败重试：${JSON.stringify(toasts)}`,
+    );
+    assert.ok(
+      !toasts.some(t => /重试/.test(t) && /失败/.test(t)),
+      `不应出现“失败请重试”，这会误导并导致二次删除请求：${JSON.stringify(toasts)}`,
+    );
+  });
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

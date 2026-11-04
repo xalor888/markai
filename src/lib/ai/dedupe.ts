@@ -130,42 +130,64 @@ export interface KeeperChoice {
   reason: string;
 }
 
-/** 标题是不是"就是网址本身"（用户没有改过名） */
-function hasCustomTitle(n: DupeNode): boolean {
+/**
+ * 标题是不是「只是网址原文」——`https://e.test/a`、`e.test/a` 这类。
+ *
+ * 为什么要区分：原来这里判的是 `title !== url`，想表达"用户改过名"。
+ * 但 Chrome 收藏页面时标题取的是**页面标题**，几乎从不等于 URL —— 于是那条规则
+ * 对绝大多数书签恒为真，用户看到的理由永远是「它有自定义标题（改过名的通常是你在意的那条）」，
+ * 可他从来没改过名；真正决定胜负的根本不是它。
+ *
+ * 改成判「标题是否只是网址」：这类标题确实没有信息量，保留它没意义。
+ */
+function isUrlLikeTitle(n: DupeNode): boolean {
   const t = (n.title || '').trim();
-  if (!t) return false;
-  return t !== (n.url ?? '').trim();
+  if (!t) return true;
+  const u = (n.url || '').trim();
+  if (!u) return false;
+  const bare = (x: string) =>
+    x.replace(/^https?:\/\//i, '').replace(/^www\./i, '').replace(/\/+$/, '').toLowerCase();
+  return t.toLowerCase() === u.toLowerCase() || bare(t) === bare(u);
 }
 
-/**
- * 决定一组重复里保留哪一条。规则**确定且可解释**（依次比较，第一项不同即分胜负）：
- *
- *  1. 有自定义标题的优先——用户改过名，说明在意这条；
- *  2. 最近使用时间更大的优先（dateLastUsed 已知时）；
- *  3. 收藏更早的优先（dateAdded 更小）——"用得最久的那条"；
- *  4. 仍相同则按 id 字符串排序取最小，保证结果可复现（不做随机选择）。
- *
- * 之所以要固定规则：让"一键去重"的结果可预期、可复现，也让预览里能讲清理由。
- */
+/** 四道规则的稳定比较（分值越小越优先） */
+function rank(a: DupeNode, b: DupeNode): number {
+  // 「只是网址原文」的排在后面：Number(true)=1 大，排在后面
+  const readable = Number(isUrlLikeTitle(a)) - Number(isUrlLikeTitle(b));
+  if (readable !== 0) return readable;
+  const used = (b.dateLastUsed ?? 0) - (a.dateLastUsed ?? 0);
+  if (used !== 0) return used;
+  const added = (a.dateAdded ?? Number.MAX_SAFE_INTEGER) - (b.dateAdded ?? Number.MAX_SAFE_INTEGER);
+  if (added !== 0) return added;
+  return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
+}
+
 export function pickDuplicateKeeper(items: DupeNode[]): KeeperChoice {
   if (items.length === 0) throw new Error('pickDuplicateKeeper：组内没有条目');
-  const sorted = [...items].sort((a, b) => {
-    const custom = Number(hasCustomTitle(b)) - Number(hasCustomTitle(a));
-    if (custom !== 0) return custom;
-    const used = (b.dateLastUsed ?? 0) - (a.dateLastUsed ?? 0);
-    if (used !== 0) return used;
-    const added = (a.dateAdded ?? Number.MAX_SAFE_INTEGER) - (b.dateAdded ?? Number.MAX_SAFE_INTEGER);
-    if (added !== 0) return added;
-    return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
-  });
+  const sorted = [...items].sort(rank);
   const keep = sorted[0]!;
   const remove = sorted.slice(1);
 
+  /*
+   * 理由**按真正分出胜负的那一步**来说。
+   *
+   * 原来是一串 if：先看 keep 有没有"自定义标题"，有就写"它有自定义标题"——
+   * 但那条规则几乎恒为真，于是无论实际是哪一步决定胜负，理由永远说同一句话。
+   * 用户读到的是一个与事实无关的解释。
+   */
+  const runner = sorted[1];
   let reason: string;
-  if (hasCustomTitle(keep)) reason = '它有自定义标题（改过名的通常是你在意的那条）';
-  else if ((keep.dateLastUsed ?? 0) > 0) reason = '它最近被使用过';
-  else if (keep.dateAdded !== undefined) reason = '它收藏得最早';
-  else reason = '按 id 稳定排序取第一条（其余条件相同）';
+  if (!runner) {
+    reason = '组内只有这一条';
+  } else if (isUrlLikeTitle(runner) && !isUrlLikeTitle(keep)) {
+    reason = '它的标题是给人看的，其余几条只是网址原文';
+  } else if ((keep.dateLastUsed ?? 0) !== (runner.dateLastUsed ?? 0) && (keep.dateLastUsed ?? 0) > 0) {
+    reason = '它最近被使用过';
+  } else if ((keep.dateAdded ?? Number.MAX_SAFE_INTEGER) !== (runner.dateAdded ?? Number.MAX_SAFE_INTEGER)) {
+    reason = '它收藏得最早';
+  } else {
+    reason = '按 id 稳定排序取第一条（其余条件相同）';
+  }
 
   return { keep, remove, reason };
 }

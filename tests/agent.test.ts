@@ -3853,7 +3853,7 @@ async function okA(name: string, fn: () => Promise<void> | void) {
         n('renamed', 'https://e.test/a', { title: '我自己起的名字', dateAdded: 500 }),
       ]);
       assert.equal(r.keep.id, 'renamed');
-      assert.match(r.reason, /自定义标题/);
+      assert.match(r.reason, /标题/);  // 行为不变（保留改过名那条），文案改为如实描述
     });
     ok('保留规则：都没有自定义标题时，最近使用的优先', () => {
       const r = pickDuplicateKeeper([
@@ -3871,6 +3871,44 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.equal(r.keep.id, 'earlier');
       assert.match(r.reason, /收藏得最早/);
     });
+    /*
+     * 理由必须说真话：不能把「标题就是页面标题」说成「你改过名」。
+     *
+     * 原来的判据是 `title !== url`，而 Chrome 收藏页面时标题就是**页面标题**，
+     * 几乎从不等于 URL —— 于是这条规则对绝大多数书签恒为真，
+     * 用户看到的理由永远是「它有自定义标题（改过名的通常是你在意的那条）」，
+     * 可他从来没改过名；真正决定胜负的其实是后面的「最近使用 / 收藏最早」。
+     */
+    ok('保留规则：没改过名时，理由不能声称「自定义标题 / 改过名」', () => {
+      const r = pickDuplicateKeeper([
+        n('a', 'https://github.com/', { title: 'GitHub · Where software is built', dateAdded: 100 }),
+        n('b', 'https://github.com/', { title: 'GitHub', dateAdded: 200 }),
+      ]);
+      assert.ok(
+        !/自定义标题|改过名/.test(r.reason),
+        `用户没改过名，理由却说改过名：${r.reason}`,
+      );
+      // 两条都是"给人看的标题" → 第 1 条规则打平，应由「收藏最早」决定
+      assert.equal(r.keep.id, 'a', '两条标题都正常时，应保留收藏更早的那条');
+      assert.match(r.reason, /收藏得最早/, `理由应说明真正生效的规则：${r.reason}`);
+    });
+
+    ok('保留规则：网址原文标题 vs 给人看的标题，优先保留后者（理由要说清）', () => {
+      const r = pickDuplicateKeeper([
+        n('urlike', 'https://e.test/a', { title: 'https://e.test/a', dateAdded: 100 }),
+        n('human', 'https://e.test/a', { title: '示例站点', dateAdded: 900 }),
+      ]);
+      assert.equal(r.keep.id, 'human', '有可读标题的那条应保留');
+      assert.match(r.reason, /标题/, `理由应提到标题：${r.reason}`);
+      assert.ok(!/改过名/.test(r.reason), `不该声称改过名：${r.reason}`);
+      // 两条都只是网址原文时，规则打平，不能拿它当理由
+      const tie = pickDuplicateKeeper([
+        n('u1', 'https://e.test/a', { title: 'https://e.test/a', dateAdded: 100 }),
+        n('u2', 'https://e.test/a', { title: 'e.test/a', dateAdded: 200 }),
+      ]);
+      assert.match(tie.reason, /收藏得最早/, `两条都只是网址时理由应落到下一步：${tie.reason}`);
+    });
+
     ok('保留规则：其余条件相同则按 id 稳定排序（结果可复现，不随机）', () => {
       const r1 = pickDuplicateKeeper([n('b2', 'https://e.test/a'), n('a1', 'https://e.test/a')]);
       const r2 = pickDuplicateKeeper([n('a1', 'https://e.test/a'), n('b2', 'https://e.test/a')]);
@@ -3945,7 +3983,7 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.equal(cj.mode, 'confirm');
       assert.equal(cj.duplicates, 2);
       assert.equal(cj.submitted, 2);
-      assert.deepEqual(proposedIds, [f1.b, f1.c].sort(), '保留 a（有自定义标题），提议删 b、c');
+      assert.deepEqual(proposedIds, [f1.b, f1.c].sort(), '保留 a（标题可读、且创建更早），提议删 b（标题只是网址）、c');
       assert.ok((confirmOut.deletions ?? []).every((d) => d.status === 'pending'), '必须等用户确认');
     });
 

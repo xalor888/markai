@@ -15104,6 +15104,59 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     );
   });
 
+
+  /*
+   * 纯空格标题能通过校验，建出一个「看不见的」书签/文件夹。
+   *
+   * schema 是 `z.string().min(1).max(200)` —— `"   "` 长度 3，**通过了**。
+   * 而界面渲染用的是 `node.title || '(未命名)'`，`"   "` 是**真值**，
+   * 于是这行渲染成几个空格：看起来是一行空白，既不像书签也不像"(未命名)"，
+   * 用户找不到它、点不中它。
+   *
+   * 注意 zod 的顺序陷阱：`.trim().min(1)` 会拒绝 `"   "`（trim 先执行），
+   * 而 `.min(1).trim()` 会**放行并返回空串**——后者更危险。
+   */
+  await okA('纯空格标题必须被拒绝（否则树里会出现点不中的空白行）', async () => {
+    const { executeTool } = await import('../src/lib/ai/tools');
+
+    const folder = (await mockBookmarks.create({ parentId: '1', title: 'T43-F' })).id;
+    const before = await mockBookmarks.getSubTree(folder);
+
+    const cases: { tool: string; args: Record<string, unknown> }[] = [
+      { tool: 'create_bookmark', args: { parentId: folder, title: '   ', url: 'https://ws.test/' } },
+      { tool: 'create_folder', args: { parentId: folder, title: '   ' } },
+      { tool: 'create_bookmarks', args: { parentId: folder, items: [{ title: '\t', url: 'https://ws2.test/' }] } },
+    ];
+
+    for (const c of cases) {
+      let rejected = false;
+      let msg = '';
+      try {
+        await executeTool(c.tool, JSON.stringify(c.args));
+      } catch (e) {
+        rejected = true;
+        msg = e instanceof Error ? e.message : String(e);
+      }
+      console.log(`   [DBG] ${c.tool}: rejected=${rejected} ${msg.slice(0, 60)}`);
+      assert.ok(
+        rejected,
+        `${c.tool} 接受了纯空格标题——会建出渲染成空白、点不中的条目`,
+      );
+    }
+
+    // 顺带：合法标题的首尾空格要被修掉，而不是原样存进去
+    const ok1 = await executeTool(
+      'create_bookmark',
+      JSON.stringify({ parentId: folder, title: '  正常标题  ', url: 'https://ws-ok.test/' }),
+    );
+    assert.ok(ok1.result.includes('正常标题'), '应真的创建成功');
+    assert.ok(!ok1.result.includes('  正常标题'), `首尾空格应被 trim 掉。实际：${ok1.result.slice(0, 200)}`);
+
+    const after = await mockBookmarks.getSubTree(folder);
+    assert.ok(after, '文件夹应仍可读');
+    void before;
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

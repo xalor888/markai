@@ -268,7 +268,16 @@ async function getFolderPath(args: unknown): Promise<ToolOutput> {
   return { result: JSON.stringify({ id: bookmarkId, title: node.title, path: await resolvePath(bookmarkId), folder: !node.url }) };
 }
 
-const createFolderSchema = z.object({ title: z.string().min(1).max(100), parentId: z.string().optional() });
+/*
+ * 标题一律先 `.trim()` 再 `.min(1)`。
+ *
+ * 顺序不能反：`z.string().min(1).trim()` 会让 `"   "`（长度 3）通过校验，
+ * 然后被 trim 成空串——存进去的标题就是空的。而 `.trim().min(1)` 会先修剪
+ * 再判定，直接拒绝纯空格。界面用的是 `node.title || '(未命名)'`，空串会显示成
+ * (未命名) 看起来正常，实际数据已经脏了；纯空格更糟——它是真值，渲染成几个空格，
+ * 那一行既不像书签也不像 (未命名)，用户找不到也点不中。
+ */
+const createFolderSchema = z.object({ title: z.string().trim().min(1).max(100), parentId: z.string().optional() });
 
 async function createFolder(args: unknown): Promise<ToolOutput> {
   const { title, parentId } = createFolderSchema.parse(args);
@@ -278,7 +287,7 @@ async function createFolder(args: unknown): Promise<ToolOutput> {
 }
 
 const createBookmarkSchema = z.object({
-  title: z.string().min(1).max(200),
+  title: z.string().trim().min(1).max(200),
   // 宽松 schema + 内部校验：与 create_bookmarks 一致，避免严格 .url() 整批失败
   url: z.string().min(1).max(2000),
   parentId: z.string().optional(),
@@ -301,7 +310,10 @@ const createBookmarksSchema = z.object({
   parentId: z.string().optional(),
   parentPath: z.string().optional(),
   // url 不在此处强校验（整体拒绝会让单项非法导致全批失败）：工具内部逐条校验
-  items: z.array(z.object({ title: z.string().min(1).max(200), url: z.string().min(1).max(500) })).min(1).max(50),
+  items: z
+    .array(z.object({ title: z.string().trim().min(1).max(200), url: z.string().min(1).max(500) }))
+    .min(1)
+    .max(50),
 });
 
 /** 批量创建书签（一次最多 50 条；支持 parentId 或 parentPath 定位目标文件夹；非法项单独失败） */
@@ -369,7 +381,7 @@ async function moveBookmark(args: unknown): Promise<ToolOutput> {
   };
 }
 
-const renameSchema = z.object({ bookmarkId: z.string(), title: z.string().min(1).max(200) });
+const renameSchema = z.object({ bookmarkId: z.string(), title: z.string().trim().min(1).max(200) });
 
 async function renameBookmark(args: unknown): Promise<ToolOutput> {
   const { bookmarkId, title } = renameSchema.parse(args);

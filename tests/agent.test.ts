@@ -1585,7 +1585,8 @@ async function okA(name: string, fn: () => Promise<void> | void) {
   {
     // 注入两条"归一后相同"的书签：www 前缀 + 查询参数（同协议）
     await mockBookmarks.create({ title: '站点甲', url: 'https://www.example.com/path' });
-    await mockBookmarks.create({ title: '站点乙', url: 'https://example.com/path?ref=markai' });
+    // 用明确的跟踪参数（utm_source）而不是 ref：ref 有歧义，不该被当噪声剥掉
+    await mockBookmarks.create({ title: '站点乙', url: 'https://example.com/path?utm_source=markai' });
     const out = await executeTool('find_duplicates', '{}');
     const j = JSON.parse(out.result) as { items: { url: string; count: number; bookmarks: { title: string }[] }[] };
     ok('find_duplicates 归一化 www/查询参数', () => {
@@ -3769,10 +3770,58 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     const n = (id: string, url: string, extra: Partial<DupeNode> = {}): DupeNode =>
       ({ id, url, title: url, ...extra }) as DupeNode;
 
-    ok('归一化：忽略片段/查询参数/www/尾斜杠', () => {
-      assert.equal(normalizeUrl('https://www.example.com/a/?x=1#h'), normalizeUrl('https://example.com/a'));
+    ok('归一化：忽略片段/跟踪参数/www/尾斜杠', () => {
+      // 注意用的是 utm_source（跟踪参数），不是任意查询参数——
+      // 任意参数可能标识内容（见下面「不能把查询参数不同的两页判成重复」）
+      assert.equal(normalizeUrl('https://www.example.com/a/?utm_source=x#h'), normalizeUrl('https://example.com/a'));
       assert.notEqual(normalizeUrl('http://example.com/a'), normalizeUrl('https://example.com/a'),
         '协议差异按设计保留（不擅自改写用户收藏的协议）');
+    });
+
+    /*
+     * 剥掉**全部**查询参数会把内容不同的页面判成重复。
+     *
+     * 原来 `normalizeUrl` 直接 `parsed.search = ''`，于是：
+     *   youtube.com/watch?v=AAA  与  youtube.com/watch?v=BBB  → 判为同一页
+     *   shop.test/item?id=1      与  shop.test/item?id=2      → 判为同一页
+     * 去重工具据此提议删除「重复项」——删掉的是**另一个真实页面**。
+     * 参数在很多站点就是内容标识（视频、帖子、商品），不能当噪声一律丢掉。
+     *
+     * 只该剥掉的是**跟踪参数**（utm_* / fbclid / gclid 等），它们不影响内容。
+     */
+    ok('归一化不能把「查询参数不同」的两页判成重复', () => {
+      const pairs: [string, string][] = [
+        ['https://www.youtube.com/watch?v=AAA', 'https://www.youtube.com/watch?v=BBB'],
+        ['https://shop.test/item?id=1', 'https://shop.test/item?id=2'],
+        ['https://blog.test/post?p=10', 'https://blog.test/post?p=20'],
+      ];
+      for (const [a, b] of pairs) {
+        assert.notEqual(normalizeUrl(a), normalizeUrl(b), `不该把这两条判成重复：${a} / ${b}`);
+      }
+      // buildDuplicateGroups 也不能把它们并进同一组
+      const groups = buildDuplicateGroups([n('1', pairs[0]![0]), n('2', pairs[0]![1])]);
+      assert.equal(groups.length, 0, `不该产生重复组：${JSON.stringify(groups.map((g) => g.key))}`);
+    });
+
+    ok('归一化仍要剥掉跟踪参数（它们不影响内容）', () => {
+      for (const noisy of [
+        'https://example.com/a?utm_source=x',
+        'https://example.com/a?utm_campaign=y&utm_medium=z',
+        'https://example.com/a?fbclid=abc',
+        'https://example.com/a?gclid=abc',
+      ]) {
+        assert.equal(
+          normalizeUrl(noisy),
+          normalizeUrl('https://example.com/a'),
+          `跟踪参数应被忽略：${noisy}`,
+        );
+      }
+      // 跟踪参数 + 真实参数混在一起时，真实参数必须留下
+      assert.notEqual(
+        normalizeUrl('https://shop.test/item?id=1&utm_source=x'),
+        normalizeUrl('https://shop.test/item?id=2&utm_source=x'),
+        '剥掉 utm 之后，id 仍要参与判重',
+      );
     });
 
     ok('normalizeUrl 与 buildDuplicateGroups 空值安全防御', () => {
@@ -3786,7 +3835,8 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     ok('分组：只返回有重复的组，且组内多的在前', () => {
       const groups = buildDuplicateGroups([
         n('a', 'https://example.com/x'),
-        n('b', 'https://www.example.com/x?q=1'),
+        // 用跟踪参数：q=1 这类可能是内容标识，不能当噪声剥掉（否则两个不同页面会被判成重复）
+        n('b', 'https://www.example.com/x?utm_source=1'),
         n('c', 'https://other.test/y'),
         n('d', 'https://third.test/z'),
         n('e', 'https://third.test/z#frag'),

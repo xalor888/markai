@@ -26,7 +26,51 @@ export interface DupeGroup {
 }
 
 /**
- * URL 归一化：去片段、去查询参数、去 www、去尾斜杠。
+ * 不影响内容的跟踪类查询参数。
+ *
+ * 只剥这些，**不是**剥掉全部查询参数：参数在很多站点就是内容标识
+ * （`youtube.com/watch?v=…`、`shop/item?id=…`、`forum/post?p=…`）。
+ * 一律丢掉会把两个**完全不同的页面**判成重复，去重工具接着就把其中一条删了。
+ */
+const TRACKING_PARAMS = new Set([
+  'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content', 'utm_id', 'utm_name',
+  'fbclid', 'gclid', 'gclsrc', 'dclid', 'msclkid', 'yclid', 'twclid',
+  'mc_cid', 'mc_eid', 'igshid', 'vero_id', 'oly_anon_id', 'oly_enc_id',
+  '_ga', '_gl', 'ref_src', 'ref_url', 'spm', 'scm',
+]);
+
+/**
+ * 是否是跟踪参数。
+ *
+ * 除了名单里的具体项，还认 **`utm_` 前缀**（`utm_source`/`utm_medium`…）与裸 `utm`——
+ * 后者是常见的简写形式，只列具体项会漏掉它。
+ */
+function isTrackingParam(name: string): boolean {
+  const n = name.toLowerCase();
+  return TRACKING_PARAMS.has(n) || n === 'utm' || n.startsWith('utm_');
+}
+
+/** 去掉跟踪参数；没有参数剩余时把 `?` 也去掉（否则会留下一个空查询串影响字符串比较） */
+function stripTrackingParams(parsed: URL): void {
+  const keep: [string, string][] = [];
+  for (const [k, v] of parsed.searchParams) {
+    if (!isTrackingParam(k)) keep.push([k, v]);
+  }
+  if (keep.length === 0) {
+    parsed.search = '';
+    return;
+  }
+  // 重排为规范顺序：同一组参数在不同顺序下应判为同一页
+  const sp = new URLSearchParams();
+  for (const [k, v] of keep.sort((a, b) => (a[0] === b[0] ? 0 : a[0] < b[0] ? -1 : 1))) sp.append(k, v);
+  parsed.search = sp.toString();
+}
+
+/**
+ * URL 归一化：去片段、去跟踪参数、去 www、去尾斜杠。
+ *
+ * **保留真正的内容参数**：`?v=AAA` 与 `?v=BBB` 是两个不同的页面，不能判成重复
+ * （见 `TRACKING_PARAMS` 的说明）。参数顺序也会被规范化，避免同一页因顺序不同漏判。
  *
  * 注意**协议差异按设计保留**（http 与 https 视为不同）：
  * 自动改写协议或据此判重都可能在用户不知情时改变收藏的语义。
@@ -36,18 +80,22 @@ export function normalizeUrl(u?: string): string {
   try {
     const parsed = new URL(u.trim());
     parsed.hash = '';
-    parsed.search = '';
+    stripTrackingParams(parsed);
     if (parsed.hostname.startsWith('www.')) parsed.hostname = parsed.hostname.slice(4);
     return parsed.toString().replace(/\/$/, '');
   } catch {
-    // 非标准 URL（如缺失协议）：尽力剥离常见噪声
-    return u
-      .trim()
-      .toLowerCase()
-      .replace(/^https?:\/\//, '')
-      .replace(/^www\./, '')
-      .replace(/[?#].*$/, '')
-      .replace(/\/+$/, '');
+    // 非标准 URL（如缺失协议）：尽力剥离常见噪声（**同样只剥跟踪参数**）
+    const withoutHash = u.trim().replace(/#.*$/, '');
+    const qAt = withoutHash.indexOf('?');
+    const base = (qAt >= 0 ? withoutHash.slice(0, qAt) : withoutHash).toLowerCase().replace(/^https?:\/\//, '').replace(/^www\./, '');
+    const query = qAt >= 0 ? withoutHash.slice(qAt + 1) : '';
+    const kept = query
+      .split('&')
+      .filter(Boolean)
+      .filter((kv) => !isTrackingParam(kv.split('=')[0]!))
+      .sort()
+      .join('&');
+    return (kept ? `${base}?${kept}` : base).replace(/\/+$/, '');
   }
 }
 

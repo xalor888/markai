@@ -193,7 +193,9 @@ async function listBookmarks(args: unknown): Promise<ToolOutput> {
 }
 
 const searchBookmarksSchema = z.object({
-  query: z.string().min(1).max(100),
+  // trim 在前：`" "` 长度 1 原本能过校验，而 chrome.bookmarks.search(" ")
+  // 会命中任何标题里有空格的书签，等于把上限 2000 条无关结果灌进上下文
+  query: z.string().trim().min(1).max(100),
   // 返回条数上限：默认 2000，Agent 可传更大值获取更完整结果
   limit: z.number().int().min(1).max(2000).optional(),
 });
@@ -319,11 +321,7 @@ const createBookmarksSchema = z.object({
 /** 批量创建书签（一次最多 50 条；支持 parentId 或 parentPath 定位目标文件夹；非法项单独失败） */
 async function createBookmarks(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
   const throwIfAborted = makeAbortCheck(signal);
-  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
-  // 那些分支在循环之前返回，不检查就等于取消无效。
-  throwIfAborted();
-  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
-  // 那些分支在循环之前返回，不检查就等于取消无效。
+  // 入口先检查一次：早退分支都在主循环之前，不在这里查就等于那些分支里取消无效。
   throwIfAborted();
   const { parentId, parentPath, items } = createBookmarksSchema.parse(args);
   let pid = parentId;
@@ -413,8 +411,7 @@ const checkUrlsSchema = z.object({
 
 async function checkUrls(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
   const throwIfAborted = makeAbortCheck(signal);
-  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
-  // 那些分支在循环之前返回，不检查就等于取消无效。
+  // 入口先检查一次：早退分支都在主循环之前，不在这里查就等于那些分支里取消无效。
   throwIfAborted();
   const { urls } = checkUrlsSchema.parse(args);
   const unique = [...new Set(urls)].slice(0, 50);
@@ -483,8 +480,7 @@ async function checkUrlsBulk(
   signal?: AbortSignal,
 ): Promise<ToolOutput> {
   const throwIfAborted = makeAbortCheck(signal);
-  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
-  // 那些分支在循环之前返回，不检查就等于取消无效。
+  // 入口先检查一次：早退分支都在主循环之前，不在这里查就等于那些分支里取消无效。
   throwIfAborted();
   const { urls, maxConcurrent = 20, timeoutMs = 8_000, maxDeadList = 200 } = checkUrlsBulkSchema.parse(args);
   const unique = [...new Set(urls.map((u) => u.trim()).filter(Boolean))];
@@ -643,8 +639,7 @@ async function autoCategorize(
   signal?: AbortSignal,
 ): Promise<ToolOutput> {
   const throwIfAborted = makeAbortCheck(signal);
-  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
-  // 那些分支在循环之前返回，不检查就等于取消无效。
+  // 入口先检查一次：早退分支都在主循环之前，不在这里查就等于那些分支里取消无效。
   throwIfAborted();
   const { folderId, folderPath, minGroupSize = 2, maxGroups = 25, foldOverflow = false, dryRun = false } =
     autoCategorizeSchema.parse(args);
@@ -809,8 +804,7 @@ async function cleanupSweep(
   const throwIfAborted = () => {
     if (signal?.aborted) throw new Error('已取消，这一步没有执行完');
   };
-  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
-  // 那些分支在循环之前返回，不检查就等于取消无效。
+  // 入口先检查一次：早退分支都在主循环之前，不在这里查就等于那些分支里取消无效。
   throwIfAborted();
   const {
     folderId,
@@ -1218,8 +1212,7 @@ const dedupeSchema = z.object({
  */
 async function dedupeBookmarks(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
   const throwIfAborted = makeAbortCheck(signal);
-  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
-  // 那些分支在循环之前返回，不检查就等于取消无效。
+  // 入口先检查一次：早退分支都在主循环之前，不在这里查就等于那些分支里取消无效。
   throwIfAborted();
   const { folderIds, limit = 100, dryRun = false } = dedupeSchema.parse(args);
   await ensureRoots();
@@ -1332,8 +1325,7 @@ const sortFolderSchema = z.object({
 /** 对文件夹内子项排序（文件夹置顶 + 按指定字段；直接改写真实顺序） */
 async function sortFolder(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
   const throwIfAborted = makeAbortCheck(signal);
-  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
-  // 那些分支在循环之前返回，不检查就等于取消无效。
+  // 入口先检查一次：早退分支都在主循环之前，不在这里查就等于那些分支里取消无效。
   throwIfAborted();
   const { parentId, by = 'title' } = sortFolderSchema.parse(args);
   const pid = await assertFolder(parentId);
@@ -1447,8 +1439,7 @@ const moveBookmarksSchema = z.object({
 async function moveBookmarks(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
   const { ids, parentId, index } = moveBookmarksSchema.parse(args);
   const throwIfAborted = makeAbortCheck(signal);
-  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
-  // 那些分支在循环之前返回，不检查就等于取消无效。
+  // 入口先检查一次：早退分支都在主循环之前，不在这里查就等于那些分支里取消无效。
   throwIfAborted();
   await ensureRoots();
   const pid = await assertFolder(parentId);
@@ -1787,8 +1778,7 @@ const mergeSchema = z.object({
  */
 async function mergeFolders(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
   const throwIfAborted = makeAbortCheck(signal);
-  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
-  // 那些分支在循环之前返回，不检查就等于取消无效。
+  // 入口先检查一次：早退分支都在主循环之前，不在这里查就等于那些分支里取消无效。
   throwIfAborted();
   const { sourceId, targetId } = mergeSchema.parse(args);
   await ensureRoots();
@@ -1888,8 +1878,7 @@ export async function getDeleteMode(): Promise<'confirm' | 'auto'> {
 /** 删除安全机制：默认只生成提议；"无需确认"模式下自动执行 */
 async function proposeDeletions(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
   const throwIfAborted = makeAbortCheck(signal);
-  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
-  // 那些分支在循环之前返回，不检查就等于取消无效。
+  // 入口先检查一次：早退分支都在主循环之前，不在这里查就等于那些分支里取消无效。
   throwIfAborted();
   const { items } = proposeSchema.parse(args);
   await ensureRoots();
@@ -1966,8 +1955,7 @@ const deleteAllSchema = z.object({
  */
 async function deleteAllBookmarks(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
   const throwIfAborted = makeAbortCheck(signal);
-  // 入口就检查一次：堵住所有早退分支（如「子项不足，无需排序」）——
-  // 那些分支在循环之前返回，不检查就等于取消无效。
+  // 入口先检查一次：早退分支都在主循环之前，不在这里查就等于那些分支里取消无效。
   throwIfAborted();
   const { reason } = deleteAllSchema.parse(args);
   await ensureRoots();

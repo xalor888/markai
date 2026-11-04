@@ -15157,6 +15157,42 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     void before;
   });
 
+
+  /*
+   * 纯空格的搜索词会通过校验，然后匹配到几乎所有含空格的书签。
+   *
+   * `searchBookmarksSchema` 是 `query: z.string().min(1).max(100)` —— `" "`（一个空格）
+   * 长度 1，**通过**。`chrome.bookmarks.search(" ")` 会命中任何标题里有空格的书签，
+   * 于是模型拿到上限 2000 条无关结果，把上下文占满，而它以为自己搜到了想要的东西。
+   *
+   * 空白搜索是没有意义的输入，应该在入口就拒掉，而不是让它变成一次"成功的"大查询。
+   */
+  await okA('纯空格的搜索词必须被拒绝（否则会匹配到几乎所有书签）', async () => {
+    const { executeTool } = await import('../src/lib/ai/tools');
+
+    const folder = (await mockBookmarks.create({ parentId: '1', title: 'T44-F' })).id;
+    await mockBookmarks.create({ parentId: folder, title: 'hello world', url: 'https://t44.test/' });
+
+    for (const q of [' ', '   ', '\t']) {
+      let rejected = false;
+      let msg = '';
+      try {
+        await executeTool('search_bookmarks', JSON.stringify({ query: q }));
+      } catch (e) {
+        rejected = true;
+        msg = e instanceof Error ? e.message : String(e);
+      }
+      console.log(`   [DBG] query=${JSON.stringify(q)} rejected=${rejected} ${msg.slice(0, 50)}`);
+      assert.ok(rejected, `搜索词 ${JSON.stringify(q)} 应被拒绝——它等于"匹配所有含空格的书签"`);
+    }
+
+    // 正常搜索词两侧的空格要被修掉，而不是把空格带进查询
+    const ok1 = await executeTool('search_bookmarks', JSON.stringify({ query: '  hello  ' }));
+    assert.ok(ok1.result.includes('hello world'), '正常搜索应仍能命中');
+    const parsed = JSON.parse(ok1.result) as { query: string };
+    assert.equal(parsed.query, 'hello', `搜索词两侧空格应被 trim。实际回显：${JSON.stringify(parsed.query)}`);
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

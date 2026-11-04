@@ -15193,6 +15193,47 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.equal(parsed.query, 'hello', `搜索词两侧空格应被 trim。实际回显：${JSON.stringify(parsed.query)}`);
   });
 
+
+  /*
+   * 非网页书签（chrome://… 等）会被自动分类按"域名"归组，建出一个以内部页命名的文件夹。
+   *
+   * `registrableDomain('chrome://settings')` 返回 `settings`（hostname 就是 settings），
+   * 于是 auto_categorize 把它当成一个"站点"，建文件夹「settings」并把书签搬进去。
+   * `chrome-extension://<id>/...` 更离谱——域名直接是那一长串扩展 id。
+   *
+   * 而**同一个 helper 的另一处调用方** `auto-organize.ts` 有前置过滤：
+   *   if (!/^https?:\/\//i.test(node.url)) return { action: 'skipped', detail: '非网页书签' };
+   * 两条路径对同一个工具函数的使用方式不一致，这才是根因。
+   */
+  await okA('自动分类不该把 chrome:// 之类的书签当作站点归组建文件夹', async () => {
+    const { executeTool } = await import('../src/lib/ai/tools');
+
+    const folder = (await mockBookmarks.create({ parentId: '1', title: 'T45-F' })).id;
+    const a = await mockBookmarks.create({ parentId: folder, title: 'site a', url: 'https://a.t45.test/x' });
+    const b = await mockBookmarks.create({ parentId: folder, title: 'site b', url: 'https://b.t45.test/y' });
+    const chrome1 = await mockBookmarks.create({ parentId: folder, title: '设置页', url: 'chrome://settings/' });
+    const chrome2 = await mockBookmarks.create({ parentId: folder, title: '扩展页', url: 'chrome://extensions/' });
+
+    const out = await executeTool(
+      'auto_categorize',
+      JSON.stringify({ folderId: folder, minGroupSize: 1, dryRun: false }),
+    );
+    const parsed = JSON.parse(out.result) as { groups?: { name: string }[]; created?: number };
+    const domains = (parsed.groups ?? []).map((g) => g.name);
+    console.log(`   [DBG] 分出的域名组: ${JSON.stringify(domains)}`);
+
+    for (const bad of ['settings', 'extensions']) {
+      assert.ok(
+        !domains.includes(bad),
+        `不该把 chrome:// 页当成站点「${bad}」归组并建同名文件夹。实际分出的组：${JSON.stringify(domains)}`,
+      );
+    }
+    // 正常站点仍要能分出组（别为了修这个把正常功能一起关掉）。
+    // a.t45.test 与 b.t45.test 归并到注册域 t45.test —— 这是 eTLD+1 的正确行为。
+    assert.ok(domains.includes('t45.test'), `正常站点应仍被分组。实际：${JSON.stringify(domains)}`);
+    void a; void b; void chrome1; void chrome2;
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

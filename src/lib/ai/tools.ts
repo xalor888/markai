@@ -675,6 +675,18 @@ async function autoCategorize(
   const groups = new Map<string, { domain: string; ids: string[] }>();
   let unparseable = 0;
   for (const b of bookmarks) {
+    /*
+     * 非网页书签直接跳过——与 `auto-organize.ts` 的同名判断保持一致。
+     *
+     * 那个 helper 用的是 `new URL(...).hostname`，而 `chrome://settings` 的 hostname
+     * 就是 `settings`、`chrome://extensions` 是 `extensions`，`chrome-extension://<id>/…`
+     * 更是一长串扩展 id。不过这道闸就会把它们当成「站点」建出同名文件夹，
+     * 把用户的设置页书签搬进一个叫「settings」的文件夹里。
+     */
+    if (!/^https?:\/\//i.test(b.url ?? '')) {
+      unparseable++;
+      continue;
+    }
     const domain = registrableDomain(b.url ?? '');
     if (!domain) {
       unparseable++;

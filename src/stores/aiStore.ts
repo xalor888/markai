@@ -40,6 +40,15 @@ export function setChatBudgetBytes(bytes: number): void {
 
 /** 消息条数上限（持久化时裁剪） */
 const MAX_MESSAGES = 60;
+/**
+ * 待删提议的保留上限。
+ *
+ * 一键清理一次可提交上千条，所以不能用很小的数；但也不能无上限（每条都带标题/理由）。
+ * 超出时**丢最旧的并明确告知**（见 deletionsCapWarned），不静默截断。
+ */
+const PENDING_DELETIONS_LIMIT = 2000;
+/** 上限提示只弹一次：连发多批时不该刷屏 */
+let deletionsCapWarned = false;
 /** 发送给模型的历史条数 */
 const HISTORY_LIMIT = 20;
 
@@ -675,13 +684,27 @@ export const useAIStore = create<AIState>((set, get) => ({
         if (evt.messageId !== get().streamingMessageId) break;
         flushDeltaNow(set);
         updateActiveMessages(set, (msgs) => upsertToolBlock(msgs, evt.messageId, evt.record));
-        set((s) => ({
-          // 上限 2000：一键清理（cleanup_sweep）一次可提交上千条提议，200 条会截断
-          pendingDeletions: dedupeProposals([
-            ...s.pendingDeletions,
-            ...(evt.record.deletions ?? []),
-          ]).slice(-2000),
-        }));
+        /*
+         * 上限 2000：一键清理（cleanup_sweep）一次可提交上千条提议，200 条会截断。
+         *
+         * 但 `propose_deletions` 单次上限 1000、cleanup_sweep 还能分页多次调用——
+         * **3 批就是 3000 条**，第 3 批到达时最早的 1000 条会被无声丢掉。
+         * 用户看到列表里 2000 条以为就是全部，审批完就以为清理干净了；
+         * 剩下那 1000 条**看起来像"没问题"**，实际是提议被丢了。
+         * 所以丢了多少必须说出来。
+         */
+        set((s) => {
+          const merged = dedupeProposals([...s.pendingDeletions, ...(evt.record.deletions ?? [])]);
+          const dropped = Math.max(0, merged.length - PENDING_DELETIONS_LIMIT);
+          if (dropped > 0 && !deletionsCapWarned) {
+            deletionsCapWarned = true;
+            pushToast(`待删列表已达上限，${dropped} 条提议未列出`, {
+              description: `单次最多保留 ${PENDING_DELETIONS_LIMIT} 条待确认项。处理完当前这批后，再让 Agent 整理一次即可看到剩下的。`,
+              variant: 'destructive',
+            });
+          }
+          return { pendingDeletions: merged.slice(-PENDING_DELETIONS_LIMIT) };
+        });
         // 工具改了书签结构 → 刷新书签树
         if (MUTATING_TOOLS.has(evt.record.name)) void useBookmarkStore.getState().loadTree();
         break;

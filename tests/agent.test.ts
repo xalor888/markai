@@ -14793,6 +14793,72 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     );
   });
 
+
+  /*
+   * 删除提议超过 2000 条时，最旧的那批被静默丢弃。
+   *
+   * `chat:tool_done` 里对 `pendingDeletions` 做了 `.slice(-2000)`（注释写明是因为
+   * cleanup_sweep 一次可提交上千条，200 条会截断）。但 `propose_deletions` 单次上限
+   * 1000、`cleanup_sweep` 也能分页多次调用——**3 批就是 3000 条**，第 3 批到达时
+   * 最早的 1000 条被无声丢掉。
+   *
+   * 后果：用户在待删列表里看到 2000 条，以为这就是全部，审批完就以为清理干净了；
+   * 剩下那 1000 条**看起来像"没问题"**，实际是提议被丢了。
+   */
+  await okA('删除提议超过 2000 条时要告诉用户有被丢弃的', async () => {
+    const { useAIStore } = await import('../src/stores/aiStore');
+    const { useToastStore } = await import('../src/lib/toast');
+
+    useToastStore.setState({ toasts: [] });
+    useAIStore.setState({
+      pendingDeletions: [],
+      conversations: [], activeId: null, messages: [], deletedIds: [], clearedIds: [],
+      streaming: true, streamingMessageId: 'm-cap',
+    });
+
+    /** 造一批提议（bookmarkId 唯一，避免去重合并） */
+    const batch = (n: number, tag: string) =>
+      Array.from({ length: n }, (_, i) => ({
+        id: 'p-' + tag + '-' + i,
+        bookmarkId: 'b-' + tag + '-' + i,
+        title: 't' + i,
+        reason: 'r',
+        status: 'pending' as const,
+        createdAt: i,
+      }));
+
+    // 三批各 1000 条 = 3000，必然触到 2000 上限
+    for (const tag of ['a', 'b', 'c'] as const) {
+      useAIStore.setState({ streaming: true, streamingMessageId: 'm-cap' });
+      useAIStore.getState().handleOutbound({
+        type: 'chat:tool_done',
+        messageId: 'm-cap',
+        record: {
+          id: 't-' + tag,
+          name: 'propose_deletions',
+          args: '{}',
+          status: 'done',
+          deletions: batch(1000, tag),
+        },
+      });
+    }
+
+    const kept = useAIStore.getState().pendingDeletions.length;
+    const toasts = useToastStore.getState().toasts.map((t) => t.title + ' ' + (t.description ?? ''));
+    const disclosed = toasts.some((t) => /丢弃|超出|上限/.test(t));
+    console.log(`   [DBG] 保留 ${kept} 条（提交了 3000），提示语：${JSON.stringify(toasts)}`);
+
+    assert.equal(kept, 2000, `上限应为 2000，实际 ${kept}`);
+    /*
+     * 关键断言：被丢弃这 1000 条必须说出来。
+     * 不说的话用户以为 2000 条就是全部，剩下的书签「看起来像没问题」。
+     */
+    assert.ok(
+      disclosed,
+      `丢弃了 1000 条提议却没有告诉用户（toasts=${JSON.stringify(toasts)}）——用户会以为 2000 条就是全部`,
+    );
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

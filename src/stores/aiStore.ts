@@ -188,8 +188,15 @@ const crossWindowWrite = { current: false };
 let crossSyncTimer: ReturnType<typeof setTimeout> | null = null;
 /** 保活心跳计时器（每 20s 向 background 发 ping，防止长任务期间 SW 被回收） */
 const keepaliveTimer: { current: ReturnType<typeof setInterval> | null } = { current: null };
-/** 超长会话截断提示已提醒过（避免每次发送重复提示） */
-let truncateWarned = false;
+/**
+ * 哪些会话已经提示过「超长截断」。
+ *
+ * 原来是个全局 boolean，只有 `clearMessages()` 会复位——`createConversation()`
+ * 不复位，于是新建会话聊到上限时**一声不响**地丢掉早期消息，
+ * 用户完全不知道之前的对话已经没了。
+ * 按会话 id 记，每个会话各提示一次，语义才对。
+ */
+const truncateWarned = new Set<string>();
 
 /**
  * 跨窗口同步：sidepanel 与完整页同时打开时，聊天与待删清单实时一致。
@@ -431,11 +438,12 @@ export const useAIStore = create<AIState>((set, get) => ({
     const source = get().messages;
     const history = (opts?.replaceLastUser ? source.slice(0, -1) : source).slice(-HISTORY_LIMIT);
 
-    // 超长会话截断提示：仅在首次达到上限时提醒一次
+    // 超长会话截断提示：每个会话各提示一次（换会话后要能再提醒）
     const before = get().messages.length;
-    if (before > MAX_MESSAGES - 2 && !truncateWarned) {
-      truncateWarned = true;
-      pushToast('对话较长，仅保留最近 60 条消息', { variant: 'default' });
+    const convId = get().activeId;
+    if (before > MAX_MESSAGES - 2 && convId && !truncateWarned.has(convId)) {
+      truncateWarned.add(convId);
+      pushToast(`对话较长，仅保留最近 ${MAX_MESSAGES} 条消息`, { variant: 'default' });
     }
     // 会话首条消息 → 自动标题（用户可随后重命名）
     const active = get().conversations.find((c) => c.id === get().activeId);
@@ -534,7 +542,9 @@ export const useAIStore = create<AIState>((set, get) => ({
   },
 
   async clearMessages() {
-    truncateWarned = false;
+    // 清空当前会话后重置它的提示标记：下次再聊满还能提醒一次
+    const cid = get().activeId;
+    if (cid) truncateWarned.delete(cid);
     // 双保险：流式中清空先停止后台流（UI 按钮已禁用，这里防直接调用）
     if (get().streaming) {
       get().cancel();

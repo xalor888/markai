@@ -14977,6 +14977,68 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     );
   });
 
+
+  /*
+   * 「对话较长，仅保留最近 60 条」的提示只在**第一次**出现，之后再也不提示。
+   *
+   * `truncateWarned` 是模块级 boolean，只有 `clearMessages()`（清空当前会话）会复位它。
+   * `createConversation()`（新建会话）不复位——于是：
+   *   会话 A 聊满 60 条 → 提示一次 → 新建会话 B → 聊满 60 条 → **一声不响地丢掉了更早的消息**
+   *
+   * 用户在新会话里被静默截断，完全不知道早期的对话已经被丢掉。
+   */
+  await okA('新建会话后再次长对话，仍要提示「只保留最近 N 条」', async () => {
+    const { useAIStore } = await import('../src/stores/aiStore');
+    const { useToastStore } = await import('../src/lib/toast');
+
+    const mkMsgs = (n: number, tag: string) =>
+      Array.from({ length: n }, (_, i) => ({
+        id: 'msg-' + tag + '-' + i,
+        role: (i % 2 === 0 ? 'user' : 'assistant') as 'user' | 'assistant',
+        blocks: [{ kind: 'text' as const, text: 'hi' }],
+        createdAt: i,
+      }));
+
+    const convA = { id: 'conv-A', title: 'A', createdAt: 1, updatedAt: 1, messages: mkMsgs(59, 'a') };
+    useToastStore.setState({ toasts: [] });
+    useAIStore.setState({
+      conversations: [convA],
+      activeId: 'conv-A',
+      messages: convA.messages,
+      pendingDeletions: [],
+      deletedIds: [], clearedIds: [],
+      streaming: false, streamingMessageId: null,
+    });
+
+    // 会话 A：59 条 > MAX_MESSAGES-2(58) → 首次触发提示
+    await useAIStore.getState().send('继续');
+    const warnA = useToastStore.getState().toasts.filter((t) => /仅保留最近/.test(t.title)).length;
+
+    // 新建会话 B：send 结束后 streaming 仍是 true，createConversation 会提前返回，
+    // 必须先把它复位（真实界面里这条路径由 chat:done/cancelled 收尾）
+    useAIStore.setState({ streaming: false, streamingMessageId: null });
+    useAIStore.getState().createConversation();
+    assert.notEqual(useAIStore.getState().activeId, 'conv-A', '前置：必须真的切到了新会话');
+    const convBMsgs = mkMsgs(59, 'b');
+    useAIStore.setState({ messages: convBMsgs, streaming: false, streamingMessageId: null });
+    useAIStore.setState((s) => ({
+      conversations: s.conversations.map((c) =>
+        c.id === s.activeId ? { ...c, messages: convBMsgs } : c,
+      ),
+    }));
+    useToastStore.setState({ toasts: [] });
+
+    await useAIStore.getState().send('继续');
+    const warnB = useToastStore.getState().toasts.filter((t) => /仅保留最近/.test(t.title)).length;
+
+    console.log(`   [DBG] 会话A 提示 ${warnA} 次，会话B 提示 ${warnB} 次`);
+    assert.ok(warnA > 0, '会话 A 达到上限时应提示');
+    assert.ok(
+      warnB > 0,
+      '新建会话 B 达到上限时也必须提示——否则用户在新会话里被静默截断，不知道早期消息已丢',
+    );
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

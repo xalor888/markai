@@ -118,7 +118,10 @@ export function BookmarkDialogs() {
     try {
       new URL(finalUrl);
     } catch {
-      pushToast('URL 格式无效', { variant: 'destructive' });
+      pushToast('URL 格式无效', {
+        description: '需要一个完整的网址，例如 https://example.com 或 https://example.com/path',
+        variant: 'destructive',
+      });
       return;
     }
     setBusy(true);
@@ -251,7 +254,10 @@ export function BookmarkDialogs() {
     try {
       new URL(finalUrl);
     } catch {
-      pushToast('URL 格式无效', { variant: 'destructive' });
+      pushToast('URL 格式无效', {
+        description: '需要一个完整的网址，例如 https://example.com 或 https://example.com/path',
+        variant: 'destructive',
+      });
       return;
     }
     if (finalUrl === node.url) {

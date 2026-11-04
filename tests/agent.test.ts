@@ -15362,6 +15362,48 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
       `不应出现“失败请重试”，这会误导并导致二次删除请求：${JSON.stringify(toasts)}`,
     );
   });
+
+  /*
+   * 「只报错、不给下一步」的两个提示。
+   *
+   * 用户看到「URL 格式无效」却不知道该改成什么样；
+   * 看到「Agent 正在处理中」却不知道要等多久、能不能取消。
+   * 两个都是可执行的下一步缺失——用户只能自己猜。
+   */
+  await okA('URL 格式无效时必须给出可照做的例子（不能只说“无效”）', async () => {
+    const src = await import('node:fs')
+      .then((fs) => fs.readFileSync('src/components/bookmark-list/bookmark-dialogs.tsx', 'utf8'));
+
+    // 找出所有「URL 格式无效」的 toast
+    const matches = [...src.matchAll(/pushToast\('URL 格式无效'([^)]*)\)/g)];
+    assert.ok(matches.length > 0, '源码里应有「URL 格式无效」提示');
+
+    for (const m of matches) {
+      const rest = m[1] ?? '';
+      console.log(`   [DBG] URL 无效 toast 参数: ${JSON.stringify(rest.slice(0, 80))}`);
+      assert.ok(
+        /description/.test(rest),
+        'URL 格式无效必须带 description，给出正确格式的例子（如 https://example.com）',
+      );
+    }
+  });
+
+  await okA('Agent 忙时必须说明“怎么办”（等多久 / 能否取消）', async () => {
+    const src = await import('node:fs')
+      .then((fs) => fs.readFileSync('src/stores/aiStore.ts', 'utf8'));
+
+    const matches = [...src.matchAll(/pushToast\('Agent 正在处理中[^']*'([^)]*)\)/g)];
+    assert.ok(matches.length > 0, '源码里应有「Agent 正在处理中」提示');
+
+    for (const m of matches) {
+      const rest = m[1] ?? '';
+      console.log(`   [DBG] Agent 忙 toast 参数: ${JSON.stringify(rest.slice(0, 80))}`);
+      assert.ok(
+        /description/.test(rest),
+        'Agent 忙时必须带 description，说明要等它结束或如何取消，不能只说“请稍候”',
+      );
+    }
+  });
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

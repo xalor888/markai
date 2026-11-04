@@ -405,7 +405,9 @@ export const useAIStore = create<AIState>((set, get) => ({
 
   async send(text, opts) {
     if (get().streaming) {
-      pushToast('Agent 正在处理中，请稍候');
+      pushToast('Agent 正在处理中，请稍候', {
+        description: '等它完成或者点击「停止」按钮来取消当前任务',
+      });
       return;
     }
     // 启动竞态保护：load 完成前 send 会把消息写进不存在的会话（静默丢失）
@@ -567,7 +569,9 @@ export const useAIStore = create<AIState>((set, get) => ({
 
   createConversation() {
     if (get().streaming) {
-      pushToast('Agent 正在处理中，请稍候');
+      pushToast('Agent 正在处理中，请稍候', {
+        description: '等它完成或者点击「停止」按钮来取消当前任务',
+      });
       return;
     }
     const conv: Conversation = { id: uid(), title: '新会话', createdAt: Date.now(), updatedAt: Date.now(), messages: [] };

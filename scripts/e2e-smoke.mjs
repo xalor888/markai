@@ -140,7 +140,19 @@ async function main() {
     crashed = e;
   } finally {
     const failed = results.filter((r) => !r.ok);
-    console.log(`\nE2E 结果：${results.length - failed.length}/${results.length} 通过 · ${((Date.now() - RUN_START) / 1000).toFixed(1)}s`);
+    /*
+     * 首行必须**自己**就看得出完不完整。
+     *
+     * 实测踩过：一次偶发中断只跑了 72 项，脚本确实把 exitCode 设成 1 并打印了
+     * 「E2E 执行中断」，但首行仍是「E2E 结果：72/72 通过」——用 grep 取这一行、
+     * 或快速扫一眼的人会直接读成"全绿"。崩溃伪装成绿灯比失败更危险，
+     * 所以把「不完整」写进首行，而不是只靠下面的补充说明。
+     */
+    const passedCount = results.length - failed.length;
+    const headline = crashed
+      ? `E2E 结果（不完整 · 执行中断）：${passedCount}/${results.length} 已完成项通过`
+      : `E2E 结果：${passedCount}/${results.length} 通过`;
+    console.log(`\n${headline} · ${((Date.now() - RUN_START) / 1000).toFixed(1)}s`);
     if (slowCalls.length) {
       console.log('\n— 慢调用（≥400ms）—');
       for (const c of [...slowCalls].sort((a, b) => b.ms - a.ms).slice(0, 5)) {

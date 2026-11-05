@@ -15427,6 +15427,40 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
         '用户点「在新窗口打开」失败时不会有任何反馈。请改为给出可见错误提示。',
     );
   });
+
+  /*
+   * e2e 总结行在「执行中断」时必须一眼看出不完整。
+   *
+   * 实测踩过：一次偶发中断只跑了 72 项，脚本正确地把 exitCode 设为 1 并打印了
+   * 「E2E 执行中断」，但首行仍是「E2E 结果：72/72 通过」——用 grep 取「E2E 结果」
+   * 或快速扫一眼的人（包括我）会直接读成"全绿通过"。崩溃伪装成绿灯，
+   * 比测试失败危险得多。
+   *
+   * 脚本已有 crashed 分支（0.2.13x 修过 exitCode），这里把**文案**也钉住：
+   * 中断时首行必须带明确的不完整标记。
+   */
+  await okA('e2e 总结行在执行中断时必须带“不完整”标记', async () => {
+    const { readFileSync } = await import('node:fs');
+    const src = readFileSync('scripts/e2e-smoke.mjs', 'utf8');
+
+    /*
+    /*
+     * 取「拼装总结 + 打印」这一整段代码（跳过注释行），而不是某一单行：
+     * 文案现在在一个 `headline` 变量里，单行匹配会落到别处。
+     * 注释行不算实现——注释到不了运行时（与 shortcut-contract 守卫同判据）。
+     */
+    const code = src
+      .split('\n')
+      .filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l))
+      .join('\n');
+    const at = code.indexOf('const headline');
+    assert.ok(at >= 0, '没找到总结文案的拼装处（const headline）');
+    const block = code.slice(at, at + 600);
+    console.log('   [DBG] 总结代码块:', block.replace(/\s+/g, ' ').slice(0, 160));
+
+    assert.match(block, /crashed/, '总结文案必须根据 crashed 区分，否则中断时会显示成“全通过”');
+    assert.match(block, /不完整/, '中断时的首行必须带「不完整」字样，不能只靠下面的补充说明');
+  });
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

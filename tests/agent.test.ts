@@ -17083,6 +17083,26 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     );
   });
 
+  // ── D6-B3：文档与实现对齐（新引入的外部请求不能藏在代码里） ──
+  console.log('\n[docs] 隐私与说明');
+
+  ok('隐私说明必须交代 models.dev：发什么、什么时候、断网怎么办', () => {
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const src = readFileSync(resolve(root, 'docs/privacy.md'), 'utf8');
+    assert.match(src, /models\.dev/, '新引入的外部请求必须在隐私说明里出现');
+    assert.match(src, /只有 GET 请求本身/, '必须说清"发出去的是什么"');
+    assert.match(src, /不带 API Key/, '必须明确不携带凭据与书签');
+    assert.match(src, /离线快照/, '必须交代断网时的降级，否则"可用性"是空话');
+  });
+
+  ok('README 必须交代这一版的新能力（否则用户不知道有）', () => {
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const src = readFileSync(resolve(root, 'README.md'), 'utf8');
+    for (const key of ['小宠物', '思考强度可调', '模型目录自动匹配', '管家感']) {
+      assert.ok(src.includes(key), `README 缺少「${key}」的说明`);
+    }
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

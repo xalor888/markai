@@ -16195,6 +16195,58 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.equal(out, '好的', '思考不该被当作文本重新发回模型');
   });
 
+  // ── D3-B1：玻璃层（只在浮层用 · 必须走 token · 必须有回退） ──
+  console.log('\n[ui] 玻璃层');
+
+  ok('玻璃层的每个属性都来自 token（不许在组件里写死 rgba）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const css = readFileSync(resolve(srcDir, 'assets/main.css'), 'utf8');
+    const glassRule = css.slice(css.indexOf('.markai-glass {'));
+    for (const token of ['--glass-surface', '--glass-border', '--glass-highlight', '--glass-blur', '--glass-saturate']) {
+      assert.ok(glassRule.includes(`var(${token})`), `.markai-glass 没有使用 ${token}`);
+    }
+  });
+
+  ok('浅色与深色都必须定义玻璃 token（否则深色下会漏出白底）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const css = readFileSync(resolve(srcDir, 'assets/main.css'), 'utf8');
+    const light = css.slice(0, css.indexOf('.dark {'));
+    // 只取 .dark 块本身（到 @layer base 为止）——取到文件末尾会把 .markai-glass 里
+    // 的 var(--glass-surface) 也算进来，于是"深色漏定义"永远测不出来（第一版就栽在这）
+    const darkEnd = css.indexOf('@layer base');
+    const dark = css.slice(css.indexOf('.dark {'), darkEnd > 0 ? darkEnd : css.length);
+    assert.ok(light.includes('--glass-surface'), '浅色缺 glass-surface');
+    assert.ok(dark.includes('--glass-surface'), '深色缺 glass-surface —— 深色下会漏出白玻璃');
+    assert.ok(dark.includes('--glass-border'), '深色缺 glass-border');
+  });
+
+  ok('不支持 backdrop-filter 时必须退回实心（文字不能压在透底上）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const css = readFileSync(resolve(srcDir, 'assets/main.css'), 'utf8');
+    assert.match(css, /@supports not \(\(backdrop-filter/, '缺少 backdrop-filter 的降级分支');
+    const fallback = css.slice(css.indexOf('@supports not ((backdrop-filter'));
+    assert.ok(fallback.includes('background: var(--color-card)'), '降级分支必须给出实心底色');
+  });
+
+  ok('玻璃层必须真的被用在一处浮层上（否则就是死样式）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const toast = readFileSync(resolve(srcDir, 'components/toast/toast.tsx'), 'utf8');
+    assert.match(toast, /markai-glass/, 'Toast 是最典型的浮层，应使用玻璃层');
+    assert.doesNotMatch(toast, /bg-card/, '用了玻璃层就不该再叠 bg-card（会盖掉半透明）');
+  });
+
+  ok('组件里不许出现裸的 backdrop-filter（一律走 markai-glass）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const files = readdirSync(resolve(srcDir, 'components'), { recursive: true, encoding: 'utf8' })
+      .filter((f) => String(f).endsWith('.tsx'));
+    const offenders: string[] = [];
+    for (const f of files) {
+      const txt = readFileSync(resolve(srcDir, 'components', String(f)), 'utf8');
+      if (/backdrop-filter/.test(txt)) offenders.push(String(f));
+    }
+    assert.deepEqual(offenders, [], `这些组件绕过 token 直接写了 backdrop-filter：${offenders.join(', ')}`);
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

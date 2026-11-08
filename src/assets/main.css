@@ -62,6 +62,16 @@
   --text-sm: 0.875rem;
   --text-sm--line-height: 1.375rem;
 
+  /* ── 玻璃层 token（浮层专用）──
+     只在**应用内浮层**上用：Toast / 对话框 / 右键菜单。
+     侧边栏容器**不用**：扩展页面无法模糊背后的网页，玻璃在那里只会糊到自己的纯色底，
+     看起来像脏。浅色底用白 72%、深色底用墨 72%——低于 60% 时小字号在这上面达不到 AA。 */
+  --glass-surface: rgb(255 255 255 / 0.72);
+  --glass-border: rgb(16 24 40 / 0.1);
+  --glass-highlight: rgb(255 255 255 / 0.6);
+  --glass-blur: 12px;
+  --glass-saturate: 1.4;
+
   /* 字体：系统字体栈 */
   --font-sans:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
@@ -90,6 +100,11 @@
   --color-accent-muted: #232a4d;
   --color-destructive: #f97066;
   --color-success: #5fd08a;
+
+  /* 玻璃层：深色下用「墨底 + 极淡白边」，高光比浅色更克制（亮底上的白高光会发灰） */
+  --glass-surface: rgb(21 26 33 / 0.72);
+  --glass-border: rgb(227 232 239 / 0.1);
+  --glass-highlight: rgb(255 255 255 / 0.08);
 }
 
 @layer base {
@@ -422,4 +437,27 @@
 }
 .markdown strong {
   font-weight: 600;
+}
+
+/* ── 玻璃层（markai-glass）──
+   抄的是 react-bits GlassSurface 的 **CSS 回退档**思路，不是它的 WebGL2 着色器路径：
+   侧边栏是常驻面板，rAF 常驻渲染会持续吃 GPU；CSS 路径视觉收益接近，功耗归零。
+   inset 高光是「玻璃边缘反光」，不是投影阴影——常规界面仍然禁用投影（这条规矩不破）。 */
+.markai-glass {
+  background: var(--glass-surface);
+  border: 1px solid var(--glass-border);
+  -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+  /* 高光 + 浮层阴影一起给：玻璃类不在 @layer 内，不写在这里会把 shadow-lg 盖掉 */
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    var(--shadow-lg);
+}
+
+/* 不支持 backdrop-filter 时退回实心：宁可没有玻璃感，也不能让文字压在透底上 */
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .markai-glass {
+    background: var(--color-card);
+    box-shadow: var(--shadow-lg);
+  }
 }

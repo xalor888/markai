@@ -60,7 +60,7 @@ import {
   queueBlink,
   shapeOf,
 } from '../src/lib/pet/eyes';
-import { breathScale, hasRunningTool, lookOf, stateFromAgent, type PetState } from '../src/lib/pet/state';
+import { breathScale, hasRunningTool, lookOf, shouldCelebrate, stateFromAgent, type PetState } from '../src/lib/pet/state';
 import { READ_TOOL_NAMES, classifyTool } from '../src/lib/ai/turn-plan';
 import {
   CATALOG_CACHE_VERSION,
@@ -16583,8 +16583,37 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
   ok('空态：宠物状态由 Agent 真实状态推导，不许写死 idle', () => {
     const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
     const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
-    assert.match(src, /petState=\{stateFromAgent\(streaming, hasRunningTool\(messages\)\)\}/, '空态应接真实状态');
+    // 状态推导集中在一处（头部与空态复用同一个值，否则会算出两个不同状态）
+    assert.match(
+      src,
+      /const toolRunning = useMemo\(\(\) => hasRunningTool\(messages\), \[messages\]\)/,
+      '工具扫描必须 memo 化（每次流式增量全量扫是没必要的开销）',
+    );
+    assert.match(
+      src,
+      /const petState: PetState = celebrate \? 'happy' : stateFromAgent\(streaming, toolRunning\)/,
+      '状态必须由真实 Agent 状态推导',
+    );
+    assert.match(src, /petState=\{petState\}/, '空态应复用同一个 petState');
     assert.doesNotMatch(src, /<PetFace size=\{72\} state="idle"/, '不许再写死 idle');
+  });
+
+  // ── D4-B4：宠物的存在感（常驻 + 一次性开心） ──
+  console.log('\n[pet] 存在感');
+
+  ok('只有一轮正常结束才庆祝（失败不该面露喜色）', () => {
+    assert.equal(shouldCelebrate(true, false, false), true);
+    assert.equal(shouldCelebrate(true, false, true), false, '失败后面露喜色比不做表情更伤信任');
+    assert.equal(shouldCelebrate(false, true, false), false, '刚开始不该庆祝');
+    assert.equal(shouldCelebrate(false, false, false), false, '一直待机不该反复庆祝');
+  });
+
+  ok('宠物常驻 Agent 头部（不再是一个 Bot 图标）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
+    assert.match(src, /<PetFace size=\{26\} state=\{petState\} \/>/, '头部应常驻宠物');
+    // 空态与头部必须共用同一个推导值，不能各算一遍（会算出两个不同状态）
+    assert.match(src, /petState=\{petState\}/, '空态应复用同一个 petState');
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

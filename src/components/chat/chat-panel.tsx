@@ -36,7 +36,7 @@ import { Dialog } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
 import { BrandMark } from '@/components/theme/theme-provider';
 import { PetFace } from '@/components/pet/pet-face';
-import { hasRunningTool, stateFromAgent, type PetState } from '@/lib/pet/state';
+import { hasRunningTool, shouldCelebrate, stateFromAgent, type PetState } from '@/lib/pet/state';
 import { MessageView } from './message-view';
 
 /** 快捷指令 chip */
@@ -75,6 +75,29 @@ export function ChatPanel({
 }) {
   const messages = useAIStore((s) => s.messages);
   const streaming = useAIStore((s) => s.streaming);
+
+  /*
+   * 宠物的常驻状态：工具在跑 → working，本轮在跑 → thinking，否则 idle。
+   * 另外在一轮**正常结束**时给一次短暂的 happy（1.6s），失败/取消不给——
+   * 失败后面露喜色比不做表情更伤信任。
+   */
+  const [celebrate, setCelebrate] = useState(false);
+  const wasStreaming = useRef(false);
+  useEffect(() => {
+    // 从 store 直接取最新消息：把 messages 放进依赖会让每次流式增量都跑一遍 effect
+    const lastFailed = Boolean(useAIStore.getState().messages.at(-1)?.failed);
+    if (shouldCelebrate(wasStreaming.current, streaming, lastFailed)) {
+      setCelebrate(true);
+      wasStreaming.current = streaming;
+      const t = setTimeout(() => setCelebrate(false), 1600);
+      return () => clearTimeout(t);
+    }
+    wasStreaming.current = streaming;
+    return undefined;
+  }, [streaming]);
+  // useMemo：messages 引用不变就不重复扫（每次 delta 都全量扫是没必要的开销）
+  const toolRunning = useMemo(() => hasRunningTool(messages), [messages]);
+  const petState: PetState = celebrate ? 'happy' : stateFromAgent(streaming, toolRunning);
   const send = useAIStore((s) => s.send);
   const cancel = useAIStore((s) => s.cancel);
   const pendingPlan = useAIStore((s) => s.pendingPlan);
@@ -298,9 +321,8 @@ export function ChatPanel({
     >
       {/* 头部：紧凑单行，文件夹/模型截断显示，不互相挤压 */}
       <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
-        <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-accent text-accent-foreground">
-          <Bot className="h-3.5 w-3.5" strokeWidth={2.2} />
-        </span>
+        {/* 宠物常驻在 Agent 头部：它是这一栏的"人"，不是一个图标 */}
+        <PetFace size={26} state={petState} />
         <span className="shrink-0 text-xs font-semibold text-foreground">Agent</span>
         {streaming ? (
           <span
@@ -820,7 +842,7 @@ export function ChatPanel({
               onChip={(p) => void send(p)}
               configured={chatConfigured}
               autoOrganize={config.autoOrganizeNew ?? true}
-              petState={stateFromAgent(streaming, hasRunningTool(messages))}
+              petState={petState}
             />
           ) : (
             <div className="space-y-3.5">

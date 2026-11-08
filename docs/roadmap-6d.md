@@ -29,6 +29,26 @@
 
 ## 三、进度（按批追加，最新在上）
 
+### D4-B4 · 宠物常驻 + 一次性开心 — 2026-11-09
+
+- Agent 头部：`Bot` 图标 → `PetFace`（26px）**常驻**。宠物是这一栏的"人"，不是一个图标
+- `shouldCelebrate(prevStreaming, streaming, lastFailed)`：一轮**正常**结束才给 1.6s 的 `happy`
+  - 失败/取消也走 streaming 结束，一律庆祝会"在报错后面露喜色"——比不做表情更伤信任
+- 状态推导集中在**一处**（`toolRunning` + `petState`），空态与头部复用同一个值
+  （两处各算一遍会算出两个不同状态，用户会看到头部在干活、空态在发呆）
+- 测试 986 → **988**（+2）
+- **证伪**：去掉 `!lastFailed` →「失败后面露喜色」转红
+
+**e2e 抖动（如实记录）**：第一次跑出现 1 项失败
+`流式内容及时落盘 · {"saw":false,"delta":-1571}`；第二次 199/199、第三次 199/199。
+判定为门禁自身抖动（项目历史上出现过同类），同时顺手做了两件**降低抖动面**的事：
+`hasRunningTool` 用 `useMemo`（messages 引用不变就不重扫）、庆祝 effect 的依赖从
+`[streaming, messages]` 收窄到 `[streaming]`（messages 走 `getState()`）。
+不把"跑两次就绿"当结论，但也没掩盖第一次失败。
+
+**门**：tsc ✅ · 单测 988 ✅ · build 744ms / 1.08 MB · e2e 199/199 · 112.1s
+**下一批 D4-B5**：拖拽甩抛的 Q 弹手感（dsh-pet 的那套物理），以及 reduced-motion 下的替代反馈。
+
 ### D4-B3 · 宠物跟着 Agent 真实状态走 — 2026-11-09
 
 - `pet/state.ts` 新增 `hasRunningTool(messages)`：扫**全部** assistant 消息的 tool 块

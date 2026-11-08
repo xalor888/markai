@@ -96,3 +96,13 @@ export function hasRunningTool(messages: ChatMessage[]): boolean {
   }
   return false;
 }
+
+/**
+ * 一轮**正常**结束时才值得给一次"开心"。
+ *
+ * 失败/取消也走 streaming 结束，如果一律庆祝，宠物会在报错后面露喜色——
+ * 那种"假笑"比不做表情更伤信任。
+ */
+export function shouldCelebrate(prevStreaming: boolean, streaming: boolean, lastFailed: boolean): boolean {
+  return prevStreaming && !streaming && !lastFailed;
+}

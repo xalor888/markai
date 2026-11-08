@@ -13,7 +13,7 @@
  * 用法：
  *   node scripts/measure-coldstart.mjs [书签数] [重复次数]
  *
- * 参考基准（本机 headless Chromium，见 docs/autonomous-7d.md）：
+ * 参考基准（本机 headless Chromium 实测）：
  *   450 条  → topbar 86ms / input 82ms / rows 99ms
  *   1800 条 → topbar 164ms / input 148ms / rows 186ms
  * 基本线性，且都远低于"用户能感觉到卡"的量级（>1s）。

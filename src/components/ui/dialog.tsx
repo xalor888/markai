@@ -87,7 +87,8 @@ export function Dialog({
         tabIndex={-1}
         onKeyDown={onPanelKeyDown}
         className={cn(
-          'animate-scale-in relative max-h-[calc(100vh-32px)] max-w-[calc(100vw-32px)] overflow-y-auto rounded-lg border border-border bg-card p-4 shadow-lg outline-none',
+          // 对话框是浮层：用玻璃层（下面压着书签列表，能糊出层次）
+          'markai-glass animate-scale-in relative max-h-[calc(100vh-32px)] max-w-[calc(100vw-32px)] overflow-y-auto rounded-lg p-4 outline-none',
           width,
         )}
       >

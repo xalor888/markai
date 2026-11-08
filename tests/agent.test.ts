@@ -48,6 +48,7 @@ import {
 import type { ReasoningPolicy } from '../src/lib/models/types';
 import { effortLabel, reasoningControl, toggleOptions } from '../src/lib/models/control';
 import { reasoningPayload } from '../src/lib/models/request';
+import { AA_NORMAL, composite, contrastRatio, parseCssColor, parseHex, relativeLuminance } from '../src/lib/ui/contrast';
 import { READ_TOOL_NAMES, classifyTool } from '../src/lib/ai/turn-plan';
 import {
   CATALOG_CACHE_VERSION,
@@ -16245,6 +16246,71 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
       if (/backdrop-filter/.test(txt)) offenders.push(String(f));
     }
     assert.deepEqual(offenders, [], `这些组件绕过 token 直接写了 backdrop-filter：${offenders.join(', ')}`);
+  });
+
+  // ── D3-B2：对比度必须可执行（玻璃是半透明的，不能只看两色） ──
+  console.log('\n[ui] 对比度');
+
+  ok('对比度数学：黑白 21:1、同色 1:1', () => {
+    assert.ok(Math.abs(contrastRatio(parseHex('#000000'), parseHex('#ffffff')) - 21) < 0.01);
+    assert.equal(contrastRatio(parseHex('#777777'), parseHex('#777777')), 1);
+    assert.ok(Math.abs(relativeLuminance(parseHex('#ffffff')) - 1) < 1e-9);
+    assert.ok(Math.abs(relativeLuminance(parseHex('#000000'))) < 1e-9);
+  });
+
+  ok('半透明合成：50% 白叠黑 ≈ 灰 128（玻璃的实际底色就是这么来的）', () => {
+    const mid = composite(parseHex('#ffffff'), 0.5, parseHex('#000000'));
+    assert.equal(mid.r, 128);
+    assert.equal(mid.g, 128);
+    assert.equal(mid.b, 128);
+    // 不透明 / 全透明两个端点
+    assert.equal(composite(parseHex('#ffffff'), 1, parseHex('#000000')).r, 255);
+    assert.equal(composite(parseHex('#ffffff'), 0, parseHex('#000000')).r, 0);
+  });
+
+  const cssSrc = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/assets/main.css'), 'utf8');
+  const lightBlock = cssSrc.slice(0, cssSrc.indexOf('.dark {'));
+  const darkBlock = cssSrc.slice(cssSrc.indexOf('.dark {'), cssSrc.indexOf('@layer base'));
+  const token = (block: string, name: string): string => {
+    const m = new RegExp(`${name}:\\s*([^;]+);`).exec(block);
+    assert.ok(m?.[1], `没找到 token ${name}`);
+    return m[1]!.trim();
+  };
+
+  ok('浅色：玻璃上的正文与次要文字都达到 AA（按最坏底层取最小值）', () => {
+    const glass = parseCssColor(token(lightBlock, '--glass-surface'));
+    const fg = parseHex(token(lightBlock, '--color-foreground'));
+    const muted = parseHex(token(lightBlock, '--color-muted-foreground'));
+    // 最坏情况：玻璃叠在最暗的那层底（background）上
+    for (const baseName of ['--color-background', '--color-card']) {
+      const base = parseHex(token(lightBlock, baseName));
+      const shown = composite(glass.rgb, glass.alpha, base);
+      const fgRatio = contrastRatio(fg, shown);
+      const mutedRatio = contrastRatio(muted, shown);
+      assert.ok(fgRatio >= AA_NORMAL, `浅色玻璃上正文只有 ${fgRatio.toFixed(2)}:1（${baseName}）`);
+      assert.ok(mutedRatio >= AA_NORMAL, `浅色玻璃上次要文字只有 ${mutedRatio.toFixed(2)}:1（${baseName}）`);
+    }
+  });
+
+  ok('深色：玻璃上的正文与次要文字都达到 AA（最坏底层取最小值）', () => {
+    const glass = parseCssColor(token(darkBlock, '--glass-surface'));
+    const fg = parseHex(token(darkBlock, '--color-foreground'));
+    const muted = parseHex(token(darkBlock, '--color-muted-foreground'));
+    for (const baseName of ['--color-background', '--color-card']) {
+      const base = parseHex(token(darkBlock, baseName));
+      const shown = composite(glass.rgb, glass.alpha, base);
+      const fgRatio = contrastRatio(fg, shown);
+      const mutedRatio = contrastRatio(muted, shown);
+      assert.ok(fgRatio >= AA_NORMAL, `深色玻璃上正文只有 ${fgRatio.toFixed(2)}:1（${baseName}）`);
+      assert.ok(mutedRatio >= AA_NORMAL, `深色玻璃上次要文字只有 ${mutedRatio.toFixed(2)}:1（${baseName}）`);
+    }
+  });
+
+  ok('玻璃的不透明度不能太低（低于 60% 时小字号必然掉到 AA 以下）', () => {
+    for (const [label, block] of [['浅色', lightBlock], ['深色', darkBlock]] as const) {
+      const glass = parseCssColor(token(block, '--glass-surface'));
+      assert.ok(glass.alpha >= 0.6, `${label}玻璃不透明度只有 ${glass.alpha}，小字号会掉出 AA`);
+    }
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

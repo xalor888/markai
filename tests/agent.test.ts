@@ -16386,6 +16386,26 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.doesNotMatch(block, /\b0ms\b !important/, '不要写成 0ms（事件不会触发）');
   });
 
+  // ── D3-B5：窄面板密度（先量再调，不凭感觉改间距） ──
+  console.log('\n[ui] 窄面板密度');
+
+  ok('书签行高必须在 32–44px 之间（点不准与看不清的两条底线）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/bookmark-list/bookmark-list.tsx'), 'utf8');
+    const m = /'group relative flex h-(\d+(?:\.\d+)?) cursor-pointer/.exec(src);
+    assert.ok(m?.[1], '没解析出行高 —— BookmarkRow 的容器 class 可能被改掉了');
+    const px = Number(m[1]) * 4; // Tailwind 1 unit = 4px
+    console.log(`   [DBG] 当前行高 ${px}px（h-${m[1]}）`);
+    assert.ok(px >= 32, `行高 ${px}px 低于 32 的可点击区底线（触控与精细鼠标都不稳）`);
+    assert.ok(px <= 44, `行高 ${px}px 高于 44，一屏放不下几行书签`);
+  });
+
+  ok('窄面板宽度守卫仍然存在（360/300/260 三档没有横向溢出）', () => {
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const e2e = readFileSync(resolve(root, 'scripts/e2e-smoke.mjs'), 'utf8');
+    assert.match(e2e, /for \(const w of \[360, 300, 260\]\)/, '窄宽度回归用例被删掉了');
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

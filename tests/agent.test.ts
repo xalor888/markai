@@ -72,7 +72,17 @@ import {
   type ChatterState,
 } from '../src/lib/pet/chatter';
 import { FACT_THRESHOLDS, flattenForFacts, petFacts } from '../src/lib/pet/facts';
-import { alreadyKnown, dedupeHabits, extractHabits, habitFromSentence, normalizeHabit } from '../src/lib/pet/habits';
+import {
+  addDecline,
+  alreadyKnown,
+  dedupeHabits,
+  extractHabits,
+  habitFromSentence,
+  HABIT_DECLINE_TTL_MS,
+  isDeclined,
+  normalizeHabit,
+  pruneDeclines,
+} from '../src/lib/pet/habits';
 import { READ_TOOL_NAMES, classifyTool } from '../src/lib/ai/turn-plan';
 import {
   CATALOG_CACHE_VERSION,
@@ -16891,6 +16901,39 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
   ok('alreadyKnown：已有记忆不再重复建议', () => {
     assert.equal(alreadyKnown('别动工作那个文件夹', [{ text: '别动工作那个文件夹。' }]), true);
     assert.equal(alreadyKnown('别动工作那个文件夹', [{ text: '按语言分类' }]), false);
+  });
+
+  // ── D5-B4：习惯候选的确认流程 ──
+  console.log('\n[pet] 习惯确认');
+
+  ok('拒绝 30 天内不再问同一句（标点差异不能绕过）', () => {
+    const now = 1000;
+    const list = addDecline([], '别动工作那个文件夹', now);
+    assert.equal(isDeclined(list, '别动 工作那个文件夹。', now + 60_000), true, '归一化后应视为同一条');
+    assert.equal(isDeclined(list, '别动工作那个文件夹', now + HABIT_DECLINE_TTL_MS), false, '过期后可以再问');
+    assert.equal(isDeclined(list, '按语言分类', now + 60_000), false, '别的候选不受影响');
+  });
+
+  ok('同一条拒绝只保留最新时间（不是每次点击都追加）', () => {
+    const a = addDecline([], '别动工作那个文件夹', 100);
+    const b = addDecline(a, '别动工作那个文件夹', 200);
+    assert.equal(b.length, 1, '同一 key 只留一条');
+    assert.equal(b[0]!.at, 200, '时间要更新，否则过期判断会用到旧时间');
+  });
+
+  ok('过期拒绝记录会被清掉（存储不能无界增长）', () => {
+    const old = addDecline([], '很久以前的习惯', 0);
+    assert.equal(pruneDeclines(old, HABIT_DECLINE_TTL_MS + 1).length, 0);
+    const fresh = addDecline([], '新的习惯', 1000);
+    assert.equal(pruneDeclines(fresh, 2000).length, 1);
+  });
+
+  ok('空态显示"要我记住吗"且能拒绝（拒绝必须真的生效）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
+    assert.match(src, /data-testid="habit-candidate"/, '缺少稳定锚点');
+    assert.match(src, /要我记住这句话吗/, '必须先问，不能悄悄写进记忆');
+    assert.match(src, /onDeclineHabit\(habit\.text\)/, '"不用"必须真的写入拒绝列表');
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

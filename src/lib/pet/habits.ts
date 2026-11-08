@@ -120,7 +120,37 @@ export function dedupeHabits(candidates: HabitCandidate[]): HabitCandidate[] {
 }
 
 /** 候选是否已经存在于记忆里（避免重复建议"要记住吗"） */
-export function alreadyKnown(text: string, existing: { text: string }[]): boolean {
+export function alreadyKnown(text: string, existing: { text?: string; content?: string }[]): boolean {
   const k = habitKey(normalizeHabit(text));
-  return existing.some((m) => habitKey(m.text) === k);
+  // 记忆条目的字段是 content；这里兼容 text 是为了测试与旧数据
+  return existing.some((m) => habitKey(m.text ?? m.content ?? '') === k);
+}
+
+/** 被拒绝过的候选：30 天内不再问同一句（问三次以上就成了骚扰） */
+export const HABIT_DECLINE_STORAGE_KEY = 'markai.habit.declined';
+export const HABIT_DECLINE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+export interface HabitDecline {
+  /** 归一化后的习惯文本的 key（不是原文，避免标点差异导致重复提问） */
+  key: string;
+  at: number;
+}
+
+/** 这条候选是不是已经被拒绝过（且在有效期内） */
+export function isDeclined(list: HabitDecline[], text: string, now: number): boolean {
+  const k = habitKey(normalizeHabit(text));
+  return list.some((d) => d.key === k && now - d.at < HABIT_DECLINE_TTL_MS);
+}
+
+/** 记一次拒绝（同一条只保留最新时间） */
+export function addDecline(list: HabitDecline[], text: string, now: number): HabitDecline[] {
+  const k = habitKey(normalizeHabit(text));
+  if (!k) return list;
+  const rest = list.filter((d) => d.key !== k);
+  return [...rest, { key: k, at: now }];
+}
+
+/** 清理过期拒绝记录（存储不该无界增长） */
+export function pruneDeclines(list: HabitDecline[], now: number): HabitDecline[] {
+  return list.filter((d) => now - d.at < HABIT_DECLINE_TTL_MS);
 }

@@ -38,6 +38,17 @@ import { BrandMark } from '@/components/theme/theme-provider';
 import { PetFace } from '@/components/pet/pet-face';
 import { hasRunningTool, shouldCelebrate, stateFromAgent, type PetState } from '@/lib/pet/state';
 import { flattenForFacts, petFacts } from '@/lib/pet/facts';
+import {
+  addDecline,
+  alreadyKnown,
+  extractHabits,
+  HABIT_DECLINE_STORAGE_KEY,
+  isDeclined,
+  pruneDeclines,
+  type HabitCandidate,
+  type HabitDecline,
+} from '@/lib/pet/habits';
+import { addMemoryItem } from '@/lib/ai/memory';
 import { MessageView } from './message-view';
 
 /** 快捷指令 chip */
@@ -149,6 +160,7 @@ export function ChatPanel({
     const top = facts.sort((a, b) => b.weight - a.weight)[0];
     return top?.text ?? null;
   }, [roots]);
+
   const selectedFolderId = useBookmarkStore((s) => s.selectedFolderId);
   const config = useConfigStore((s) => s.config);
   // 已配置判断与聊天实际一致：resolveConfig 回落预设（原始存储里 baseUrl 可能为空串），
@@ -176,6 +188,36 @@ export function ChatPanel({
 
   // 长期记忆（只读查看 + 快捷启停/删除；编辑入口在设置页）
   const memories = useMemoryStore((s) => s.memories);
+
+  /*
+   * 习惯候选：从**用户自己说过的话**里提取，排除已有记忆与"已被拒绝"的。
+   * 只显示一条：一次问一件事，问多了就变成审问。
+   */
+  const [declines, setDeclines] = useState<HabitDecline[]>([]);
+  useEffect(() => {
+    void chrome.storage.local
+      .get(HABIT_DECLINE_STORAGE_KEY)
+      .then((d) => {
+        const raw = d[HABIT_DECLINE_STORAGE_KEY];
+        setDeclines(Array.isArray(raw) ? pruneDeclines(raw as HabitDecline[], Date.now()) : []);
+      })
+      .catch(() => {
+        // 读不到拒绝列表不影响主流程：最多是多问一次
+      });
+  }, []);
+
+  const habitCandidate = useMemo(() => {
+    const userTexts = messages
+      .filter((m) => m.role === 'user')
+      .flatMap((m) => m.blocks.flatMap((b) => (b.kind === 'text' ? [b.text] : [])));
+    const now = Date.now();
+    return (
+      extractHabits(userTexts.slice(-20)).find(
+        (c) => !alreadyKnown(c.text, memories) && !isDeclined(declines, c.text, now),
+      ) ?? null
+    );
+  }, [messages, memories, declines]);
+
   const loadMemories = useMemoryStore((s) => s.load);
   const toggleMemory = useMemoryStore((s) => s.toggle);
   const removeMemory = useMemoryStore((s) => s.remove);
@@ -856,6 +898,16 @@ export function ChatPanel({
               autoOrganize={config.autoOrganizeNew ?? true}
               petState={petState}
               petLine={petLine}
+              habit={habitCandidate}
+              onAcceptHabit={async (text) => {
+                await addMemoryItem(text, 'habit');
+                await loadMemories();
+              }}
+              onDeclineHabit={async (text) => {
+                const next = pruneDeclines(addDecline(declines, text, Date.now()), Date.now());
+                setDeclines(next);
+                await chrome.storage.local.set({ [HABIT_DECLINE_STORAGE_KEY]: next });
+              }}
             />
           ) : (
             <div className="space-y-3.5">
@@ -1057,6 +1109,9 @@ function EmptyState({
   autoOrganize,
   petState,
   petLine,
+  habit,
+  onAcceptHabit,
+  onDeclineHabit,
 }: {
   chips: QuickChip[];
   onChip: (prompt: string) => void;
@@ -1067,6 +1122,10 @@ function EmptyState({
   petState: PetState;
   /** 宠物想说的一句话（没有可说的就是 null，不要编） */
   petLine: string | null;
+  /** 待确认的习惯候选（一次只问一条） */
+  habit: HabitCandidate | null;
+  onAcceptHabit: (text: string) => Promise<void>;
+  onDeclineHabit: (text: string) => Promise<void>;
 }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-5 px-5 py-6 text-center">
@@ -1075,6 +1134,27 @@ function EmptyState({
         <p className="-mt-3 max-w-[248px] text-2xs leading-4 text-muted-foreground/90" data-testid="pet-line">
           {petLine}
         </p>
+      )}
+      {habit && (
+        /*
+         * 习惯候选：一次只问一条，且必须能拒绝。
+         * 拒绝要真的生效（30 天内不再问），否则"可以拒绝"只是摆设。
+         */
+        <div
+          data-testid="habit-candidate"
+          className="w-full max-w-[248px] rounded-md border border-border bg-card px-2.5 py-2 text-left"
+        >
+          <p className="text-2xs leading-4 text-muted-foreground">要我记住这句话吗？</p>
+          <p className="mt-1 text-xs leading-5 text-foreground">「{habit.text}」</p>
+          <div className="mt-2 flex items-center gap-1.5">
+            <Button size="sm" variant="secondary" onClick={() => void onAcceptHabit(habit.text)}>
+              记住
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => void onDeclineHabit(habit.text)}>
+              不用
+            </Button>
+          </div>
+        </div>
       )}
       <div className="space-y-1">
         <p className="text-sm font-medium text-foreground">我是你的书签管家</p>

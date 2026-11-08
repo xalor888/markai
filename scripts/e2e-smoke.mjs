@@ -67,6 +67,15 @@ function launchChrome() {
       '--load-extension=' + OUT_DIR,
       `--remote-debugging-port=${CDP_PORT}`,
       '--window-size=1280,900',
+      /*
+       * 磁盘紧张时的自保：这台机器曾只剩 ~130MB 可用，
+       * Chrome 默认缓存会写几十 MB 把 /tmp 挤爆，导致 e2e 中途崩溃
+       * （表现为「E2E 结果（不完整 · 执行中断）」+ 某条用例莫名失败）。
+       * 1MB 磁盘缓存对冒烟测试的正确性没有任何影响。
+       */
+      '--disk-cache-size=1048576',
+      '--disable-application-cache',
+      '--disable-background-networking',
       // 默认 headless：不弹窗、不抢焦点（Chrome 112+ 的 new headless 支持扩展）
       ...(HEADED ? [] : ['--headless=new']),
       'about:blank',

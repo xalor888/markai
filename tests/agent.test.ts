@@ -62,6 +62,15 @@ import {
 } from '../src/lib/pet/eyes';
 import { breathScale, hasRunningTool, lookOf, shouldCelebrate, stateFromAgent, type PetState } from '../src/lib/pet/state';
 import { bounceOff, isResting, springStep, squash, tiltDeg } from '../src/lib/pet/physics';
+import {
+  DEFAULT_CHATTER_CONFIG,
+  INTERRUPT_MUTE_MS,
+  markSaid,
+  muteOnInterrupt,
+  pickChatter,
+  type ChatterFact,
+  type ChatterState,
+} from '../src/lib/pet/chatter';
 import { READ_TOOL_NAMES, classifyTool } from '../src/lib/ai/turn-plan';
 import {
   CATALOG_CACHE_VERSION,
@@ -16703,6 +16712,60 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     const src = readFileSync(resolve(srcDir, 'components/pet/pet-face.tsx'), 'utf8');
     const up = src.slice(src.indexOf('const onUp ='), src.indexOf('const eye ='));
     assert.doesNotMatch(up, /vel\s*:/, 'onUp 里不该再设置速度（会把最后一段位移乘成 0）');
+  });
+
+  // ── D5-B1：碎碎念的克制（四条硬规则） ──
+  console.log('\n[pet] 碎碎念');
+
+  const fact = (id: string, weight: number): ChatterFact => ({ id, text: `事实 ${id}`, weight });
+  const fresh = (): ChatterState => ({ lastAnyAt: 0, lastById: {}, mutedUntil: 0 });
+
+  ok('全局最小间隔：90 秒内不再开口', () => {
+    const facts = [fact('a', 5), fact('b', 3)];
+    const state = { ...fresh(), lastAnyAt: 1000 };
+    assert.equal(pickChatter(facts, state, 1000 + 30_000), null, '30 秒就再说一次太吵');
+    assert.equal(pickChatter(facts, state, 1000 + DEFAULT_CHATTER_CONFIG.minGapMs), facts[0], '到点才可以说');
+  });
+
+  ok('同一事实 30 分钟内不重复（用户已经看到了，只是还没决定）', () => {
+    const a = fact('a', 9);
+    const state = markSaid(fresh(), a, 0);
+    assert.equal(pickChatter([a], state, 5 * 60_000), null, '同一条不该反复说');
+    assert.equal(
+      pickChatter([a], state, DEFAULT_CHATTER_CONFIG.perFactCooldownMs),
+      a,
+      '冷却结束后可以再说（前提是全局间隔也满足）',
+    );
+  });
+
+  ok('被打断后静默 10 分钟（不是永久）', () => {
+    const state = muteOnInterrupt(fresh(), 0);
+    assert.equal(INTERRUPT_MUTE_MS, 10 * 60_000);
+    assert.equal(pickChatter([fact('a', 9)], state, 60_000), null, '打断后一分钟内必须闭嘴');
+    assert.notEqual(pickChatter([fact('a', 9)], state, INTERRUPT_MUTE_MS), null, '10 分钟后要能自己恢复');
+  });
+
+  ok('没有候选就是不说（不为"活跃"编一句）', () => {
+    assert.equal(pickChatter([], fresh(), 1e6), null);
+    assert.equal(pickChatter([fact('a', 0)], fresh(), 1e6), null, '权重 0 = 基本不说');
+  });
+
+  ok('加权选择：高权重更常说，但低权重也有机会（不永远同一句）', () => {
+    const facts = [fact('a', 8), fact('b', 4), fact('c', 2)];
+    const at = () => ({ ...fresh(), lastAnyAt: 0 });
+    // random 极小 → 落在权重最高的那条
+    assert.equal(pickChatter(facts, at(), 1e6, {}, () => 0.0001)?.id, 'a');
+    // random 接近 1 → 落在池内最低权重的那条
+    const picked = pickChatter(facts, at(), 1e6, {}, () => 0.9999);
+    assert.equal(picked?.id, 'c', `应落在最后一条，实际 ${picked?.id}`);
+  });
+
+  ok('markSaid 之后同一条立刻进入冷却（状态更新是唯一的记账点）', () => {
+    const a = fact('a', 9);
+    const after = markSaid(fresh(), a, 100);
+    assert.equal(after.lastAnyAt, 100);
+    assert.equal(after.lastById['a'], 100);
+    assert.deepEqual(after.lastById, { a: 100 }, '只记这一条，别把别的事实也冷却掉');
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

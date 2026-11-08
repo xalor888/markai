@@ -1,6 +1,7 @@
 /** ── AI Provider 预设（OpenAI 兼容协议） ── */
 
 import type { AIConfig, ReasoningEffort } from './ai/types';
+import { lookupActiveModel } from './models/runtime';
 
 /** Provider 预设描述 */
 export interface ProviderPreset {
@@ -169,6 +170,11 @@ const MODEL_CONTEXT_WINDOWS: Record<string, number> = {
  */
 export function getModelContextWindow(model: string): number {
   if (!model) return 128_000;
+  // 目录优先：models.dev 给的是**真实窗口**。本地表只收录了几十个常见型号，必然过期——
+  // 实测 gpt-5.6 在本地表里根本没有，于是 1,050,000 的模型只拿到 128,000 的预算，
+  // 压缩阈值提前 8 倍触发。目录未预热（null）时仍回落本地表，不会变成"没有预算"。
+  const catalogLimit = lookupActiveModel(model)?.contextLimit;
+  if (catalogLimit && catalogLimit > 0) return catalogLimit;
   // 精确匹配优先；再尝试段级前缀匹配（qwen3 → qwen3:32b，避免短名命中无关条目如 llama3 → llama3.3:70b）
   if (MODEL_CONTEXT_WINDOWS[model]) return MODEL_CONTEXT_WINDOWS[model]!;
   const family = model.split(':')[0]!;

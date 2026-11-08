@@ -24,7 +24,8 @@ import type { MemoryItem } from '../src/lib/ai/memory';
 import { TOOL_DEFINITIONS } from '../src/lib/ai/prompts';
 import { executeTool, TOOL_META } from '../src/lib/ai/tools';
 import type { AIConfig, ChatInbound, ChatMessage, ChatOutbound, DeletionProposal, ReasoningEffort } from '../src/lib/ai/types';
-import { normalizeReasoningEffort, resolveConfig } from '../src/lib/providers';
+import { getModelContextWindow, normalizeReasoningEffort, resolveConfig } from '../src/lib/providers';
+import { activeCatalogSize, lookupActiveModel, setActiveCatalog } from '../src/lib/models/runtime';
 import { z } from 'zod';
 import { flattenBookmarks, sortTimeline, groupByDay, filterTimeline, dayLabel, pageGroups } from '../src/lib/bookmarks/timeline';
 import { registrableDomain } from '../src/lib/bookmarks/domain';
@@ -15973,6 +15974,37 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
       /else if \(b\.kind === 'reasoning'\) w \+= b\.text\.length;/,
       'messageWeight 没把思考计入 —— 思考更完整的一方会输给思考缺失的一方',
     );
+  });
+
+  // ── D2-B2：目录接进上下文预算（本地窗口表必然过期） ──
+  console.log('\n[models] 目录生效 · 窗口预算');
+
+  ok('目录生效后，1M 模型不再被当成 128K（本地表过期）', () => {
+    setActiveCatalog(fallbackCatalog());
+    assert.equal(getModelContextWindow('gpt-5.6'), 1_050_000, 'models.dev 说它是 1,050,000，本地表根本没这个型号');
+    assert.equal(getModelContextWindow('kimi-k3'), 1_048_576);
+    setActiveCatalog(null);
+    assert.equal(
+      getModelContextWindow('gpt-5.6'),
+      128_000,
+      '没有目录时必须回落本地表（保守值），绝不能变成"没有预算"',
+    );
+  });
+
+  ok('目录索引大小写不敏感，未知模型不误伤', () => {
+    setActiveCatalog(fallbackCatalog());
+    assert.equal(getModelContextWindow('GPT-5.6'), 1_050_000, '用户手填大小写不该影响预算');
+    assert.equal(getModelContextWindow('不存在的模型'), 128_000, '目录里没有就回落，不能拿别人的窗口');
+    assert.equal(getModelContextWindow('qwen3:8b'), 128_000, '本地模型不在目录里，仍走本地表');
+    setActiveCatalog(null);
+  });
+
+  ok('卸载目录后索引真的清空（否则测试互相污染，上线后会串数据）', () => {
+    setActiveCatalog(fallbackCatalog());
+    assert.ok(activeCatalogSize() > 0, '设置后应有索引');
+    setActiveCatalog(null);
+    assert.equal(activeCatalogSize(), 0, '卸载必须真的清空');
+    assert.equal(lookupActiveModel('gpt-5.6'), null);
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

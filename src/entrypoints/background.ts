@@ -39,6 +39,7 @@ import {
 } from '@/lib/ai/organize-log';
 import { registrableDomain } from '@/lib/bookmarks/domain';
 import { CATALOG_STORAGE_KEY, fetchCatalogJson, loadCatalog } from '@/lib/models/store';
+import { setActiveCatalog } from '@/lib/models/runtime';
 import { addOptOutDomain, clearOptOutDomains, readOptOutDomains, removeOptOutDomain, ORGANIZE_OPTOUT_LIMIT } from '@/lib/ai/organize-optout';
 import { normalizeBaseUrl, resolveConfig } from '@/lib/providers';
 import { CONFIG_STORAGE_KEY } from '@/stores/configStore';
@@ -60,6 +61,11 @@ export default defineBackground(() => {
   // 不需要额外"存活心跳标记"的原因。恢复出来的操作会变成一个正常的撤销点，
   // 并带一条"上一轮被中断"的提示。
   void recoverInterruptedTransaction();
+
+  // ── 0.5 预热模型目录 ──
+  // 与上面的恢复并行：这个结果决定上下文预算用哪个窗口（本地表已过期，目录才是真的）。
+  // 不阻塞任何后续动作——预热失败只是预算回落到保守值。
+  void ensureCatalogWarm();
 
   // ── 1. 扩展图标（action）右键菜单 ──
   // 注：Chrome 的 contextMenus **没有 bookmark 上下文**（那是 Firefox menus API 的取值），
@@ -308,6 +314,34 @@ async function retryOrganizeEntry(entry: OrganizeLogEntry): Promise<{ ok: boolea
   return { ok: succeeded, detail: res.detail };
 }
 
+/** 目录缓存的 chrome.storage 适配（读/写同一 key；store 层另有 24h 新鲜度判断） */
+const catalogCachePort = {
+  read: async () => (await chrome.storage.local.get(CATALOG_STORAGE_KEY))[CATALOG_STORAGE_KEY],
+  write: async (value: unknown) => {
+    await chrome.storage.local.set({ [CATALOG_STORAGE_KEY]: value });
+  },
+};
+
+/**
+ * 预热模型目录 → 建立同步索引。
+ *
+ * 为什么在 SW 启动时就做：`getModelContextWindow()` 是同步函数，Agent 循环里随时会调；
+ * 没有索引时它只能靠本地窗口表，而本地表已经过期（gpt-5.6 缺项 → 1M 被当 128K）。
+ * 缓存命中通常几十毫秒；失败不影响任何功能，只是预算回落到保守值。
+ */
+let catalogWarm: Promise<void> | null = null;
+function ensureCatalogWarm(): Promise<void> {
+  catalogWarm ??= loadCatalog(catalogCachePort, fetchCatalogJson, Date.now())
+    .then((r) => {
+      setActiveCatalog(r.catalog);
+      if (r.error) console.warn('[MarkAI] 模型目录预热降级：', r.error);
+    })
+    .catch((e) => {
+      console.warn('[MarkAI] 模型目录预热失败：', e);
+    });
+  return catalogWarm;
+}
+
 async function handleOneShot(msg: OneShotInbound): Promise<OneShotOutbound> {
   switch (msg.type) {
     case 'ai:test': {
@@ -322,17 +356,9 @@ async function handleOneShot(msg: OneShotInbound): Promise<OneShotOutbound> {
        * 设置页要据此显示「目录来自 2026-11-08 的缓存，这次刷新失败：…」，
        * 而不是假装成功（0.2.x 那一串静默失败都是这么来的）。
        */
-      const result = await loadCatalog(
-        {
-          read: async () => (await chrome.storage.local.get(CATALOG_STORAGE_KEY))[CATALOG_STORAGE_KEY],
-          write: async (value) => {
-            await chrome.storage.local.set({ [CATALOG_STORAGE_KEY]: value });
-          },
-        },
-        fetchCatalogJson,
-        Date.now(),
-        { force: msg.force },
-      );
+      const result = await loadCatalog(catalogCachePort, fetchCatalogJson, Date.now(), { force: msg.force });
+      // 拉完立刻生效：设置页看到的能力与 Agent 用的预算必须是同一份目录
+      setActiveCatalog(result.catalog);
       return {
         type: 'ai:catalog:result',
         ok: result.error === null,

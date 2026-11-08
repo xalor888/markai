@@ -29,6 +29,22 @@
 
 ## 三、进度（按批追加，最新在上）
 
+### D2-B2 · 目录接进上下文预算（修 B1 暴露的 8 倍缺口）— 2026-11-08
+
+- `src/lib/models/runtime.ts`：进程内同步索引
+  - `setActiveCatalog` / `lookupActiveModel` / `activeCatalogSize`
+  - 同名冲突**保留先出现的**（后到的覆盖会让同一次会话里窗口忽大忽小）
+  - 未预热返回 null → 调用方回落本地表（红线：目录不可用绝不能变成"没有预算"）
+- `providers.getModelContextWindow`：目录优先 → 本地表兜底
+  - 实测 `gpt-5.6`：128,000 → **1,050,000**（8 倍）
+- `background`：SW 启动即 `ensureCatalogWarm()`（不阻塞任何动作）；`ai:catalog` 拉完立刻 `setActiveCatalog`
+  （设置页看到的能力与 Agent 用的预算必须是同一份目录）
+- 测试 932 → **935**（+3）
+- **证伪**：删掉目录优先那两行 →「1M 模型不再被当成 128K」转红
+
+**门**：tsc ✅ · 单测 935 ✅ · build 931ms / 1.07 MB · e2e 199/199 · 111.6s
+**下一批 D2-B3**：真正的成本项——工具往返次数。先统计一轮里模型平均发几次调用、哪些只读工具可并行。
+
 ### D2-B1 · Agent 成本基线（离线测量，不调 API）— 2026-11-08
 
 新增 `scripts/measure-agent-cost.ts`，只算每轮请求必然携带的固定开销与上下文预算：

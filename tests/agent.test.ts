@@ -17062,6 +17062,27 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.match(src, /update\(\{ proactivity:/);
   });
 
+  // ── D6-B2：常驻开销与思考折叠（回归复测发现的两点） ──
+  console.log('\n[pet] 常驻开销');
+
+  ok('宠物 rAF 必须节流（常驻面板跑 60fps 是风扇级别的开销）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/pet/pet-face.tsx'), 'utf8');
+    assert.match(src, /now - lastPaint < 33/, '缺少 30fps 节流');
+    assert.match(src, /物理仍按真实 dt 积分/, '节流不该改变物理步进（只是降低重绘频率）');
+  });
+
+  ok('历史消息里的思考是折叠的（只有流式中才展开）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/chat/message-view.tsx'), 'utf8');
+    assert.match(src, /open=\{streaming\}/, '折叠状态必须由 streaming 决定');
+    assert.match(
+      src,
+      /streaming=\{streaming && isLast\}/,
+      '只有"正在流式的最后一块"才展开——历史消息一律折叠',
+    );
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

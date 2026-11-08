@@ -90,10 +90,21 @@ export function PetFace({
     }
     let raf = 0;
     let prev = performance.now();
+    let lastPaint = 0;
     const t0 = prev;
     nextBlink.current = t0 + look.blinkEveryMs * (0.6 + Math.random() * 0.8);
 
     const loop = (now: number): void => {
+      /*
+       * 30fps 节流：呼吸与眨眼看不出 60 与 30 的差别，但 CPU 减半。
+       * 侧边栏是常驻面板，这个差别是"笔记本风扇会不会转"级别的。
+       * 物理仍按真实 dt 积分（弹簧有 1/120 子步上限），所以甩抛手感不受影响。
+       */
+      if (now - lastPaint < 33) {
+        raf = requestAnimationFrame(loop);
+        return;
+      }
+      lastPaint = now;
       const dt = now - prev;
       prev = now;
       const t = now - t0;

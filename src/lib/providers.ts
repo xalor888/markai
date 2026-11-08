@@ -266,6 +266,10 @@ export function resolveConfig(saved?: Partial<AIConfig> | null): AIConfig {
     customHeaders: saved?.customHeaders ?? '',
     // 思考强度：非法/缺省一律回落 auto（宁可跟随模型，也不发一个上游不认识的档位）
     reasoningEffort: normalizeReasoningEffort(saved?.reasoningEffort),
+    // 个性化：原样透传，非法值由纯函数层忽略（不值得在这里抛错，用户改不回来）
+    addressName: saved?.addressName ?? '',
+    verbosity: saved?.verbosity ?? 'normal',
+    proactivity: saved?.proactivity ?? 'normal',
     /*
      * 会话头名**总是由预设决定**，不读用户存的值：
      * 它不是一个可配置项，而是"这个服务商要求什么"的事实。用户从 OpenCode Go 切到

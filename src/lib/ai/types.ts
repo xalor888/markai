@@ -140,6 +140,12 @@ export interface AIConfig {
    * 值为稳定会话 ID，见 `getStableSessionId()`：必须稳定，否则服务端路由被打散、缓存全失效。
    */
   sessionHeader?: string;
+  /** 对用户的称呼（空 = 不提；不要编一个"主人"出来） */
+  addressName?: string;
+  /** 回答详略：concise = 先给结论；detailed = 展开解释 */
+  verbosity?: 'concise' | 'normal' | 'detailed';
+  /** 主动程度：quiet = 只在被问时说；active = 主动提具体建议 */
+  proactivity?: 'quiet' | 'normal' | 'active';
   /**
    * 思考强度（reasoning effort）。`'auto'` = 跟随模型（由 models.dev 目录给出该模型的可用档位）。
    *

@@ -30,6 +30,10 @@ export const DEFAULT_CONFIG: AIConfig = {
   customHeaders: '',
   // 思考强度：默认 auto（跟随模型；具体档位由 models.dev 目录给出的能力决定）
   reasoningEffort: 'auto',
+  // 个性化：默认不称呼、正常详略、正常主动程度（全都是"不改行为"的安全值）
+  addressName: '',
+  verbosity: 'normal',
+  proactivity: 'normal',
   configVersion: CONFIG_VERSION,
 };
 

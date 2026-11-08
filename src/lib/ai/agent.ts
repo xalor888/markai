@@ -2,6 +2,7 @@
 
 import { chatCompletion, ChatError, type ApiMessage, type ApiToolCall } from './client';
 import { formatMemoriesForPrompt, getMemories, type MemoryItem } from './memory';
+import { personalInstruction } from '@/lib/pet/personal';
 import { buildTimeContext, PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT, TOOL_DEFINITIONS } from './prompts';
 import { executeTool, type ToolOutput } from './tools';
 import { applyPlan, buildPlan, classifyTool, stepCountOf, type PlannedStep } from './turn-plan';
@@ -329,7 +330,7 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
    * 时间上下文每次请求都重新生成（不是模块级常量）：
    * 侧边栏可能开着一整天，跨过午夜后"今天"必须跟着变。
    */
-  const systemContent = baseSystem + buildTimeContext() + memoryPrompt;
+  const systemContent = baseSystem + buildTimeContext() + memoryPrompt + personalInstruction(config);
   const apiMessages: ApiMessage[] = [{ role: 'system', content: systemContent }];
   for (const m of apiHistory) {
     /*

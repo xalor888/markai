@@ -954,6 +954,52 @@ export function ConfigForm() {
           >
             查看整理记录与补整理 →
           </button>
+
+          <Separator />
+
+          {/* ── 个性化：三个开关都真的影响行为，不是装饰性设置 ── */}
+          <Field
+            label="称呼"
+            htmlFor="address-name"
+            hint="留空 = 不称呼（不会自作主张叫「主人」）"
+          >
+            <Input
+              id="address-name"
+              value={config.addressName ?? ''}
+              onChange={(e) => void update({ addressName: e.target.value })}
+              placeholder="例如：小明"
+              maxLength={16}
+              spellCheck={false}
+            />
+          </Field>
+
+          <Field label="回答详略" htmlFor="verbosity" hint="只影响回答长度，不影响它做什么。">
+            <Select
+              id="verbosity"
+              value={config.verbosity ?? 'normal'}
+              onChange={(e) => void update({ verbosity: e.target.value as 'concise' | 'normal' | 'detailed' })}
+            >
+              <option value="concise">简短（先给结论）</option>
+              <option value="normal">正常（默认）</option>
+              <option value="detailed">详细（说明原因与回退方式）</option>
+            </Select>
+          </Field>
+
+          <Field
+            label="主动程度"
+            htmlFor="proactivity"
+            hint="「主动」时它会提一条具体建议；「安静」时只在你问的时候说。"
+          >
+            <Select
+              id="proactivity"
+              value={config.proactivity ?? 'normal'}
+              onChange={(e) => void update({ proactivity: e.target.value as 'quiet' | 'normal' | 'active' })}
+            >
+              <option value="quiet">安静（只在被问时说）</option>
+              <option value="normal">正常（默认）</option>
+              <option value="active">主动（会提一条建议）</option>
+            </Select>
+          </Field>
         </div>
       </Section>
       </ErrorBoundary>

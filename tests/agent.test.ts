@@ -17042,6 +17042,26 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.match(out, /一次只提一条/);
   });
 
+  // ── D6-B1：设置页的个性化开关（承诺缺口：字段存在但用户改不到） ──
+  console.log('\n[pet] 个性化开关');
+
+  ok('设置页有三个个性化控件（否则字段只能改 storage 才生效）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/options/config-form.tsx'), 'utf8');
+    for (const id of ['address-name', 'verbosity', 'proactivity']) {
+      assert.match(src, new RegExp(`id="${id}"`), `设置页缺少 ${id} 控件`);
+    }
+    assert.match(src, /maxLength=\{16\}/, '称呼输入要限长（与 sanitizeName 的上限一致）');
+  });
+
+  ok('三个开关都写回 config（不是只画控件不保存）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/options/config-form.tsx'), 'utf8');
+    assert.match(src, /update\(\{ addressName: e\.target\.value \}\)/);
+    assert.match(src, /update\(\{ verbosity:/);
+    assert.match(src, /update\(\{ proactivity:/);
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

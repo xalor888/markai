@@ -45,6 +45,7 @@ import {
   resolveReasoningPolicy,
 } from '../src/lib/models/catalog';
 import type { ReasoningPolicy } from '../src/lib/models/types';
+import { effortLabel, reasoningControl, toggleOptions } from '../src/lib/models/control';
 import {
   CATALOG_CACHE_VERSION,
   decodeCatalog,
@@ -15806,6 +15807,59 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     for (const f of fields) {
       assert.ok(fn.includes(f), `AIConfig.${f} 没出现在 resolveConfig 的返回值里 —— 存进去会被静默丢弃`);
     }
+  });
+
+  // ── D1-B4：思考强度控件的决策（五种结局，三种是"不给控件"） ──
+  console.log('\n[models] 思考强度控件决策');
+
+  ok('目录查不到该模型：只给「默认」且不可点，并说明原因', () => {
+    const c = reasoningControl(null, 'gpt-9');
+    assert.equal(c.mode, 'unknown');
+    assert.equal(c.interactive, false, '不知道能力就不该让用户调');
+    assert.equal(c.options.length, 1);
+    assert.match(c.hint, /gpt-9/, '提示必须点名是哪个模型查不到');
+  });
+
+  ok('模型不支持思考：不给控件，且不发送任何思考参数', () => {
+    const policy: ReasoningPolicy = { supported: false, kind: null, efforts: [], field: null };
+    const c = reasoningControl(policy, 'gpt-4.1');
+    assert.equal(c.mode, 'unsupported');
+    assert.equal(c.interactive, false);
+    assert.match(c.hint, /不支持思考/);
+  });
+
+  ok('可调档位的模型：默认 + 全部档位，中文标签', () => {
+    const policy: ReasoningPolicy = { supported: true, kind: 'effort', efforts: ['low', 'high', 'max'], field: 'reasoning_content' };
+    const c = reasoningControl(policy, 'deepseek-v4-pro');
+    assert.equal(c.mode, 'effort');
+    assert.equal(c.interactive, true);
+    assert.deepEqual(c.options.map((o) => o.value), ['auto', 'low', 'high', 'max']);
+    assert.deepEqual(c.options.map((o) => o.label), ['默认', '低', '高', '最高']);
+  });
+
+  ok('只能开关的模型：两档（默认开 / 关闭），不画不存在的档位', () => {
+    const policy: ReasoningPolicy = { supported: true, kind: 'toggle', efforts: [], field: 'reasoning_content' };
+    const c = reasoningControl(policy, 'glm-5.1');
+    assert.equal(c.mode, 'toggle');
+    assert.equal(c.interactive, true);
+    assert.deepEqual(c.options, toggleOptions(), '必须用同一份选项，别在 UI 里再抄一遍');
+    assert.deepEqual(c.options.map((o) => o.value), ['auto', 'none']);
+    assert.equal(c.options.length, 2, 'toggle 型不能出现 低/中/高 这种根本不存在的档位');
+  });
+
+  ok('会思考但不可调：不给滑杆，只说「自动」', () => {
+    const policy: ReasoningPolicy = { supported: true, kind: null, efforts: [], field: 'reasoning_content' };
+    const c = reasoningControl(policy, 'kimi-k2.7');
+    assert.equal(c.mode, 'immutable');
+    assert.equal(c.interactive, false, '目录没有可选项就不能给控件');
+    assert.match(c.hint, /不可调/);
+    assert.equal(c.options.length, 1, '不可调时只该有「自动」一项');
+  });
+
+  ok('档位标签：未知档位原样显示（上游新增档位不该变成空白）', () => {
+    assert.equal(effortLabel('high'), '高');
+    assert.equal(effortLabel('xhigh'), '很高');
+    assert.equal(effortLabel('turbo'), 'turbo');
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

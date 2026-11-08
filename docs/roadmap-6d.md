@@ -29,6 +29,23 @@
 
 ## 三、进度（按批追加，最新在上）
 
+### D1-B4 · 设置页接上目录（思考强度控件按能力动态给）— 2026-11-08
+
+- `src/lib/models/control.ts`：`reasoningControl(policy, modelId)` 五种结局
+  —— `effort` / `toggle` / `unsupported` / `immutable` / `unknown`，**后三种都是"不给控件"**；
+  `toggleOptions()` 是 toggle 型的唯一选项来源（UI 不许再抄一遍）
+- `config-form.tsx`
+  - 目录加载走 background 代理；`catalogNotice` **原样显示** store 给的来源文案（缓存/离线快照/失败原因）
+  - 思考强度 Field：`role="radiogroup"` + 分段按钮，`data-testid="reasoning-effort"`，非交互时 `disabled`
+  - **自动匹配**：换模型即换控件——`findModel` 取该模型 policy，`pickEffort` 算出实际会发的档位；
+    用户选的档位在新模型不可用时，直接提示「你选的「很高」在该模型不可用，实际按「高」发送」
+- 测试 916 → **922**（+6）
+- **证伪**：把 toggle 分支的 `mode` 改成 `'immutable'` →「只能开关的模型」转红
+- 未做（有意挪后）：跨 provider 的模型搜索框与价格/能力徽标，放到 D1-B6（B5 先打通"真发出去"的链路）
+
+**门**：tsc ✅ · 单测 922 ✅ · build 557ms / 1.07 MB · e2e 199/199 · 112.0s
+**下一批 D1-B5**：档位真正注入请求（`client.ts`）+ 思考流解析（`stream.ts` 认 `reasoning_content`）。
+
 ### D1-B3 · 思考强度配置（白名单 + 归一化）— 2026-11-08
 
 - `ai/types.ts`：`ReasoningEffort` 类型 + `AIConfig.reasoningEffort`（`'auto'` = 跟随模型）
@@ -38,7 +55,7 @@
 - **证伪**：把白名单里那行删掉 →「保留思考强度」当场转红
 
 **门**：tsc ✅ · 单测 916 ✅ · build 811ms / 1.06 MB · e2e 199/199 · 112.0s
-**下一批 D1-B4**：设置页接上目录（模型搜索 + 能力徽标 + 思考强度控件，按 `reasoningPolicy` 动态给选项）。
+**下一批（已由 B4 完成一半）**：设置页接上目录 + 思考强度控件。
 
 ### D1-B2 · 目录缓存与加载（IO 注入，所以"失败不许伪装成功"可测）— 2026-11-08
 

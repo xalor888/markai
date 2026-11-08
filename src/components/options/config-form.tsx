@@ -1,5 +1,5 @@
 import { AlertTriangle, Brain, CheckCircle2, ChevronRight, Database, Download, Eye, EyeOff, Loader2, Monitor, Moon, Palette, Plug, Plus, RefreshCw, ShieldCheck, SlidersHorizontal, Sun, Sparkles, Trash2, Zap } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useConfigStore } from '@/stores/configStore';
 import { useAIStore, AI_STORAGE_KEY } from '@/stores/aiStore';
 import { useMemoryStore, initMemorySync } from '@/stores/memoryStore';
@@ -27,6 +27,10 @@ import { Select } from '@/components/ui/select';
 import { Separator } from '@/components/ui/separator';
 import { Slider } from '@/components/ui/slider';
 import { cn } from '@/lib/utils';
+import { findModel, pickEffort } from '@/lib/models/catalog';
+import { effortLabel, reasoningControl } from '@/lib/models/control';
+import type { ModelCatalog } from '@/lib/models/types';
+import type { ReasoningEffort } from '@/lib/ai/types';
 
 /** token 数友好显示：400000 → 400K，1047000 → 1.05M */
 function formatTokens(n: number): string {
@@ -210,6 +214,10 @@ export function ConfigForm() {
     }
   };
   const [remoteModels, setRemoteModels] = useState<string[]>([]);
+  // models.dev 目录：思考能力/上下文/价格的唯一来源（断网时 store 会退到内置快照并如实标注）
+  const [catalog, setCatalog] = useState<ModelCatalog | null>(null);
+  const [catalogNotice, setCatalogNotice] = useState<string | null>(null);
+  const [catalogLoading, setCatalogLoading] = useState(false);
   const [fetchingModels, setFetchingModels] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [confirmClearMemories, setConfirmClearMemories] = useState(false);
@@ -231,12 +239,61 @@ export function ConfigForm() {
   const [ctxInput, setCtxInput] = useState(() => String(Math.round((config.contextWindow ?? 1_048_576) / 1000)));
   /** 模型已知窗口的展示值（跟随模型时显示在输入框旁，让用户知道实际用的是多少） */
   const [autoHint, setAutoHint] = useState('');
+
+  /**
+   * 读取模型目录（缓存 24h；force = 强制刷新）。
+   *
+   * 走 background 代理：上游 api.json 有 5.7 MB，每个页面各拉一遍既费流量又各存一份缓存。
+   * 失败不等于"没有目录"——store 会退到旧缓存或内置快照，并把来源写进 error 文案，
+   * 这里原样显示，让用户知道眼前的能力数据到底新不新。
+   */
+  const reloadCatalog = useCallback(async (force?: boolean) => {
+    setCatalogLoading(true);
+    try {
+      const res = (await chrome.runtime.sendMessage({ type: 'ai:catalog', force: Boolean(force) })) as
+        | OneShotOutbound
+        | undefined;
+      if (res?.type === 'ai:catalog:result') {
+        setCatalog(res.catalog);
+        setCatalogNotice(
+          res.error ??
+            (res.refreshed
+              ? `目录已更新（${res.catalog.providers.length} 个服务商）。`
+              : `目录来自 ${new Date(res.catalog.fetchedAt).toLocaleString('zh-CN')} 的缓存。`),
+        );
+      } else {
+        setCatalogNotice('读取模型目录没有得到响应（后台可能已被回收），稍后点「刷新目录」重试。');
+      }
+    } catch (e) {
+      setCatalogNotice(`读取模型目录失败：${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setCatalogLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void reloadCatalog();
+  }, [reloadCatalog]);
   // 请求竞态纪元（测试连接 / 模型列表各自独立，避免并发时互相卡死对方状态）
   const testEpoch = useRef(0);
   const modelsEpoch = useRef(0);
 
   const preset = getPreset(config.providerId);
   const models = preset?.models ?? [];
+
+  /*
+   * 思考强度控件：能力全部来自目录（不硬编码任何一个模型的支持情况）。
+   * 查不到该模型时 policy 为 null，控件会显示「未知、按默认发送」而不是假装知道。
+   */
+  const activeModel = config.model || preset?.defaultModel || '';
+  const catalogPolicy = catalog ? (findModel(catalog, activeModel, config.providerId)?.reasoning ?? null) : null;
+  const control = reasoningControl(catalogPolicy, activeModel);
+  const chosenEffort = config.reasoningEffort ?? 'auto';
+  const effectiveEffort = catalogPolicy ? pickEffort(catalogPolicy, chosenEffort) : null;
+  const effortNotice =
+    chosenEffort !== 'auto' && typeof effectiveEffort === 'string' && effectiveEffort !== 'toggle' && effectiveEffort !== chosenEffort
+      ? `你选的「${effortLabel(chosenEffort)}」在该模型不可用，实际按「${effortLabel(effectiveEffort)}」发送。`
+      : null;
   /**
    * 生效的上下文窗口：没手动填 → 跟随所选模型。
    * （此前恒为 1M、与模型无关，128K 的模型也拿 1M，护栏因此永不触发。）
@@ -598,6 +655,58 @@ export function ConfigForm() {
                 <option key={`r-${m}`} value={m} />
               ))}
             </datalist>
+          </Field>
+
+          <Field
+            label="思考强度"
+            htmlFor="reasoning-effort"
+            hint={
+              catalogLoading && !catalog ? (
+                '正在读取模型目录…'
+              ) : (
+                <>
+                  {control.hint}
+                  {effortNotice && <span className="mt-0.5 block text-foreground">{effortNotice}</span>}
+                  {catalogNotice && <span className="mt-0.5 block text-2xs">{catalogNotice}</span>}
+                </>
+              )
+            }
+            action={
+              <InlineAction
+                onClick={() => void reloadCatalog(true)}
+                disabled={catalogLoading}
+                busy={catalogLoading}
+                icon={RefreshCw}
+                title="强制刷新 models.dev 模型目录（忽略 24 小时缓存）"
+              >
+                刷新目录
+              </InlineAction>
+            }
+          >
+            <div role="radiogroup" aria-label="思考强度" className="flex flex-wrap gap-1.5" data-testid="reasoning-effort">
+              {control.options.map((opt) => {
+                const selected = chosenEffort === opt.value;
+                return (
+                  <button
+                    key={opt.value}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    disabled={!control.interactive}
+                    onClick={() => void update({ reasoningEffort: opt.value as ReasoningEffort })}
+                    className={cn(
+                      'rounded-sm border px-2 py-1 text-2xs transition-colors',
+                      selected ? 'border-ring bg-accent-muted text-foreground' : 'border-border text-muted-foreground',
+                      control.interactive
+                        ? 'hover:border-ring hover:text-foreground'
+                        : 'cursor-not-allowed opacity-60',
+                    )}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
           </Field>
 
           <Field

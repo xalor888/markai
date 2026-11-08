@@ -152,6 +152,9 @@ interface AIState {
  * 显著降低高频渲染；工具事件/结束事件到达时立即 flush 保证时序。
  */
 let pendingText: { messageId: string; text: string } | null = null;
+/** 思考增量（与正文分开合并：两块不能互相打断顺序） */
+let pendingReasoning: { messageId: string; text: string } | null = null;
+let reasoningTimer: ReturnType<typeof setTimeout> | null = null;
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
@@ -248,12 +251,37 @@ function appendDelta(messages: ChatMessage[], messageId: string, text: string): 
   });
 }
 
+/**
+ * 追加思考到指定消息的最后一个 reasoning 块。
+ *
+ * 与 appendDelta 一样「同类型连续追加、换类型新建块」——这样文本与思考交错时
+ * 顺序天然正确（模型先想后答 → [reasoning][text]），而不是拼成一坨。
+ */
+export function appendReasoningDelta(messages: ChatMessage[], messageId: string, text: string): ChatMessage[] {
+  return messages.map((m) => {
+    if (m.id !== messageId) return m;
+    const blocks = [...m.blocks];
+    const last = blocks[blocks.length - 1];
+    if (last && last.kind === 'reasoning') {
+      return { ...m, blocks: [...blocks.slice(0, -1), { kind: 'reasoning', text: last.text + text }] };
+    }
+    return { ...m, blocks: [...blocks, { kind: 'reasoning', text }] };
+  });
+}
+
 /** 立即落盘未合并的增量（非 delta 事件前调用，保证消息顺序） */
 function flushDeltaNow(set: (fn: (s: AIState) => Partial<AIState>) => void): void {
   if (flushTimer) {
     clearTimeout(flushTimer);
     flushTimer = null;
   }
+  if (reasoningTimer) {
+    clearTimeout(reasoningTimer);
+    reasoningTimer = null;
+  }
+  const r = pendingReasoning;
+  pendingReasoning = null;
+  if (r) updateActiveMessages(set, (msgs) => appendReasoningDelta(msgs, r.messageId, r.text));
   if (!pendingText) return;
   const p = pendingText;
   pendingText = null;
@@ -655,6 +683,11 @@ export const useAIStore = create<AIState>((set, get) => ({
           flushTimer = null;
         }
         pendingText = null;
+        if (reasoningTimer) {
+          clearTimeout(reasoningTimer);
+          reasoningTimer = null;
+        }
+        pendingReasoning = null;
         set((s) => ({
           messages: s.messages.map((m) => (m.id === evt.messageId ? { ...m, blocks: [] } : m)),
         }));
@@ -666,6 +699,24 @@ export const useAIStore = create<AIState>((set, get) => ({
         set({
           pendingPlan: { messageId: evt.messageId, steps: evt.steps },
         });
+        break;
+      }
+
+      case 'chat:reasoning': {
+        // 思考增量：与正文同一条状态机守卫（旧流的残片不得写进当前会话）
+        if (evt.messageId !== get().streamingMessageId) break;
+        pendingReasoning ??= { messageId: evt.messageId, text: '' };
+        pendingReasoning.text += evt.text;
+        if (!reasoningTimer) {
+          reasoningTimer = setTimeout(() => {
+            reasoningTimer = null;
+            const p = pendingReasoning;
+            pendingReasoning = null;
+            if (!p) return;
+            updateActiveMessages(set, (msgs) => appendReasoningDelta(msgs, p.messageId, p.text));
+            scheduleStreamPersist();
+          }, 16);
+        }
         break;
       }
 
@@ -1286,6 +1337,7 @@ function messageWeight(m: ChatMessage): number {
   let w = 0;
   for (const b of m.blocks) {
     if (b.kind === 'text') w += b.text.length;
+    else if (b.kind === 'reasoning') w += b.text.length;
     else w += (b.record.result?.length ?? 0) + (b.record.error?.length ?? 0) + 1;
   }
   return w;

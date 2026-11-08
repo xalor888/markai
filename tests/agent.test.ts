@@ -56,7 +56,7 @@ import {
   loadCatalog,
   type CatalogCachePort,
 } from '../src/lib/models/store';
-import { AI_STORAGE_KEY, flushStreamPersist, useAIStore } from '../src/stores/aiStore';
+import { AI_STORAGE_KEY, appendReasoningDelta, flushStreamPersist, useAIStore } from '../src/stores/aiStore';
 import {
   appendDraft,
   clearDraft,
@@ -15917,6 +15917,62 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     const r = acc.end();
     assert.equal(calls, 0, '空增量不该让 UI 闪一下');
     assert.equal(r.reasoning, '');
+  });
+
+  // ── D1-B6：思考内容的展示链路（块顺序 · 可折叠 · 不丢权重） ──
+  console.log('\n[models] 思考内容展示');
+
+  ok('appendReasoningDelta：连续思考合成一块，正文另起一块（顺序不乱）', () => {
+    let msgs: ChatMessage[] = [{ id: 'm1', role: 'assistant', blocks: [], createdAt: 0 }];
+    msgs = appendReasoningDelta(msgs, 'm1', '先想');
+    msgs = appendReasoningDelta(msgs, 'm1', '一步');
+    assert.equal(msgs[0]!.blocks.length, 1, '连续思考应合并成一块，不是每个增量一块');
+    const b = msgs[0]!.blocks[0]!;
+    assert.equal(b.kind, 'reasoning');
+    assert.equal(b.kind === 'reasoning' ? b.text : '', '先想一步');
+
+    // 真实模型的顺序是「先思考、后回答」：正文到达后必须另起一块
+    const withText: ChatMessage[] = msgs.map((m) => ({ ...m, blocks: [...m.blocks, { kind: 'text', text: '答案' }] }));
+    const again = appendReasoningDelta(withText, 'm1', '再想');
+    assert.equal(again[0]!.blocks.length, 3, '思考→正文→再思考应是三块');
+    const last = again[0]!.blocks[2]!;
+    assert.equal(last.kind, 'reasoning', '正文之后再来的思考不能被拼进正文块');
+  });
+
+  ok('appendReasoningDelta 不碰其他消息（多会话并存时不能串台）', () => {
+    const msgs: ChatMessage[] = [
+      { id: 'm1', role: 'assistant', blocks: [], createdAt: 0 },
+      { id: 'm2', role: 'assistant', blocks: [{ kind: 'text', text: '别的消息' }], createdAt: 1 },
+    ];
+    const next = appendReasoningDelta(msgs, 'm1', '想');
+    assert.equal(next[1]!.blocks.length, 1);
+    assert.equal(next[1]!.blocks[0]!.kind, 'text');
+    assert.deepEqual(next[1], msgs[1], '其他消息必须原样不动');
+  });
+
+  ok('agent 必须把思考往上送（解析了却不投递 = 用户永远看不到）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'lib/ai/agent.ts'), 'utf8');
+    assert.match(src, /onReasoning:\s*\(t\)\s*=>\s*safePost/, 'agent 没转发思考（只解析不投递）');
+    assert.match(src, /type: 'chat:reasoning'/, '投递的事件类型必须是 chat:reasoning，不能复用 chat:delta');
+  });
+
+  ok('聊天里思考必须可折叠渲染，且不与正文气泡混淆', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/chat/message-view.tsx'), 'utf8');
+    assert.match(src, /block\.kind === 'reasoning'/, '没有 reasoning 块的渲染分支');
+    assert.match(src, /<details/, '思考区必须是可折叠的（否则长思考会把答案挤出屏幕）');
+    assert.match(src, /data-testid="reasoning-block"/, '缺少稳定的测试锚点');
+  });
+
+  ok('跨窗口合并的内容量必须计入思考（否则更完整的回复被旧版本覆盖）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'stores/aiStore.ts'), 'utf8');
+    assert.match(
+      src,
+      /else if \(b\.kind === 'reasoning'\) w \+= b\.text\.length;/,
+      'messageWeight 没把思考计入 —— 思考更完整的一方会输给思考缺失的一方',
+    );
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

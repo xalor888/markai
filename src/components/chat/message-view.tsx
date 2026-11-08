@@ -4,7 +4,9 @@ import {
   ArrowUpDown,
   BarChart3,
   BookmarkPlus,
+  Brain,
   CheckCircle2,
+  ChevronRight,
   Clock,
   Copy,
   ExternalLink,
@@ -72,6 +74,36 @@ const TOOL_ICONS: Record<string, LucideIcon> = {
 };
 
 /** 从工具结果 JSON 提取一行摘要 */
+/**
+ * 思考区（可折叠）。
+ *
+ * 用原生 <details> 而不是自管 state：
+ *  - 键盘、读屏、展开/收起语义都是浏览器自带的，不用再写一遍 ARIA；
+ *  - 流式时自动展开（用户能看见模型正在想什么），结束后自动收起成一行摘要；
+ *  - 思考很长时不会把答案挤到屏幕外——这正是「显示思考」最容易做坏的地方。
+ */
+function ReasoningBlock({ text, streaming }: { text: string; streaming: boolean }) {
+  const chars = text.length;
+  return (
+    <details
+      open={streaming}
+      data-testid="reasoning-block"
+      className="group/reason select-text rounded-md border border-border bg-background px-3 py-2 text-2xs text-muted-foreground"
+    >
+      <summary className="cursor-pointer list-none">
+        <span className="inline-flex items-center gap-1.5 transition-colors hover:text-foreground">
+          <Brain className="h-3 w-3 shrink-0" />
+          <span>{streaming ? '正在思考…' : `思考过程 · ${chars} 字`}</span>
+          {!streaming && (
+            <ChevronRight className="h-3 w-3 shrink-0 transition-transform group-open/reason:rotate-90" />
+          )}
+        </span>
+      </summary>
+      <div className="mt-1.5 max-h-72 overflow-y-auto whitespace-pre-wrap leading-relaxed">{text}</div>
+    </details>
+  );
+}
+
 function summarize(record: ToolCallRecord): string {
   const j = safeJsonParse<Record<string, unknown>>(record.result ?? '');
   if (j) {
@@ -303,6 +335,8 @@ export const MessageView = memo(function MessageView({
               <MarkdownText text={block.text} />
               {streaming && isLast && block.text && <span className="stream-cursor ml-0.5 inline-block h-3.5 w-[2px] translate-y-0.5 bg-accent" />}
             </div>
+          ) : block.kind === 'reasoning' ? (
+            <ReasoningBlock key={`reasoning-${i}`} text={block.text} streaming={streaming && isLast} />
           ) : block.record.deletions && block.record.deletions.length > 0 ? (
             <DeletionCard key={block.record.id} proposals={block.record.deletions} />
           ) : (

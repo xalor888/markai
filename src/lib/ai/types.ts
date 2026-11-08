@@ -44,6 +44,15 @@ export interface ToolCallRecord {
 /** 聊天块：文本或工具调用（按到达顺序排列，保证时序正确） */
 export type ChatBlock =
   | { kind: 'text'; text: string }
+  /**
+   * 思考内容（模型的 reasoning）。
+   *
+   * 为什么单列一种块而不是拼进 text：
+   *  - 思考不是回复，混进气泡会让用户以为模型"说了这些"；
+   *  - 复制整条回复时必须能跳过它（用户要的是答案，不是思考草稿）；
+   *  - 折叠/展开是独立交互，与正文的流式光标互不干扰。
+   */
+  | { kind: 'reasoning'; text: string }
   | { kind: 'tool'; record: ToolCallRecord };
 
 /** 一条聊天消息 */
@@ -163,6 +172,13 @@ export type ChatInbound =
 export type ChatOutbound =
   | { type: 'chat:start'; messageId: string }
   | { type: 'chat:delta'; messageId: string; text: string }
+  /**
+   * 思考增量（与正文分开投递）。
+   *
+   * 单独一种事件的理由：UI 要把它渲染到另一个容器里（可折叠的思考区），
+   * 如果复用 chat:delta，前端只能靠字符串特征猜——那种猜法迟早会把正文误判成思考。
+   */
+  | { type: 'chat:reasoning'; messageId: string; text: string }
   /**
    * 本轮重发：上一次尝试已吐出的内容作废（UI 清空该消息后再接收新回复）。
    * 没有它，"回复中途断流 → 自动重试"就会把两段文本首尾相接，用户看到重复拼接的怪回复。

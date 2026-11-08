@@ -414,6 +414,8 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
     try {
       turn = await chatCompletion(config, apiMessages, TOOL_DEFINITIONS, signal, {
         onText: (t) => safePost(onEvent, { type: 'chat:delta', messageId, text: t }),
+        // 思考内容单独投递：UI 要把它放进可折叠的思考区，不能与正文混在一起
+        onReasoning: (t) => safePost(onEvent, { type: 'chat:reasoning', messageId, text: t }),
         onToolCall: (tc) =>
           safePost(onEvent, {
             type: 'chat:tool_start',

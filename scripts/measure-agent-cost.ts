@@ -11,6 +11,8 @@
 import { estimateRequestTokens, estimateTokens } from '../src/lib/ai/agent';
 import { PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT, TOOL_DEFINITIONS } from '../src/lib/ai/prompts';
 import { effectiveContextWindow, getModelContextWindow } from '../src/lib/providers';
+import { TOOL_META } from '../src/lib/ai/tools';
+import { classifyTool } from '../src/lib/ai/turn-plan';
 import type { ApiMessage } from '../src/lib/ai/client';
 
 const fmt = (n: number): string => n.toLocaleString('zh-CN');
@@ -29,6 +31,12 @@ console.log(`  计划模式说明      ${fmt(planTokens).padStart(6)} tok（仅 
 console.log(`  工具定义 ${TOOL_DEFINITIONS.length} 个   ${fmt(toolTokens).padStart(6)} tok  ← 占比最大`);
 const fixed = systemTokens + toolTokens;
 console.log(`  小计（不含记忆）  ${fmt(fixed).padStart(6)} tok`);
+
+console.log('\n【工具能力分类】决定"能不能并行"与"要不要确认"');
+const cls = { read: 0, write: 0, declare: 0, gate: 0, unknown: 0 };
+for (const name of Object.keys(TOOL_META)) cls[classifyTool(name)]++;
+console.log(`  只读(可并行) ${cls.read} 个 · 写(需串行+确认) ${cls.write} 个 · 声明 ${cls.declare} 个 · 闸门 ${cls.gate} 个 · 未分类 ${cls.unknown} 个`);
+if (cls.unknown > 0) console.log('  ⚠ 存在未分类工具：既不并行也不确认，是隐患');
 
 console.log('\n【工具定义成本排名】（前 8，按描述+schema 估算）');
 const perTool = TOOL_DEFINITIONS.map((t) => ({

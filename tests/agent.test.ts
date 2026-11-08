@@ -48,6 +48,7 @@ import {
 import type { ReasoningPolicy } from '../src/lib/models/types';
 import { effortLabel, reasoningControl, toggleOptions } from '../src/lib/models/control';
 import { reasoningPayload } from '../src/lib/models/request';
+import { READ_TOOL_NAMES, classifyTool } from '../src/lib/ai/turn-plan';
 import {
   CATALOG_CACHE_VERSION,
   decodeCatalog,
@@ -14843,37 +14844,23 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
 
 
   /*
-   * READ_TOOLS 定义分散在两处（agent.ts + turn-plan.ts），这是重复维护的隐患。
-   * 如果只在一边增改，另一边没同步——模型可能会把本该并行的读任务串行执行，或者把写任务误当 read 做掉。
+   * READ_TOOLS 曾经分散在两处（agent.ts + turn-plan.ts）：一份加了新工具、另一份没加，
+   * 于是"并行集合"与"确认集合"互相矛盾，谁也说不清哪份是真的（0.2.149 修的就是这个）。
+   * 现在它只允许存在一份，agent 一律通过 classifyTool 取分类——本守卫防的是"以后又抄一份回来"。
    */
-  await okA('READ_TOOLS 在两处的定义必须完全一致', async () => {
+  await okA('READ_TOOLS 只允许定义在一处（agent 必须用 classifyTool）', async () => {
     const { readFileSync } = await import('node:fs');
     const { resolve } = await import('node:path');
-
-    // 解析两处定义（正则匹配 Set([...]) 里的字符串）
-    const files = [
-      ['src/lib/ai/agent.ts', readFileSync(resolve(process.cwd(), 'src/lib/ai/agent.ts'), 'utf8')],
-      ['src/lib/ai/turn-plan.ts', readFileSync(resolve(process.cwd(), 'src/lib/ai/turn-plan.ts'), 'utf8')],
-    ];
-
-    const sets: Set<string>[] = [];
-    for (const [fn, content] of files) {
-      const m = content?.match(/const READ_TOOLS[^=]*=\s*new Set\(\[([\s\S]*?)\]\)/);
-      if (!m?.[1]) throw new Error(`${fn}: 没能从源码里解析出 READ_TOOLS`);
-      const names = [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]).filter((x): x is string => !!x);
-      sets.push(new Set(names));
-      console.log(`   [DBG] ${fn}: ${names.length} 个工具`);
-    }
-
-    const a = sets[0]!;
-    const b = sets[1]!;
-    assert.equal(a.size, b.size, `两个文件的工具数不同（agent.ts ${a.size} / turn-plan.ts ${b.size}）`);
-    for (const tool of a) {
-      assert.ok(b.has(tool), `${tool} 在 agent.ts 的 READ_TOOLS 里，但 turn-plan.ts 没有`);
-    }
-    for (const tool of b) {
-      assert.ok(a.has(tool), `${tool} 在 turn-plan.ts 的 READ_TOOLS 里，但 agent.ts 没有`);
-    }
+    const agent = readFileSync(resolve(process.cwd(), 'src/lib/ai/agent.ts'), 'utf8');
+    const plan = readFileSync(resolve(process.cwd(), 'src/lib/ai/turn-plan.ts'), 'utf8');
+    const defs = (src: string): number => (src.match(/const READ_TOOLS[^=]*=\s*new Set\(\[/g) ?? []).length;
+    assert.equal(defs(plan), 1, '分类表必须存在且只有一份');
+    assert.equal(defs(agent), 0, 'agent 不许再有本地只读名单（一律走 classifyTool）');
+    assert.match(
+      agent,
+      /classifyTool\(tc\.function\.name\) === 'read'/,
+      '并行集合必须来自分类器，而不是本地 Set',
+    );
   });
   /*
    * 进程被杀后恢复出来的撤销点，才是最该标「已中断」的那一种。
@@ -16005,6 +15992,38 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     setActiveCatalog(null);
     assert.equal(activeCatalogSize(), 0, '卸载必须真的清空');
     assert.equal(lookupActiveModel('gpt-5.6'), null);
+  });
+
+  // ── D2-B3：工具能力分类（单一来源 · 全覆盖 · 写工具不得并行） ──
+  console.log('\n[agent] 工具分类');
+
+  ok('只读工具名单快照：任何增删都必须显式改这条测试', () => {
+    assert.deepEqual(
+      [...READ_TOOL_NAMES].sort(),
+      [
+        'check_urls', 'check_urls_bulk', 'classify_urls', 'export_bookmarks', 'find_duplicates',
+        'get_folder_content', 'get_folder_path', 'get_recent_bookmarks', 'list_all_folders',
+        'list_bookmarks', 'list_empty_folders', 'open_bookmark', 'recall_memories',
+        'search_bookmarks', 'stats',
+      ].sort(),
+    );
+  });
+
+  ok('每个工具都必须被分类（unknown 会既不并行、也不确认）', () => {
+    const unknown = Object.keys(TOOL_META).filter((n) => classifyTool(n) === 'unknown');
+    assert.deepEqual(unknown, [], `这些工具没有分类：${unknown.join(', ')}`);
+  });
+
+  ok('有副作用的工具绝不能进只读集合（并行写会引发撤销事务竞态）', () => {
+    const writers = [
+      'create_folder', 'create_bookmark', 'create_bookmarks', 'move_bookmark', 'move_bookmarks',
+      'copy_bookmark', 'rename_bookmark', 'update_bookmark_url', 'merge_folders', 'sort_folder',
+      'auto_categorize', 'dedupe_bookmarks', 'cleanup_sweep', 'open_bookmarks',
+      'propose_deletions', 'delete_all_bookmarks',
+    ];
+    for (const w of writers) {
+      assert.notEqual(classifyTool(w), 'read', `${w} 有副作用，不能并行执行`);
+    }
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

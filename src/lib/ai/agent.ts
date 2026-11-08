@@ -5,6 +5,8 @@ import { formatMemoriesForPrompt, getMemories, type MemoryItem } from './memory'
 import { buildTimeContext, PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT, TOOL_DEFINITIONS } from './prompts';
 import { executeTool, type ToolOutput } from './tools';
 import { applyPlan, buildPlan, classifyTool, stepCountOf, type PlannedStep } from './turn-plan';
+// 只读/写/声明/闸门的分类**只有 turn-plan 一份**：历史上同一份名单抄成两份，
+// 结果一份加了新工具、另一份没加——并行集合与确认集合开始互相矛盾，谁也说不清哪份是真的。
 import { MAX_CONTEXT_WINDOW, MIN_CONTEXT_WINDOW } from '@/lib/providers';
 import { beginUndoTransaction, endUndoTransaction, setRecordingOwner, takeDroppedOpCount } from '@/lib/undo/recorder';
 import type { AIConfig, ChatMessage, ChatOutbound, ToolCallRecord } from './types';
@@ -38,23 +40,7 @@ const PAGINATED_TOOLS: ReadonlySet<string> = new Set([
 const PER_MESSAGE_OVERHEAD = 40;
 
 /** 只读工具：可并行执行（无副作用，互不依赖） */
-const READ_TOOLS = new Set([
-  'list_bookmarks',
-  'search_bookmarks',
-  'get_recent_bookmarks',
-  'get_folder_path',
-  'list_all_folders',
-  'list_empty_folders',
-  'get_folder_content',
-  'export_bookmarks',
-  'check_urls',
-  'check_urls_bulk',
-  'classify_urls',
-  'stats',
-  'find_duplicates',
-  'open_bookmark',
-  'recall_memories',
-]);
+
 
 export interface AgentTurnParams {
   config: AIConfig;
@@ -519,7 +505,7 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
     // 读类工具并行
     await Promise.all(
       ordered
-        .filter(({ tc }) => READ_TOOLS.has(tc.function.name))
+        .filter(({ tc }) => classifyTool(tc.function.name) === 'read')
         .map(async ({ tc, i }) => {
           results.set(i, await runOne(tc));
         }),
@@ -620,7 +606,7 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
     // 写类工具串行（保持执行顺序，避免移动/创建竞争）
     let planDone = false;
     for (const { tc, i } of ordered) {
-      if (READ_TOOLS.has(tc.function.name)) continue;
+      if (classifyTool(tc.function.name) === 'read') continue;
       if (classifyTool(tc.function.name) === 'declare') continue; // 已在上面执行过
       const cls = classifyTool(tc.function.name);
       if (planEnabled && cls === 'write') {

@@ -41,6 +41,12 @@ const READ_TOOLS = new Set([
 ]);
 
 /**
+ * 只读工具名单（导出供测试与守卫：任何增删都必须显式改测试）。
+ * `agent.ts` 的并行执行与「跳过逐回次确认」也用它，但它本身只在这里定义一次。
+ */
+export const READ_TOOL_NAMES: readonly string[] = [...READ_TOOLS];
+
+/**
  * 闸门类工具：**自身即延迟**，不并入轮次计划。
  * 两者都会按 `deleteMode` 要么只产生提议、要么直接执行删除（`tools.ts:1717-1760`、`1787+`）。
  */

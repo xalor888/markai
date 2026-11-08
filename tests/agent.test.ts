@@ -16313,6 +16313,30 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     }
   });
 
+  // ── D3-B3：浮层家族收口（玻璃统一 + 键盘可关） ──
+  console.log('\n[ui] 浮层家族');
+
+  const uiSrc = (rel: string): string =>
+    readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src', rel), 'utf8');
+
+  ok('所有浮层都走同一个玻璃层（菜单 / 更多菜单 / 命令面板）', () => {
+    for (const f of ['components/sidebar/bookmark-tree.tsx', 'components/workspace/more-menu.tsx', 'components/command/command-palette.tsx', 'components/ui/dialog.tsx', 'components/toast/toast.tsx']) {
+      assert.match(uiSrc(f), /markai-glass/, `${f} 的浮层没用玻璃层 —— 浮层家族会出现「有的有玻璃、有的没有」`);
+    }
+  });
+
+  ok('浮层必须能键盘关闭（ESC），否则键盘用户会被困住', () => {
+    for (const f of ['components/sidebar/bookmark-tree.tsx', 'components/workspace/more-menu.tsx', 'components/command/command-palette.tsx', 'components/ui/dialog.tsx']) {
+      assert.match(uiSrc(f), /Escape/, `${f} 没有 ESC 关闭路径`);
+    }
+  });
+
+  ok('不再有「实心底 + 投影」的裸浮层（浮层一律 markai-glass）', () => {
+    assert.doesNotMatch(uiSrc('components/sidebar/bookmark-tree.tsx'), /bg-card py-1\.5 shadow-lg/, '右键菜单还是实心底');
+    assert.doesNotMatch(uiSrc('components/workspace/more-menu.tsx'), /bg-card py-1 shadow-lg/, '更多菜单还是实心底');
+    assert.doesNotMatch(uiSrc('components/command/command-palette.tsx'), /bg-card shadow-xl/, '命令面板还是实心底');
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

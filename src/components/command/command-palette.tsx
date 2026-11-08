@@ -150,7 +150,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
         data-testid="command-palette"
         aria-modal="true"
         aria-label="命令面板"
-        className="animate-fade-in w-full max-w-lg overflow-hidden rounded-lg border border-border bg-card shadow-xl"
+        className="markai-glass animate-fade-in w-full max-w-lg overflow-hidden rounded-lg"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2 border-b border-border px-3">

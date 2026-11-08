@@ -1239,7 +1239,7 @@ export function ContextMenuOverlay() {
           }
         }}
         ref={menuRef}
-        className="animate-fade-in fixed z-50 max-h-[calc(100vh-16px)] w-52 overflow-y-auto rounded-md border border-border bg-card py-1.5 shadow-lg outline-none"
+        className="markai-glass animate-fade-in fixed z-50 max-h-[calc(100vh-16px)] w-52 overflow-y-auto rounded-md py-1.5 outline-none"
         style={{ left, top }}
       >
         {rows.map((row, i) =>

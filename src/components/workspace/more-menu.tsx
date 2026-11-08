@@ -166,7 +166,7 @@ export function MoreMenu({
         <div
           role="menu"
           data-testid="more-menu"
-          className="animate-fade-in absolute right-0 z-50 mt-1 w-52 overflow-hidden rounded-md border border-border bg-card py-1 shadow-lg"
+          className="markai-glass animate-fade-in absolute right-0 z-50 mt-1 w-52 overflow-hidden rounded-md py-1"
         >
           {item(BookmarkPlus, '收藏当前页面', onSaveCurrentTab)}
           {item(Trash2, '待删除清单', onDeletions, { badge: pendingCount, danger: pendingCount > 0 })}

@@ -71,6 +71,7 @@ import {
   type ChatterFact,
   type ChatterState,
 } from '../src/lib/pet/chatter';
+import { FACT_THRESHOLDS, flattenForFacts, petFacts } from '../src/lib/pet/facts';
 import { READ_TOOL_NAMES, classifyTool } from '../src/lib/ai/turn-plan';
 import {
   CATALOG_CACHE_VERSION,
@@ -16724,7 +16725,12 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     const facts = [fact('a', 5), fact('b', 3)];
     const state = { ...fresh(), lastAnyAt: 1000 };
     assert.equal(pickChatter(facts, state, 1000 + 30_000), null, '30 秒就再说一次太吵');
-    assert.equal(pickChatter(facts, state, 1000 + DEFAULT_CHATTER_CONFIG.minGapMs), facts[0], '到点才可以说');
+    // 注入确定的 random：不注入就随机会选到 b，这条断言会时绿时红（自己写的 flaky 测试）
+    assert.equal(
+      pickChatter(facts, state, 1000 + DEFAULT_CHATTER_CONFIG.minGapMs, {}, () => 0.0001),
+      facts[0]!,
+      '到点才可以说',
+    );
   });
 
   ok('同一事实 30 分钟内不重复（用户已经看到了，只是还没决定）', () => {
@@ -16766,6 +16772,69 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.equal(after.lastAnyAt, 100);
     assert.equal(after.lastById['a'], 100);
     assert.deepEqual(after.lastById, { a: 100 }, '只记这一条，别把别的事实也冷却掉');
+  });
+
+  // ── D5-B2：事实源的门槛（说错一次就没人信了） ──
+  console.log('\n[pet] 事实源');
+
+  const bm = (i: number, url: string) => ({ id: String(i), title: `书签${i}`, url });
+
+  ok('重复链接：1 组不提，2 组才提（太琐碎会变成噪音）', () => {
+    assert.equal(petFacts({ bookmarks: [bm(1, 'https://a.com/x'), bm(2, 'https://a.com/x')], folders: [] }).some((f) => f.id === 'dup-urls'), false, `阈值是 ${FACT_THRESHOLDS.duplicateGroups} 组`);
+    const two = petFacts({
+      bookmarks: [bm(1, 'https://a.com/x'), bm(2, 'https://a.com/x'), bm(3, 'https://b.com/y'), bm(4, 'https://b.com/y')],
+      folders: [],
+    });
+    const dup = two.find((f) => f.id === 'dup-urls');
+    assert.ok(dup, '两组重复应当提出来');
+    assert.match(dup!.text, /2 组/, '文案里的数字必须是真实统计（说错一次就没人信）');
+  });
+
+  ok('空文件夹：2 个不提、3 个才提', () => {
+    const f = (n: number) => ({ id: `f${n}`, title: `夹${n}`, childCount: 0 });
+    assert.equal(petFacts({ bookmarks: [], folders: [f(1), f(2)] }).some((x) => x.id === 'empty-folders'), false);
+    assert.ok(petFacts({ bookmarks: [], folders: [f(1), f(2), f(3)] }).some((x) => x.id === 'empty-folders'));
+  });
+
+  ok('单域名聚集：5 条不提、6 条才提（且认 www. 与端口）', () => {
+    const five = Array.from({ length: 5 }, (_, i) => bm(i, `https://www.github.com/p${i}`));
+    assert.equal(petFacts({ bookmarks: five, folders: [] }).some((f) => f.id === 'domain-cluster'), false);
+    const six = Array.from({ length: 6 }, (_, i) => bm(i, `https://github.com:443/p${i}`));
+    const cluster = petFacts({ bookmarks: six, folders: [] }).find((f) => f.id === 'domain-cluster');
+    assert.ok(cluster);
+    assert.match(cluster!.text, /github\.com/, '不该把 www. 或端口带进文案');
+    assert.match(cluster!.text, /6 条/);
+  });
+
+  ok('总量门槛：1499 不提、1500 提', () => {
+    const make = (n: number) => Array.from({ length: n }, (_, i) => bm(i, `https://site-${i}.com/`));
+    assert.equal(petFacts({ bookmarks: make(1499), folders: [] }).some((f) => f.id === 'total-size'), false);
+    assert.ok(petFacts({ bookmarks: make(1500), folders: [] }).some((f) => f.id === 'total-size'));
+  });
+
+  ok('事实 id 稳定：数字不进 id（9 个重复变 10 个不该重置冷却）', () => {
+    const a = petFacts({ bookmarks: [bm(1, 'https://a.com/'), bm(2, 'https://a.com/'), bm(3, 'https://b.com/'), bm(4, 'https://b.com/')], folders: [] });
+    const b = petFacts({ bookmarks: [bm(1, 'https://a.com/'), bm(2, 'https://a.com/'), bm(3, 'https://b.com/'), bm(4, 'https://b.com/'), bm(5, 'https://c.com/'), bm(6, 'https://c.com/')], folders: [] });
+    const idA = a.find((f) => f.text.includes('组重复'))!.id;
+    const idB = b.find((f) => f.text.includes('组重复'))!.id;
+    assert.equal(idA, idB, '同一种观察必须共用一个 id，否则改动数字就重新开口');
+  });
+
+  ok('flattenForFacts：书签与文件夹分开，子项数取一级 children', () => {
+    const input = flattenForFacts([
+      { id: '1', title: '书签栏', children: [{ id: 'a', title: 'A', url: 'https://a.com/' }, { id: 'b', title: '夹B', children: [{ id: 'c1', title: 'c1' }, { id: 'c2', title: 'c2' }] }] },
+    ]);
+    assert.equal(input.bookmarks.length, 1);
+    assert.equal(input.folders.length, 1);
+    assert.equal(input.folders[0]!.childCount, 2, '子项数必须来自真实 children 长度');
+  });
+
+  ok('空态显示宠物的一句话：事实驱动，没有就不显示', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
+    assert.match(src, /petFacts\(flattenForFacts\(roots\)\)/, '文案必须来自事实源，不许写死');
+    assert.match(src, /data-testid="pet-line"/, '缺少稳定锚点');
+    assert.match(src, /\{petLine && \(/, '没有可说的就不显示——绝不为了"活跃"编一句');
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

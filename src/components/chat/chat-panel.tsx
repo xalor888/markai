@@ -37,6 +37,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { BrandMark } from '@/components/theme/theme-provider';
 import { PetFace } from '@/components/pet/pet-face';
 import { hasRunningTool, shouldCelebrate, stateFromAgent, type PetState } from '@/lib/pet/state';
+import { flattenForFacts, petFacts } from '@/lib/pet/facts';
 import { MessageView } from './message-view';
 
 /** 快捷指令 chip */
@@ -137,6 +138,17 @@ export function ChatPanel({
   // 撤销记录被裁剪 / 写入失败时，把原因一并说清楚，别让"没有可撤销的操作"变成假话
   const undoTitle = undoNotice ? `${baseUndoTitle}\n${undoNotice}` : baseUndoTitle;
   const roots = useBookmarkStore((s) => s.roots);
+
+  /*
+   * 宠物要说的话：取当前**权重最高**的一条事实直接展示。
+   * 频率模型（pickChatter：90s 间隔 / 30min 冷却 / 被打断静默）留给后台定时器那一层——
+   * 面板里每渲染一次就"说话"的话，克制规则等于没有。
+   */
+  const petLine = useMemo(() => {
+    const facts = petFacts(flattenForFacts(roots));
+    const top = facts.sort((a, b) => b.weight - a.weight)[0];
+    return top?.text ?? null;
+  }, [roots]);
   const selectedFolderId = useBookmarkStore((s) => s.selectedFolderId);
   const config = useConfigStore((s) => s.config);
   // 已配置判断与聊天实际一致：resolveConfig 回落预设（原始存储里 baseUrl 可能为空串），
@@ -843,6 +855,7 @@ export function ChatPanel({
               configured={chatConfigured}
               autoOrganize={config.autoOrganizeNew ?? true}
               petState={petState}
+              petLine={petLine}
             />
           ) : (
             <div className="space-y-3.5">
@@ -1043,6 +1056,7 @@ function EmptyState({
   configured,
   autoOrganize,
   petState,
+  petLine,
 }: {
   chips: QuickChip[];
   onChip: (prompt: string) => void;
@@ -1051,10 +1065,17 @@ function EmptyState({
   autoOrganize: boolean;
   /** 宠物状态：由 Agent 的真实运行状态驱动（不是写死的 idle） */
   petState: PetState;
+  /** 宠物想说的一句话（没有可说的就是 null，不要编） */
+  petLine: string | null;
 }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-5 px-5 py-6 text-center">
       <PetFace size={72} state={petState} interactive />
+      {petLine && (
+        <p className="-mt-3 max-w-[248px] text-2xs leading-4 text-muted-foreground/90" data-testid="pet-line">
+          {petLine}
+        </p>
+      )}
       <div className="space-y-1">
         <p className="text-sm font-medium text-foreground">我是你的书签管家</p>
         <p className="max-w-[248px] text-xs leading-5 text-muted-foreground">

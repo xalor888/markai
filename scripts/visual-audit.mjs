@@ -116,6 +116,32 @@ const SEED = `(async () => {
     await chrome.bookmarks.create(it).catch(() => {});
     await new Promise(r => setTimeout(r, 30));
   }
+  /*
+   * 书签栏本身也要有内容。
+   *
+   * 之前种子里书签栏只有一个文件夹，于是"浮层盖在列表上"的视图里列表是空的——
+   * 玻璃层下面没有东西可糊，截图看起来跟实心白卡一样，根本判断不了玻璃效果。
+   * 真实用户的书签栏本来就是十来个书签，视觉审计的素材必须像那么回事。
+   */
+  const barHas = (bar.children || []).filter(c => c && c.url).length;
+  if (barHas < 8) {
+    for (const [title, url] of [
+      ['GitHub', 'https://github.com/'],
+      ['DeepSeek', 'https://chat.deepseek.com/'],
+      ['Vercel 仪表盘', 'https://vercel.com/dashboard'],
+      ['Figma', 'https://www.figma.com/files'],
+      ['Linear', 'https://linear.app/'],
+      ['Notion', 'https://www.notion.so/'],
+      ['MDN Web Docs', 'https://developer.mozilla.org/'],
+      ['Chrome 扩展文档', 'https://developer.chrome.com/docs/extensions/'],
+      ['少数派', 'https://sspai.com/'],
+      ['Hacker News', 'https://news.ycombinator.com/'],
+    ]) {
+      await chrome.bookmarks.create({ parentId: bar.id, title, url }).catch(() => {});
+      await new Promise(r => setTimeout(r, 25));
+    }
+  }
+
   // 第二组：其他书签里的杂项，让树有多分支
   const misc = await chrome.bookmarks.create({ parentId: other.id, title: '稍后读' }).catch(() => null);
   if (misc) {

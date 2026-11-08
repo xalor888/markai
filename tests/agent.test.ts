@@ -16406,6 +16406,29 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.match(e2e, /for \(const w of \[360, 300, 260\]\)/, '窄宽度回归用例被删掉了');
   });
 
+  // ── D3-B6：视觉回归审计（素材要真实，边界要可辨） ──
+  console.log('\n[ui] 视觉审计');
+
+  ok('视觉审计的种子必须让书签栏有内容（否则玻璃盖在空白上，等于没测）', () => {
+    const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const src = readFileSync(resolve(root, 'scripts/visual-audit.mjs'), 'utf8');
+    // 书签栏（bar.id）下必须有真实书签条目——只放一个文件夹时列表是空的
+    assert.match(src, /parentId: bar\.id, title, url/, '种子里书签栏没有书签条目');
+    assert.match(src, /barHas < 8/, '缺少「书签栏条目不足才补」的幂等判断（重复跑会重复注入）');
+  });
+
+  ok('深色玻璃边框足够可辨（近黑底上 10% 等于没有边界）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const css = readFileSync(resolve(srcDir, 'assets/main.css'), 'utf8');
+    const darkEnd = css.indexOf('@layer base');
+    const dark = css.slice(css.indexOf('.dark {'), darkEnd);
+    const m = /--glass-border:\s*rgb\([^)]*\/\s*([\d.]+)\)/i.exec(dark);
+    assert.ok(m?.[1], '深色没有 glass-border');
+    const alpha = Number(m[1]);
+    console.log(`   [DBG] 深色玻璃边框 alpha=${alpha}`);
+    assert.ok(alpha >= 0.14, `深色玻璃边框只有 ${alpha}，浮层边界在近黑底上几乎看不见`);
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

@@ -31,6 +31,19 @@ import { createDelayedOpen } from '../src/lib/bookmarks/delayed-open';
 import { buildRequestHeaders, getStableSessionId, parseCustomHeaders } from '../src/lib/ai/request-headers';
 import { groupCommands, SCORE, scoreItem, searchCommands, type CommandItem } from '../src/lib/command/search';
 import { analyzeBookmarks, runHealthCheck } from '../src/lib/health';
+import {
+  canonicalProviderId,
+  contextWindowFor,
+  fallbackCatalog,
+  findModel,
+  modelsForProvider,
+  normalizeCatalog,
+  normalizeEfforts,
+  normalizeModel,
+  pickEffort,
+  resolveReasoningPolicy,
+} from '../src/lib/models/catalog';
+import type { ReasoningPolicy } from '../src/lib/models/types';
 import { AI_STORAGE_KEY, flushStreamPersist, useAIStore } from '../src/stores/aiStore';
 import {
   appendDraft,
@@ -15461,6 +15474,145 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.match(block, /crashed/, '总结文案必须根据 crashed 区分，否则中断时会显示成“全通过”');
     assert.match(block, /不完整/, '中断时的首行必须带「不完整」字样，不能只靠下面的补充说明');
   });
+  // ── D1-B1：models.dev 目录层（纯逻辑，不碰网络与 chrome） ──
+  console.log('\n[models] 目录归一化 · 思考档位 · provider 映射');
+
+  ok('effort 档位按标准次序排序，未知值垫后而不是被丢掉', () => {
+    // 上游新增档位必须能显示出来（静默丢弃 = 用户看到"没有这个选项"却不知道为什么）
+    assert.deepEqual(normalizeEfforts(['max', 'low', 'none', 'weird', 'high']), [
+      'none', 'low', 'high', 'max', 'weird',
+    ]);
+  });
+
+  ok('effort 档位去重且大小写归一', () => {
+    assert.deepEqual(normalizeEfforts(['HIGH', 'high', 'High']), ['high']);
+  });
+
+  ok('非数组的 values 给空数组，而不是 undefined 或崩溃', () => {
+    assert.deepEqual(normalizeEfforts(undefined), []);
+    assert.deepEqual(normalizeEfforts('high'), []);
+    assert.deepEqual(normalizeEfforts(null), []);
+  });
+
+  ok('无 reasoning 能力的模型：不该出现任何思考控件', () => {
+    const p = resolveReasoningPolicy({ reasoning: false });
+    assert.equal(p.supported, false, 'gpt-4.1 这类模型不能被说成"能思考"');
+    assert.equal(p.kind, null);
+    assert.deepEqual(p.efforts, []);
+  });
+
+  ok('同时给 toggle 与 effort 时以 effort 为准（能给档位就不该只给开关）', () => {
+    const p = resolveReasoningPolicy({
+      reasoning: true,
+      reasoning_options: [{ type: 'toggle' }, { type: 'effort', values: ['low', 'high', 'max'] }],
+      interleaved: { field: 'reasoning_content' },
+    });
+    assert.equal(p.kind, 'effort');
+    assert.deepEqual(p.efforts, ['low', 'high', 'max']);
+    assert.equal(p.field, 'reasoning_content');
+  });
+
+  ok('只有 toggle 的模型：可开可关但不可调档', () => {
+    const p = resolveReasoningPolicy({ reasoning: true, reasoning_options: [{ type: 'toggle' }] });
+    assert.equal(p.supported, true);
+    assert.equal(p.kind, 'toggle');
+    assert.deepEqual(p.efforts, []);
+  });
+
+  ok('reasoning_options 为空：会思考但不可调——不许画滑杆骗人', () => {
+    // kimi-k2.7-code-highspeed 实测就是这种：reasoning: true + options: []
+    const p = resolveReasoningPolicy({ reasoning: true, reasoning_options: [] });
+    assert.equal(p.supported, true);
+    assert.equal(p.kind, null, '不可调时 kind 必须为 null（UI 据此不给控件）');
+    assert.deepEqual(p.efforts, []);
+  });
+
+  ok('思考流字段名取自 interleaved.field，缺省回退 reasoning_content', () => {
+    assert.equal(resolveReasoningPolicy({ reasoning: true, interleaved: { field: 'reasoning_content' } }).field, 'reasoning_content');
+    assert.equal(resolveReasoningPolicy({ reasoning: true }).field, 'reasoning_content');
+    assert.equal(resolveReasoningPolicy({ reasoning: false }).field, null);
+  });
+
+  ok('缺 id 的模型条目被拒绝（不能给用户一个点了没反应的选项）', () => {
+    assert.equal(normalizeModel({ name: 'X' }, 'p'), null);
+    assert.equal(normalizeModel('nope', 'p'), null);
+    assert.equal(normalizeModel({ id: '   ' }, 'p'), null);
+  });
+
+  ok('limit.context 缺失时回退 limit.input（两个都缺才给 null）', () => {
+    assert.equal(normalizeModel({ id: 'm', limit: { context: 1000 } }, 'p')?.contextLimit, 1000);
+    assert.equal(normalizeModel({ id: 'm', limit: { input: 800 } }, 'p')?.contextLimit, 800);
+    assert.equal(normalizeModel({ id: 'm' }, 'p')?.contextLimit, null);
+  });
+
+  ok('缺 tool_call 字段按「不能调工具」处理（保守，别推荐调不动工具的模型）', () => {
+    assert.equal(normalizeModel({ id: 'm' }, 'p')?.toolCall, false);
+    assert.equal(normalizeModel({ id: 'm', tool_call: true }, 'p')?.toolCall, true);
+  });
+
+  ok('坏 provider 进 issues，不让整份目录作废', () => {
+    const { catalog, issues } = normalizeCatalog({
+      good: { name: 'G', models: { m1: { id: 'm1' } } },
+      bad: { name: 'B', models: null },
+    });
+    assert.equal(catalog.providers.length, 1, '只有 good 该留下');
+    assert.ok(issues.some((i) => i.providerId === 'bad'), '坏条目必须被记下来，而不是静默消失');
+  });
+
+  ok('provider id 映射：moonshot→moonshotai、zhipu→zhipuai，未知原样返回', () => {
+    assert.equal(canonicalProviderId('moonshot'), 'moonshotai');
+    assert.equal(canonicalProviderId('zhipu'), 'zhipuai');
+    assert.equal(canonicalProviderId('deepseek'), 'deepseek');
+    assert.equal(canonicalProviderId('my-gateway'), 'my-gateway');
+  });
+
+  ok('findModel 支持精确 / 大小写 / provider/model 三种写法', () => {
+    const c = fallbackCatalog();
+    assert.equal(findModel(c, 'kimi-k3', 'moonshot')?.id, 'kimi-k3', '本地 preset id 必须能映射到上游 id');
+    assert.equal(findModel(c, 'KIMI-K3')?.id, 'kimi-k3', '大小写不该影响查找');
+    assert.equal(findModel(c, 'moonshotai/kimi-k3')?.id, 'kimi-k3', '手填 provider/model 是常见写法');
+    assert.equal(findModel(c, 'no-such-model'), null, '查不到就返回 null，不是抛错');
+  });
+
+  ok('modelsForProvider 不给别人的模型（未知 provider 返回空）', () => {
+    const c = fallbackCatalog();
+    const list = modelsForProvider(c, 'zhipu');
+    assert.ok(list.length > 0 && list.every((m) => m.providerId === 'zhipuai'));
+    assert.deepEqual(modelsForProvider(c, 'ollama'), [], '本地模型没有元数据，不能假装查得到');
+  });
+
+  ok('pickEffort：精确命中 / 回落最近档位 / 不支持时返回 null', () => {
+    const effort: ReasoningPolicy = { supported: true, kind: 'effort', efforts: ['low', 'high', 'max'], field: null };
+    assert.equal(pickEffort(effort, 'max'), 'max', '精确命中必须原样发');
+    assert.equal(pickEffort(effort, 'medium'), 'low', 'medium 不可用时取最近档（同距离取更弱的那档）');
+    assert.equal(pickEffort(effort, 'none'), 'low', 'none 不可用也不能静默关掉思考');
+    assert.equal(pickEffort(effort, undefined), 'low', '没指定时按 medium 找最近档；该模型没有 medium，最近的是 low');
+    const off: ReasoningPolicy = { supported: false, kind: null, efforts: [], field: null };
+    assert.equal(pickEffort(off, 'high'), null, '不支持思考的模型不该收到任何思考参数');
+  });
+
+  ok('pickEffort 在 toggle 型模型上返回 toggle 标记', () => {
+    const toggle: ReasoningPolicy = { supported: true, kind: 'toggle', efforts: [], field: 'reasoning_content' };
+    assert.equal(pickEffort(toggle, 'high'), 'toggle');
+  });
+
+  ok('内置快照自洽：每个模型的 providerId 与所属 provider 一致', () => {
+    const c = fallbackCatalog();
+    for (const p of c.providers) {
+      for (const m of p.models) {
+        assert.equal(m.providerId, p.id, `${m.id} 归属 ${p.id} 却写着 ${m.providerId}`);
+      }
+    }
+    assert.equal(c.source, 'fallback', '内置快照必须能被识别出来（UI 要提示"可能过期"）');
+  });
+
+  ok('contextWindowFor：目录优先，查不到才回落本地表', () => {
+    const c = fallbackCatalog();
+    assert.equal(contextWindowFor(c, 'gpt-5.6-luna', () => 128_000), 1_050_000, '目录有值就该用目录');
+    assert.equal(contextWindowFor(c, 'qwen3:8b', () => 128_000), 128_000, '本地模型回退本地表');
+    assert.equal(contextWindowFor(null, 'qwen3:8b', () => 64_000), 64_000, '没有目录时也必须能用');
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

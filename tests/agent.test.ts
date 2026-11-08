@@ -60,7 +60,7 @@ import {
   queueBlink,
   shapeOf,
 } from '../src/lib/pet/eyes';
-import { breathScale, lookOf, stateFromAgent, type PetState } from '../src/lib/pet/state';
+import { breathScale, hasRunningTool, lookOf, stateFromAgent, type PetState } from '../src/lib/pet/state';
 import { READ_TOOL_NAMES, classifyTool } from '../src/lib/ai/turn-plan';
 import {
   CATALOG_CACHE_VERSION,
@@ -16549,6 +16549,42 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
     const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
     assert.match(src, /<PetFace/);
+  });
+
+  // ── D4-B3：宠物跟着 Agent 真实状态走 ──
+  console.log('\n[pet] 状态联动');
+
+  ok('工具在跑 → working；跑完 → 回到 idle（不是永远醒着）', () => {
+    const asst = (blocks: ChatMessage['blocks']): ChatMessage => ({ id: 'x', role: 'assistant', blocks, createdAt: 0 });
+    assert.equal(
+      hasRunningTool([asst([{ kind: 'tool', record: { id: 't', name: 'list_bookmarks', args: '{}', status: 'running' } }])]),
+      true,
+    );
+    assert.equal(
+      hasRunningTool([asst([{ kind: 'tool', record: { id: 't', name: 'list_bookmarks', args: '{}', status: 'done' } }])]),
+      false,
+      '跑完就该回到待机，否则宠物永远"在忙"',
+    );
+    assert.equal(hasRunningTool([{ id: 'u', role: 'user', blocks: [{ kind: 'text', text: 'hi' }], createdAt: 0 }]), false);
+    assert.equal(hasRunningTool([]), false);
+  });
+
+  ok('扫全部 assistant 消息而不是只看最后一条（取消/重发会留下挂着的旧块）', () => {
+    const oldRunning: ChatMessage = {
+      id: 'a1',
+      role: 'assistant',
+      createdAt: 0,
+      blocks: [{ kind: 'tool', record: { id: 't1', name: 'x', args: '{}', status: 'running' } }],
+    };
+    const latestIdle: ChatMessage = { id: 'a2', role: 'assistant', createdAt: 1, blocks: [{ kind: 'text', text: '好了' }] };
+    assert.equal(hasRunningTool([oldRunning, latestIdle]), true, '前面还有 running 块时不能被"最新一条"掩盖');
+  });
+
+  ok('空态：宠物状态由 Agent 真实状态推导，不许写死 idle', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
+    assert.match(src, /petState=\{stateFromAgent\(streaming, hasRunningTool\(messages\)\)\}/, '空态应接真实状态');
+    assert.doesNotMatch(src, /<PetFace size=\{72\} state="idle"/, '不许再写死 idle');
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

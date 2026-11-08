@@ -36,6 +36,7 @@ import { Dialog } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
 import { BrandMark } from '@/components/theme/theme-provider';
 import { PetFace } from '@/components/pet/pet-face';
+import { hasRunningTool, stateFromAgent, type PetState } from '@/lib/pet/state';
 import { MessageView } from './message-view';
 
 /** 快捷指令 chip */
@@ -819,6 +820,7 @@ export function ChatPanel({
               onChip={(p) => void send(p)}
               configured={chatConfigured}
               autoOrganize={config.autoOrganizeNew ?? true}
+              petState={stateFromAgent(streaming, hasRunningTool(messages))}
             />
           ) : (
             <div className="space-y-3.5">
@@ -1018,16 +1020,19 @@ function EmptyState({
   onChip,
   configured,
   autoOrganize,
+  petState,
 }: {
   chips: QuickChip[];
   onChip: (prompt: string) => void;
   configured: boolean;
   /** 自动整理是否开启：关掉时不该在这里承诺「我会自动归类」 */
   autoOrganize: boolean;
+  /** 宠物状态：由 Agent 的真实运行状态驱动（不是写死的 idle） */
+  petState: PetState;
 }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-5 px-5 py-6 text-center">
-      <PetFace size={72} state="idle" />
+      <PetFace size={72} state={petState} />
       <div className="space-y-1">
         <p className="text-sm font-medium text-foreground">我是你的书签管家</p>
         <p className="max-w-[248px] text-xs leading-5 text-muted-foreground">

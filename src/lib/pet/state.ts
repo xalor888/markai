@@ -9,6 +9,7 @@
  */
 
 import type { BlinkEvent } from './eyes';
+import type { ChatMessage } from '@/lib/ai/types';
 
 export type PetState = 'idle' | 'thinking' | 'working' | 'sleeping' | 'happy' | 'error';
 
@@ -77,4 +78,21 @@ export function scheduleBlink(
   const jitter = 0.75 + random() * 0.5;
   // 具体事件由 eyes.queueBlink 生成；这里只负责"何时"（职责分开，各自可测）
   return now + look.blinkEveryMs * jitter;
+}
+
+/**
+ * 当前是否有工具正在执行。
+ *
+ * 为什么扫全部 assistant 消息而不是只看最后一条：Agent 一轮里可能有多回次，
+ * 中途取消/重发会留下历史块——只看最后一条会在"刚重发、旧块还挂着 running"时误判。
+ * status=running 本身只可能短暂存在，扫全量成本可以忽略（消息量级是几十条）。
+ */
+export function hasRunningTool(messages: ChatMessage[]): boolean {
+  for (const m of messages) {
+    if (m.role !== 'assistant') continue;
+    for (const b of m.blocks) {
+      if (b.kind === 'tool' && b.record.status === 'running') return true;
+    }
+  }
+  return false;
 }

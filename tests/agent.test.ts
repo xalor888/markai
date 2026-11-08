@@ -61,6 +61,7 @@ import {
   shapeOf,
 } from '../src/lib/pet/eyes';
 import { breathScale, hasRunningTool, lookOf, shouldCelebrate, stateFromAgent, type PetState } from '../src/lib/pet/state';
+import { bounceOff, isResting, springStep, squash, tiltDeg } from '../src/lib/pet/physics';
 import { READ_TOOL_NAMES, classifyTool } from '../src/lib/ai/turn-plan';
 import {
   CATALOG_CACHE_VERSION,
@@ -16614,6 +16615,61 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.match(src, /<PetFace size=\{26\} state=\{petState\} \/>/, '头部应常驻宠物');
     // 空态与头部必须共用同一个推导值，不能各算一遍（会算出两个不同状态）
     assert.match(src, /petState=\{petState\}/, '空态应复用同一个 petState');
+  });
+
+  // ── D4-B5：手感物理（弹簧 · 反弹 · 挤压） ──
+  console.log('\n[pet] 手感物理');
+
+  ok('阻尼弹簧会收敛到目标（不会永远抖）', () => {
+    let s = { pos: 0, vel: 0 };
+    for (let i = 0; i < 60; i++) s = springStep(s, 100, 16);
+    assert.ok(Math.abs(s.pos - 100) < 0.5, `60 帧后应贴近目标，实际 ${s.pos}`);
+    assert.ok(isResting(s, 100), '此时应判定为已静止');
+  });
+
+  ok('低阻尼会过冲一次（这是"Q 弹"的来源，不是 bug）', () => {
+    let s = { pos: 0, vel: 0 };
+    let maxPos = 0;
+    for (let i = 0; i < 40; i++) {
+      // damping 12 ≈ 阻尼比 0.40 → 过冲约 25%（100 → 125）
+      s = springStep(s, 100, 16, 220, 12);
+      maxPos = Math.max(maxPos, s.pos);
+    }
+    assert.ok(maxPos > 100, `低阻尼应冲过目标，实际峰值 ${maxPos}`);
+    assert.ok(maxPos < 140, `过冲要有节制（峰值 ${maxPos} 太夸张就像被踢飞）`);
+  });
+
+  ok('dt 跳变不发散（切回标签页时 rAF 时间戳可能跳几百毫秒）', () => {
+    const s = springStep({ pos: 0, vel: 0 }, 100, 1000);
+    assert.ok(Number.isFinite(s.pos) && Number.isFinite(s.vel), '必须仍然是有限数');
+    assert.ok(Math.abs(s.pos) < 500, `一帧跳变后位移应可控，实际 ${s.pos}`);
+  });
+
+  ok('边界反弹：位置钳回、速度反向且带损耗', () => {
+    const upper = bounceOff(120, 80, 0, 100);
+    assert.equal(upper.pos, 100, '越上界要钳回');
+    assert.ok(upper.vel < 0, '速度必须反向');
+    assert.ok(Math.abs(upper.vel) < 80, '反弹要损耗（否则永远弹下去）');
+    const lower = bounceOff(-10, -50, 0, 100);
+    assert.equal(lower.pos, 0);
+    assert.ok(lower.vel > 0);
+    // 界内原样返回
+    const inside = bounceOff(50, 10, 0, 100);
+    assert.deepEqual(inside, { pos: 50, vel: 10 });
+  });
+
+  ok('挤压：横向撑开、纵向压扁，面积近似守恒', () => {
+    assert.deepEqual(squash(0), { sx: 1, sy: 1 }, '没按压就不变形');
+    const pressed = squash(1);
+    assert.ok(pressed.sx > 1 && pressed.sy < 1, '按下应横撑纵压（两个都缩小看起来像"变小"）');
+    assert.ok(Math.abs(pressed.sx * pressed.sy - 1) < 0.05, '面积应近似守恒');
+  });
+
+  ok('拖拽倾斜限幅在 ±12°（再大就像要摔倒）', () => {
+    assert.equal(tiltDeg(0), 0);
+    assert.ok(Math.abs(tiltDeg(1000)) <= 12);
+    assert.ok(Math.abs(tiltDeg(-1000)) <= 12);
+    assert.ok(tiltDeg(10) > tiltDeg(5), '位移越大倾斜越大（未到限幅时）');
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

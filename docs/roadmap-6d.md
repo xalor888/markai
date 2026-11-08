@@ -29,6 +29,21 @@
 
 ## 三、进度（按批追加，最新在上）
 
+### D1-B5 · 档位注入请求 + 思考流解析 — 2026-11-08
+
+- `src/lib/models/request.ts`：`reasoningPayload(providerId, effort)`
+  - 默认（`auto` / 未设置）**不加任何字段**——请求体一字不变，不可能因为新增思考参数把原本能用的端点打成 400
+  - OpenAI → `reasoning: { effort }`；其余 OpenAI 兼容端点 → 扁平的 `reasoning_effort`
+  - `none` 也要发出去（用户要的是"关掉思考"，不是"什么都不说"）
+- `ai/stream.ts`：`SseResult.reasoning` + `onReasoning` 回调；`reasoning_content` 与 `reasoning` 两种字段名都认；
+  与 `content` **分开累加**（思考绝不能串进气泡，这是最容易出的错）；空串增量不触发回调
+- `ai/client.ts`：`StreamHandlers.onReasoning`、`AssistantTurn.reasoning`、流式与非流式请求体都注入
+- 测试 922 → **927**（+5）
+- **证伪**：`reasoningPayload` 去掉 `auto` 判断 →「auto 一律不加字段」转红
+
+**门**：tsc ✅ · 单测 927 ✅ · build 1.042s / 1.07 MB · e2e 199/199 · 112.8s
+**下一批 D1-B6（收口）**：思考内容在聊天里可折叠展示（`ChatBlock` 加 `reasoning` 块 + 落盘 + 增量渲染）。
+
 ### D1-B4 · 设置页接上目录（思考强度控件按能力动态给）— 2026-11-08
 
 - `src/lib/models/control.ts`：`reasoningControl(policy, modelId)` 五种结局

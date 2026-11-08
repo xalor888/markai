@@ -4,6 +4,7 @@ import { normalizeBaseUrl } from '../providers';
 import { createSseAccumulator, finalizeToolCalls, type StreamToolCall } from './stream';
 import { buildRequestHeaders, getStableSessionId } from './request-headers';
 import type { AIConfig } from './types';
+import { reasoningPayload } from '@/lib/models/request';
 
 /** AI 请求错误（携带用户可读的中文信息） */
 export class ChatError extends Error {
@@ -35,11 +36,18 @@ export interface ApiToolCall {
 export interface AssistantTurn {
   content: string;
   toolCalls: ApiToolCall[];
+  /** 本轮思考内容（没有思考的模型为 undefined） */
+  reasoning?: string;
 }
 
 /** 流式回调（由 Agent 循环转发给 UI） */
 export interface StreamHandlers {
   onText: (text: string) => void;
+  /**
+   * 思考增量（与正文本分开）。没有它，「显示思考内容」就无从下手——
+   * 旧代码把思考当正文的兄弟一起丢掉了。
+   */
+  onReasoning?: (text: string) => void;
   onToolCall: (toolCall: ApiToolCall) => void;
   /** 请求失败自动重试提示（attempt 从 1 开始） */
   onRetry?: (attempt: number) => void;
@@ -257,6 +265,8 @@ async function requestStream(
           tools,
           stream: true,
           temperature: 0.4,
+          // 思考强度：默认 auto 时不加任何字段（请求体保持原样，不把能用的端点打成 400）
+          ...(reasoningPayload(config.providerId, config.reasoningEffort) ?? {}),
         }),
         signal: ctrl.signal,
       });
@@ -270,7 +280,7 @@ async function requestStream(
     const reader = response.body?.getReader();
     if (!reader) throw new ChatError('AI 服务返回了空响应。');
 
-    accumulator = createSseAccumulator({ onText: handlers.onText });
+    accumulator = createSseAccumulator({ onText: handlers.onText, onReasoning: handlers.onReasoning });
 
     for (;;) {
       let done: boolean;
@@ -318,7 +328,7 @@ async function requestStream(
 
   const toolCalls = finalizeToolCalls(result.toolCalls as StreamToolCall[]);
   toolCalls.forEach((tc) => handlers.onToolCall(tc));
-  return { content: result.content, toolCalls };
+  return { content: result.content, toolCalls, reasoning: result.reasoning };
 }
 
 /** 非流式请求（降级路径） */
@@ -346,7 +356,14 @@ async function requestNonStream(
       response = await fetch(url, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ model: config.model, messages, tools, stream: false, temperature: 0.4 }),
+        body: JSON.stringify({
+          model: config.model,
+          messages,
+          tools,
+          stream: false,
+          temperature: 0.4,
+          ...(reasoningPayload(config.providerId, config.reasoningEffort) ?? {}),
+        }),
         signal: ctrl.signal,
       });
     } catch (e) {

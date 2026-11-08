@@ -18,6 +18,14 @@ export interface StreamToolCall {
 /** 一次流解析的结果 */
 export interface SseResult {
   content: string;
+  /**
+   * 思考内容（模型的 reasoning / chain-of-thought）。
+   *
+   * 字段名来自 models.dev 的 `interleaved.field`：DeepSeek / Kimi / GLM 都发
+   * `reasoning_content`；OpenAI 系有的实现发 `reasoning`。两个都认，互不覆盖。
+   * 它**不是**回复正文（content），UI 要分区显示，绝不能拼进气泡。
+   */
+  reasoning: string;
   toolCalls: StreamToolCall[];
   /**
    * 流是否正常结束：收到过 `[DONE]` 或任意 `finish_reason`。
@@ -41,6 +49,8 @@ export interface SseResult {
 export interface SseAccumulatorOptions {
   /** 每收到一段文本增量就回调（UI 流式渲染） */
   onText?: (text: string) => void;
+  /** 每收到一段思考增量就回调（与 onText 分开，思考不进气泡） */
+  onReasoning?: (text: string) => void;
 }
 
 export interface SseAccumulator {
@@ -59,7 +69,14 @@ interface ToolCallDelta {
 
 interface ChunkShape {
   choices?: {
-    delta?: { content?: string | null; tool_calls?: ToolCallDelta[] };
+    delta?: {
+      content?: string | null;
+      tool_calls?: ToolCallDelta[];
+      /** DeepSeek / Kimi / GLM：思考流字段（models.dev 的 interleaved.field） */
+      reasoning_content?: string | null;
+      /** 部分 OpenAI 兼容实现用这个名字 */
+      reasoning?: string | null;
+    };
     finish_reason?: string | null;
   }[];
 }
@@ -83,6 +100,7 @@ export function createSseAccumulator(opts: SseAccumulatorOptions = {}): SseAccum
   const decoder = new TextDecoder();
   let buffer = '';
   let content = '';
+  let reasoning = '';
   let sawDone = false;
   let finishReason: string | null = null;
   let skippedLines = 0;
@@ -153,6 +171,13 @@ export function createSseAccumulator(opts: SseAccumulatorOptions = {}): SseAccum
       opts.onText?.(delta.content);
     }
 
+    // 思考增量：与正文分开累加。空串不触发回调（有些网关会发空 delta 占位）
+    const reasoningDelta = delta.reasoning_content ?? delta.reasoning;
+    if (typeof reasoningDelta === 'string' && reasoningDelta) {
+      reasoning += reasoningDelta;
+      opts.onReasoning?.(reasoningDelta);
+    }
+
     if (Array.isArray(delta.tool_calls)) {
       for (const tc of delta.tool_calls) {
         const i = tc.index ?? 0;
@@ -202,6 +227,7 @@ export function createSseAccumulator(opts: SseAccumulatorOptions = {}): SseAccum
         .map(([, v]) => ({ ...v }));
       return {
         content,
+        reasoning,
         toolCalls,
         completed: sawDone || finishReason !== null,
         finishReason,

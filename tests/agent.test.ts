@@ -46,6 +46,7 @@ import {
 } from '../src/lib/models/catalog';
 import type { ReasoningPolicy } from '../src/lib/models/types';
 import { effortLabel, reasoningControl, toggleOptions } from '../src/lib/models/control';
+import { reasoningPayload } from '../src/lib/models/request';
 import {
   CATALOG_CACHE_VERSION,
   decodeCatalog,
@@ -15860,6 +15861,62 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.equal(effortLabel('high'), '高');
     assert.equal(effortLabel('xhigh'), '很高');
     assert.equal(effortLabel('turbo'), 'turbo');
+  });
+
+  // ── D1-B5：思考参数注入与思考流解析 ──
+  console.log('\n[models] 思考参数注入 · 思考流解析');
+
+  ok('reasoningPayload：auto / 未设置一律不加字段（请求体保持原样）', () => {
+    assert.equal(reasoningPayload('openai', 'auto'), null, 'auto = 不指定，交给服务商默认');
+    assert.equal(reasoningPayload('deepseek', undefined), null);
+    assert.equal(reasoningPayload('deepseek', null), null);
+  });
+
+  ok('reasoningPayload：OpenAI 用嵌套 reasoning.effort，其余用扁平 reasoning_effort', () => {
+    assert.deepEqual(reasoningPayload('openai', 'high'), { reasoning: { effort: 'high' } });
+    assert.deepEqual(reasoningPayload('deepseek', 'max'), { reasoning_effort: 'max' });
+    assert.deepEqual(
+      reasoningPayload('custom', 'none'),
+      { reasoning_effort: 'none' },
+      'none 也要发出去——用户要的是「关掉思考」，而不是「什么都不说」',
+    );
+  });
+
+  await okA('思考流：reasoning_content 与正文分开累加，不串进气泡', async () => {
+    const { createSseAccumulator } = await import('../src/lib/ai/stream');
+    const chunks: string[] = [];
+    const acc = createSseAccumulator({ onReasoning: (t) => chunks.push(t) });
+    acc.push('data: {"choices":[{"delta":{"reasoning_content":"先想"}}]}\n\n');
+    acc.push('data: {"choices":[{"delta":{"reasoning_content":"一步"}}]}\n\n');
+    acc.push('data: {"choices":[{"delta":{"content":"答案"}}]}\n\n');
+    acc.push('data: [DONE]\n\n');
+    const r = acc.end();
+    assert.equal(r.reasoning, '先想一步', '思考要完整累加');
+    assert.equal(r.content, '答案', '正文不能被思考污染（这是最容易出的错）');
+    assert.deepEqual(chunks, ['先想', '一步'], '回调要逐段给出，UI 才能流式渲染');
+  });
+
+  await okA('思考流：两种字段名（reasoning / reasoning_content）都认', async () => {
+    const { createSseAccumulator } = await import('../src/lib/ai/stream');
+    const acc = createSseAccumulator();
+    acc.push('data: {"choices":[{"delta":{"reasoning":"思考A"}}]}\n\n');
+    acc.push('data: {"choices":[{"delta":{"reasoning_content":"思考B"}}]}\n\n');
+    const r = acc.end();
+    assert.equal(r.reasoning, '思考A思考B');
+  });
+
+  await okA('思考流：空串增量不触发回调（有些网关会发空占位）', async () => {
+    const { createSseAccumulator } = await import('../src/lib/ai/stream');
+    let calls = 0;
+    const acc = createSseAccumulator({
+      onReasoning: () => {
+        calls++;
+      },
+    });
+    acc.push('data: {"choices":[{"delta":{"reasoning_content":""}}]}\n\n');
+    const r = acc.end();
+    assert.equal(calls, 0, '空增量不该让 UI 闪一下');
+    assert.equal(r.reasoning, '');
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

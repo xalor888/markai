@@ -1,6 +1,7 @@
 /** ── Agent 消息模型（UI 与 background 共享） ── */
 
 import type { UndoApplyResult, UndoPoint } from '@/lib/undo/types';
+import type { CatalogIssue, ModelCatalog } from '@/lib/models/types';
 
 /** 工具执行状态 */
 /**
@@ -172,6 +173,13 @@ import type { OptOutEntry } from '@/lib/ai/organize-optout';
 export type OneShotInbound =
   | { type: 'ai:test'; config: AIConfig }
   | { type: 'ai:models'; config: AIConfig }
+  /**
+   * 模型目录（models.dev）。force = 用户点「刷新」，忽略 24h 缓存。
+   *
+   * 走 background 代理的原因：上游 api.json 有 5.7 MB，
+   * 侧边栏/设置页各自拉一遍既浪费流量，也会让 MV3 的每个页面各存一份缓存。
+   */
+  | { type: 'ai:catalog'; force?: boolean }
   | { type: 'deletions:execute'; items: { proposalId: string; bookmarkId: string }[] }
   | { type: 'sidepanel:open'; windowId: number }
   | { type: 'seed:consume' }
@@ -198,6 +206,20 @@ export type OneShotInbound =
 export type OneShotOutbound =
   | { type: 'ai:test:result'; ok: boolean; message: string; model?: string }
   | { type: 'ai:models:result'; ok: boolean; models: string[]; message: string; contextWindow?: number }
+  | {
+      type: 'ai:catalog:result';
+      ok: boolean;
+      catalog: ModelCatalog;
+      /**
+       * 本次是否真的走了网络。false 且 error 非空 = 这份目录来自缓存或内置快照，
+       * UI 必须如实标注（"离线快照，可能过期"），不能当作最新数据。
+       */
+      refreshed: boolean;
+      /** null = 正常；非空 = 这次没拉到（文案里已说明当前数据来源） */
+      error: string | null;
+      /** 归一化时被丢掉的坏条目 */
+      issues: CatalogIssue[];
+    }
   | { type: 'deletions:result'; count: number; failed: { proposalId: string; error: string }[] }
   | { type: 'sidepanel:opened'; ok: boolean }
   | { type: 'seed:value'; text?: string; folderId?: string; notice?: string }

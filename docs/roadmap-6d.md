@@ -29,20 +29,35 @@
 
 ## 三、进度（按批追加，最新在上）
 
+### D1-B2 · 目录缓存与加载（IO 注入，所以"失败不许伪装成功"可测）— 2026-11-08
+
+- `src/lib/models/store.ts`
+  - `encodeCatalog` / `decodeCatalog`：版本不符、结构坏一律 → `null`（**不做"尽力修复"**：半份目录比没有更危险）
+  - `isCatalogFresh`：内置快照（`fetchedAt=0`）永不算新鲜；时钟回拨也按不新鲜（宁可多拉一次）
+  - `loadCatalog`：缓存 → 联网 → 失败退旧缓存 → 再退内置快照；每一步都把「这份数据来自哪」写进 `error`
+  - `describeFetchError`：超时 / 网络 / HTTP 状态分开说人话
+  - `fetchCatalogJson`：30s 超时，**只在 background 用**（避免侧边栏与设置页各自拉 5.7 MB）
+- 协议新增 `ai:catalog` / `ai:catalog:result`（`ok = error === null`，`refreshed` 与 `error` 各自独立，UI 能如实标「离线快照，可能过期」）
+- 测试 902 → **913**（+11），其中 6 条异步用例用 `await okA`（项目自带的守卫当场抓到我第一版写成 `ok(... async)` 不等待）
+- **证伪**：把失败分支的 `error` 改成 `null`（静默假装成功）→「拉取失败但有缓存」当场转红，还原复绿
+
+**门**：tsc ✅ · 单测 913 ✅ · build 663ms / 1.06 MB（background 216 KB）· e2e 199/199 · 112.6s
+**下一批 D1-B3**：`AIConfig.reasoningEffort` + `resolveConfig` 白名单 + 迁移（白名单漏项正是 0.2.x 踩过的坑）。
+
 ### D1-B1 · models.dev 目录层（纯逻辑）— 2026-11-08
 
 - 新增 `src/lib/models/types.ts`：目录模型/Provider/思考档位的统一形状
 - 新增 `src/lib/models/catalog.ts`：
   - `normalizeCatalog()` 把 models.dev 的 `api.json` 压成内部形状（丢掉用不上的字段）
   - `resolveReasoningPolicy()` 把 `toggle` / `effort` / 空数组三种形态归一成"UI 该怎么画"
-  - `matchProvider()` 把本地 preset id（`moonshot`/`zhipu`）对齐 models.dev 的 `moonshotai`/`zhipuai`
+  - `canonicalProviderId()` 把本地 preset id（`moonshot`/`zhipu`）对齐 models.dev 的 `moonshotai`/`zhipuai`
   - `fallbackCatalog()` 内置最小快照：断网/接口挂了也不至于"一个模型都没有"
 - 单测：真实 `api.json` 片段 + 边界（缺字段、空 options、未知 provider）
 
 **当前状态 ✅ 四道门全绿**：tsc ✅ · 单测 **902**（+19）· build 620ms / 1.06 MB（未接线，tree-shaken 无增量）· e2e 199/199 · 111.2s
 **证伪**：把 `resolveReasoningPolicy` 改成「见到 toggle 就停」→ 「同时给 toggle 与 effort」当场转红；还原后复绿。
 
-**下一批 D1-B2**：`src/lib/models/store.ts` —— chrome.storage 缓存（24h TTL + 手动刷新）+ background `ai:catalog` 消息 + 失败时回退内置快照并如实标注来源。
+
 
 ### D1-B1 之前 · 调研结论
 

@@ -38,6 +38,7 @@ import {
   updateOrganizeLogEntry,
 } from '@/lib/ai/organize-log';
 import { registrableDomain } from '@/lib/bookmarks/domain';
+import { CATALOG_STORAGE_KEY, fetchCatalogJson, loadCatalog } from '@/lib/models/store';
 import { addOptOutDomain, clearOptOutDomains, readOptOutDomains, removeOptOutDomain, ORGANIZE_OPTOUT_LIMIT } from '@/lib/ai/organize-optout';
 import { normalizeBaseUrl, resolveConfig } from '@/lib/providers';
 import { CONFIG_STORAGE_KEY } from '@/stores/configStore';
@@ -312,6 +313,34 @@ async function handleOneShot(msg: OneShotInbound): Promise<OneShotOutbound> {
     case 'ai:test': {
       const result = await testConnection(msg.config);
       return { type: 'ai:test:result', ok: result.ok, message: result.message, model: result.model };
+    }
+
+    case 'ai:catalog': {
+      /*
+       * 模型目录（models.dev）。缓存 24h；force = 用户点「刷新」。
+       * 失败时退到旧缓存 → 再退到内置快照，并把「现在这份是哪来的」写进 error 文案——
+       * 设置页要据此显示「目录来自 2026-11-08 的缓存，这次刷新失败：…」，
+       * 而不是假装成功（0.2.x 那一串静默失败都是这么来的）。
+       */
+      const result = await loadCatalog(
+        {
+          read: async () => (await chrome.storage.local.get(CATALOG_STORAGE_KEY))[CATALOG_STORAGE_KEY],
+          write: async (value) => {
+            await chrome.storage.local.set({ [CATALOG_STORAGE_KEY]: value });
+          },
+        },
+        fetchCatalogJson,
+        Date.now(),
+        { force: msg.force },
+      );
+      return {
+        type: 'ai:catalog:result',
+        ok: result.error === null,
+        catalog: result.catalog,
+        refreshed: result.refreshed,
+        error: result.error,
+        issues: result.issues,
+      };
     }
 
     case 'ai:models': {

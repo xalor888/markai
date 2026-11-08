@@ -44,6 +44,15 @@ import {
   resolveReasoningPolicy,
 } from '../src/lib/models/catalog';
 import type { ReasoningPolicy } from '../src/lib/models/types';
+import {
+  CATALOG_CACHE_VERSION,
+  decodeCatalog,
+  describeFetchError,
+  encodeCatalog,
+  isCatalogFresh,
+  loadCatalog,
+  type CatalogCachePort,
+} from '../src/lib/models/store';
 import { AI_STORAGE_KEY, flushStreamPersist, useAIStore } from '../src/stores/aiStore';
 import {
   appendDraft,
@@ -15611,6 +15620,142 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.equal(contextWindowFor(c, 'gpt-5.6-luna', () => 128_000), 1_050_000, '目录有值就该用目录');
     assert.equal(contextWindowFor(c, 'qwen3:8b', () => 128_000), 128_000, '本地模型回退本地表');
     assert.equal(contextWindowFor(null, 'qwen3:8b', () => 64_000), 64_000, '没有目录时也必须能用');
+  });
+
+  // ── D1-B2：目录缓存与加载（IO 注入，所以能测「失败不许伪装成功」） ──
+  console.log('\n[models] 目录缓存 · 失败降级 · 来源诚实');
+
+  const makeCache = (initial?: unknown) => {
+    const state = { value: initial as unknown, writes: 0 };
+    const port: CatalogCachePort = {
+      async read() {
+        return state.value;
+      },
+      async write(v) {
+        state.value = v;
+        state.writes++;
+      },
+    };
+    return { port, state };
+  };
+
+  const remoteCatalogAt = (now: number) => ({
+    ...fallbackCatalog(),
+    fetchedAt: now,
+    source: 'remote' as const,
+  });
+
+  ok('新鲜度判定：0 / 刚拉到 / 25 小时 / 时钟回拨', () => {
+    const now = 1_000_000;
+    assert.equal(isCatalogFresh(0, now), false, '内置快照（fetchedAt=0）永远不算新鲜');
+    assert.equal(isCatalogFresh(now - 60_000, now), true, '一分钟前拉的应该算新鲜');
+    assert.equal(isCatalogFresh(now - 25 * 60 * 60 * 1000, now), false, '超过 24 小时必须重拉');
+    assert.equal(isCatalogFresh(now + 60_000, now), false, '未来时间戳（时钟被回拨）按不新鲜处理');
+  });
+
+  ok('落盘时把超长 description 截断（缓存体积不能翻倍）', () => {
+    const long = 'x'.repeat(200);
+    const c = fallbackCatalog();
+    c.providers[0]!.models[0]!.description = long;
+    const encoded = encodeCatalog(c);
+    const desc = encoded.providers[0]!.models[0]!.description;
+    assert.equal(typeof desc, 'string');
+    assert.ok(desc!.length <= 81, `截断后应 ≤81 字符，实际 ${desc!.length}`);
+    assert.ok(desc!.endsWith('…'), '截断必须有省略号（否则看起来像原文就这么短）');
+  });
+
+  ok('缓存版本不符一律返回 null（外部数据不做迁移）', () => {
+    const encoded = encodeCatalog(remoteCatalogAt(1000));
+    assert.equal(decodeCatalog(encoded)?.source, 'remote', '同版本必须能解出来');
+    assert.equal(decodeCatalog({ ...encoded, version: CATALOG_CACHE_VERSION + 1 }), null, '版本不符要重拉');
+  });
+
+  ok('坏结构一律返回 null，不做「尽力修复」（半份目录比没有更危险）', () => {
+    assert.equal(decodeCatalog(null), null);
+    assert.equal(decodeCatalog({}), null);
+    const encoded = encodeCatalog(remoteCatalogAt(1000));
+    assert.equal(decodeCatalog({ ...encoded, providers: [{ id: 'p', models: [{ nope: 1 }] }] }), null, '缺 id 的模型要整体判坏');
+    assert.equal(decodeCatalog({ ...encoded, providers: 'nope' }), null);
+  });
+
+  await okA('缓存新鲜时不联网（设置页重复打开不该每次都拉 5.7 MB）', async () => {
+    const now = 5_000_000;
+    let calls = 0;
+    const { port } = makeCache(encodeCatalog(remoteCatalogAt(now - 60_000)));
+    const r = await loadCatalog(port, async () => { calls++; return {}; }, now);
+    assert.equal(calls, 0, '新鲜缓存不该产生网络请求');
+    assert.equal(r.refreshed, false);
+    assert.equal(r.error, null);
+    assert.equal(r.catalog.source, 'remote');
+  });
+
+  await okA('force 时忽略新鲜缓存并重新拉取、写回缓存', async () => {
+    const now = 5_000_000;
+    let calls = 0;
+    const { port, state } = makeCache(encodeCatalog(remoteCatalogAt(now - 60_000)));
+    const r = await loadCatalog(
+      port,
+      async () => {
+        calls++;
+        return { p: { name: 'P', models: { m: { id: 'm', reasoning: true } } } };
+      },
+      now,
+      { force: true },
+    );
+    assert.equal(calls, 1, 'force 必须真的联网');
+    assert.equal(r.refreshed, true);
+    assert.equal(r.catalog.fetchedAt, now, '刚拉到的目录时间戳应是 now');
+    assert.equal(r.catalog.providers[0]?.id, 'p', '应该用新拉到的目录，而不是旧缓存');
+    assert.equal(state.writes, 1, '新目录要写回缓存');
+  });
+
+  await okA('内置快照即使「刚写入」也不算新鲜，仍会刷新', async () => {
+    const now = 5_000_000;
+    let calls = 0;
+    const fallback = { ...fallbackCatalog(), fetchedAt: now, source: 'fallback' as const };
+    const { port } = makeCache(encodeCatalog(fallback));
+    const r = await loadCatalog(port, async () => { calls++; return { p: { models: { m: { id: 'm' } } } }; }, now);
+    assert.equal(calls, 1, '一次断网不该把离线快照钉死 24 小时');
+    assert.equal(r.refreshed, true);
+  });
+
+  await okA('拉取失败但有缓存：返回缓存，并说明「用的是上次缓存的目录」', async () => {
+    const now = 5_000_000;
+    const { port } = makeCache(encodeCatalog(remoteCatalogAt(now - 30 * 60 * 60 * 1000)));
+    const r = await loadCatalog(port, async () => { throw new Error('Failed to fetch'); }, now);
+    assert.equal(r.refreshed, false);
+    assert.ok(r.error, '失败必须有 error，不能假装成功');
+    assert.match(r.error!, /无法连接 models\.dev/, '网络错误要说人话');
+    assert.match(r.error!, /上次缓存的目录/, '必须说明当前数据来自缓存');
+    assert.equal(r.catalog.source, 'remote', '数据仍是缓存里的那份');
+  });
+
+  await okA('拉取失败且无缓存：退回内置快照，并标明「可能已过期」', async () => {
+    const now = 5_000_000;
+    const { port } = makeCache(undefined);
+    const r = await loadCatalog(port, async () => { throw new Error('Failed to fetch'); }, now);
+    assert.equal(r.catalog.source, 'fallback');
+    assert.ok(r.error);
+    assert.match(r.error!, /离线快照/);
+    assert.match(r.error!, /可能已过期/, 'UI 要能据此提示用户');
+    assert.ok(r.catalog.providers.length > 0, '离线也要有数据可用，不能空目录');
+  });
+
+  await okA('空目录视为失败：不写缓存，也不能当成功', async () => {
+    const now = 5_000_000;
+    const { port, state } = makeCache(undefined);
+    const r = await loadCatalog(port, async () => ({}) , now);
+    assert.equal(r.refreshed, false);
+    assert.ok(r.error, '上游返回空目录 = 接口变了，必须报错');
+    assert.match(r.error!, /没有任何 provider/);
+    assert.equal(state.writes, 0, '空目录绝不能写进缓存（否则 24 小时内一直空）');
+  });
+
+  ok('超时与网络错误要给不同的提示（不能都说「检查网络」）', () => {
+    const abort = new DOMException('aborted', 'AbortError');
+    assert.match(describeFetchError(abort), /超时/);
+    assert.match(describeFetchError(new Error('Failed to fetch')), /无法连接/);
+    assert.match(describeFetchError(new Error('models.dev 返回 503')), /503/);
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

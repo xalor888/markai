@@ -23,7 +23,8 @@ import { ChatError } from '../src/lib/ai/client';
 import type { MemoryItem } from '../src/lib/ai/memory';
 import { TOOL_DEFINITIONS } from '../src/lib/ai/prompts';
 import { executeTool, TOOL_META } from '../src/lib/ai/tools';
-import type { AIConfig, ChatInbound, ChatMessage, ChatOutbound, DeletionProposal } from '../src/lib/ai/types';
+import type { AIConfig, ChatInbound, ChatMessage, ChatOutbound, DeletionProposal, ReasoningEffort } from '../src/lib/ai/types';
+import { normalizeReasoningEffort, resolveConfig } from '../src/lib/providers';
 import { z } from 'zod';
 import { flattenBookmarks, sortTimeline, groupByDay, filterTimeline, dayLabel, pageGroups } from '../src/lib/bookmarks/timeline';
 import { registrableDomain } from '../src/lib/bookmarks/domain';
@@ -15756,6 +15757,55 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.match(describeFetchError(abort), /超时/);
     assert.match(describeFetchError(new Error('Failed to fetch')), /无法连接/);
     assert.match(describeFetchError(new Error('models.dev 返回 503')), /503/);
+  });
+
+  // ── D1-B3：思考强度配置（白名单不许漏项） ──
+  console.log('\n[models] 思考强度配置 · 白名单完整性');
+
+  ok('resolveConfig 保留思考强度，非法值回落 auto', () => {
+    assert.equal(resolveConfig({}).reasoningEffort, 'auto', '没设置 = 跟随模型');
+    assert.equal(resolveConfig({ reasoningEffort: 'high' }).reasoningEffort, 'high');
+    assert.equal(resolveConfig({ reasoningEffort: 'HIGH' as ReasoningEffort }).reasoningEffort, 'high', '大小写要归一');
+    assert.equal(resolveConfig({ reasoningEffort: '  max  ' as ReasoningEffort }).reasoningEffort, 'max', '首尾空白要吃掉');
+    assert.equal(
+      resolveConfig({ reasoningEffort: 'turbo' as ReasoningEffort }).reasoningEffort,
+      'auto',
+      '上游不认识的档位不能让请求发出去（400 或静默忽略都比跟随模型更糟）',
+    );
+  });
+
+  ok('normalizeReasoningEffort：只认白名单，其余一律 auto', () => {
+    assert.equal(normalizeReasoningEffort('xhigh'), 'xhigh');
+    assert.equal(normalizeReasoningEffort('none'), 'none');
+    assert.equal(normalizeReasoningEffort('off'), 'auto', '关思考的约定值是 none，"off" 上游不认');
+    assert.equal(normalizeReasoningEffort(undefined), 'auto');
+    assert.equal(normalizeReasoningEffort(''), 'auto');
+    assert.equal(normalizeReasoningEffort('   '), 'auto');
+  });
+
+  ok('AIConfig 的每个字段都出现在 resolveConfig 返回值里（新增字段不许只存不读）', () => {
+    // 这条守卫防的是历史事故：UI 存进去了、background 读出来却被白名单丢掉，
+    // 于是"设置看起来生效了，实际仍是默认值"。任何新增配置字段都必须同时改 resolveConfig。
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const typesSrc = readFileSync(resolve(srcDir, 'lib/ai/types.ts'), 'utf8');
+    const provSrc = readFileSync(resolve(srcDir, 'lib/providers.ts'), 'utf8');
+
+    const start = typesSrc.indexOf('export interface AIConfig {');
+    assert.ok(start >= 0, '没找到 AIConfig 接口');
+    const end = typesSrc.indexOf('\n}', start);
+    assert.ok(end > start, 'AIConfig 接口没有正常结束');
+    const block = typesSrc.slice(start, end);
+    const fields = [...block.matchAll(/^\s{2}([a-zA-Z][a-zA-Z0-9]*)\??:/gm)].map((m) => m[1]!);
+    assert.ok(fields.length >= 12, `字段解析异常，只认出 ${fields.length} 个`);
+    console.log('   [DBG] AIConfig 字段:', fields.join(', '));
+
+    const rs = provSrc.indexOf('export function resolveConfig');
+    assert.ok(rs >= 0, '没找到 resolveConfig');
+    const re = provSrc.indexOf('\n}', rs);
+    const fn = provSrc.slice(rs, re);
+    for (const f of fields) {
+      assert.ok(fn.includes(f), `AIConfig.${f} 没出现在 resolveConfig 的返回值里 —— 存进去会被静默丢弃`);
+    }
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

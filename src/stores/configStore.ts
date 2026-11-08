@@ -28,6 +28,8 @@ export const DEFAULT_CONFIG: AIConfig = {
   autoOrganizeAi: true,
   // 自定义请求头默认空（有些网关要求额外头，见 lib/ai/request-headers.ts）
   customHeaders: '',
+  // 思考强度：默认 auto（跟随模型；具体档位由 models.dev 目录给出的能力决定）
+  reasoningEffort: 'auto',
   configVersion: CONFIG_VERSION,
 };
 

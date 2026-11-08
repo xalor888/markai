@@ -75,6 +75,12 @@ export interface ChatMessage {
   contextFolderId?: string;
 }
 
+/**
+ * 思考强度的标准档位。`'auto'` 表示「不指定，按模型默认」。
+ * 与 `lib/models/catalog.ts` 的 EFFORT_ORDER 同源（那边给 UI 排次序用）。
+ */
+export type ReasoningEffort = 'auto' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 /** AI 连接配置（options 页配置，chrome.storage.local 明文存储） */
 export interface AIConfig {
   providerId: string;
@@ -125,6 +131,14 @@ export interface AIConfig {
    * 值为稳定会话 ID，见 `getStableSessionId()`：必须稳定，否则服务端路由被打散、缓存全失效。
    */
   sessionHeader?: string;
+  /**
+   * 思考强度（reasoning effort）。`'auto'` = 跟随模型（由 models.dev 目录给出该模型的可用档位）。
+   *
+   * 值域故意做成字符串而不是枚举数字：各家档位名不统一（OpenAI 有 none/xhigh/max，
+   * DeepSeek 只有 low/high/max），归一化在 `lib/models/catalog.ts` 的 pickEffort 里做，
+   * 这里只存「用户想要的那一档」，具体发什么由模型能力决定。
+   */
+  reasoningEffort?: ReasoningEffort;
 }
 
 /** ── UI ↔ background 长连接 Port 协议（聊天流式代理） ── */

@@ -1,6 +1,6 @@
 /** ── AI Provider 预设（OpenAI 兼容协议） ── */
 
-import type { AIConfig } from './ai/types';
+import type { AIConfig, ReasoningEffort } from './ai/types';
 
 /** Provider 预设描述 */
 export interface ProviderPreset {
@@ -93,6 +93,21 @@ export const PROVIDERS: ProviderPreset[] = [
     needsKey: true,
   },
 ];
+
+/** 思考强度的合法档位（与 ai/types.ts 的 ReasoningEffort 同源） */
+export const REASONING_EFFORTS = ['auto', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+/**
+ * 归一化思考强度：未知值 → auto。
+ *
+ * 为什么不「保留原值」：旧配置里可能躺着上游已删除的档位（或用户手改的乱码），
+ * 原样发给服务商会得到 400 或静默忽略——两种结果都比「跟随模型」更糟。
+ */
+export function normalizeReasoningEffort(value?: string | null): ReasoningEffort {
+  if (typeof value !== 'string') return 'auto';
+  const v = value.trim().toLowerCase();
+  return (REASONING_EFFORTS as readonly string[]).includes(v) ? (v as ReasoningEffort) : 'auto';
+}
 
 export function getPreset(id?: string): ProviderPreset | undefined {
   if (!id) return undefined;
@@ -243,6 +258,8 @@ export function resolveConfig(saved?: Partial<AIConfig> | null): AIConfig {
     autoOrganizeAi: saved?.autoOrganizeAi ?? true,
     // 自定义请求头：原样透传（解析与校验在 request-headers.ts，读的时候不拦）
     customHeaders: saved?.customHeaders ?? '',
+    // 思考强度：非法/缺省一律回落 auto（宁可跟随模型，也不发一个上游不认识的档位）
+    reasoningEffort: normalizeReasoningEffort(saved?.reasoningEffort),
     /*
      * 会话头名**总是由预设决定**，不读用户存的值：
      * 它不是一个可配置项，而是"这个服务商要求什么"的事实。用户从 OpenCode Go 切到

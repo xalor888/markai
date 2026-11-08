@@ -29,6 +29,17 @@
 
 ## 三、进度（按批追加，最新在上）
 
+### D1-B3 · 思考强度配置（白名单 + 归一化）— 2026-11-08
+
+- `ai/types.ts`：`ReasoningEffort` 类型 + `AIConfig.reasoningEffort`（`'auto'` = 跟随模型）
+- `providers.ts`：`normalizeReasoningEffort`（白名单 `auto/none/minimal/low/medium/high/xhigh/max`，其余一律 `auto`）+ `resolveConfig` 白名单接上
+- `configStore.ts`：默认 `'auto'`
+- 测试 913 → **916**（+3）。其中一条是**白名单完整性守卫**：从 `AIConfig` 接口源码解析出全部 15 个字段，逐个断言出现在 `resolveConfig` 的返回值里——直接防「UI 存进去、background 读出来被静默丢弃」那次历史事故
+- **证伪**：把白名单里那行删掉 →「保留思考强度」当场转红
+
+**门**：tsc ✅ · 单测 916 ✅ · build 811ms / 1.06 MB · e2e 199/199 · 112.0s
+**下一批 D1-B4**：设置页接上目录（模型搜索 + 能力徽标 + 思考强度控件，按 `reasoningPolicy` 动态给选项）。
+
 ### D1-B2 · 目录缓存与加载（IO 注入，所以"失败不许伪装成功"可测）— 2026-11-08
 
 - `src/lib/models/store.ts`

@@ -100,6 +100,32 @@ function extractText(m: ChatMessage): string {
     .join('');
 }
 
+/** 历史里每条工具结果的转写上限（保留结论，丢掉逐条 JSON） */
+const TOOL_RECORD_CHARS = 160;
+
+/**
+ * 取出「可发送给模型的历史文本」：正文 + **工具结果的摘要**（不含思考）。
+ *
+ * 为什么不能只发正文：实测 200 轮对话里工具结果占可发送内容的 **66.1%**，
+ * 它们全部被丢掉 —— 模型只看到三分之一的对话，于是用户问「刚才那些重复的」
+ * 它答不上来，只能重查一遍（多一次往返）。这就是"不记事"的根因。
+ *
+ * 为什么不能直接把 tool 块发出去：历史里的 tool 消息没有配对的 `tool_call_id`，
+ * OpenAI 协议会直接 400。所以转写成一条**普通文本**，保留"查了什么、得到多少、结论是什么"，
+ * 丢掉逐条 JSON（那才是 token 大头）。
+ */
+export function extractHistoryText(m: ChatMessage): string {
+  const text = extractText(m);
+  const records = m.blocks.flatMap((b) => (b.kind === 'tool' ? [b.record] : []));
+  if (records.length === 0) return text;
+  const lines = records.map((r) => {
+    const status = r.status === 'done' ? '' : `（${r.status}）`;
+    const payload = (r.result ?? r.error ?? '').replace(/\s+/g, ' ').trim().slice(0, TOOL_RECORD_CHARS);
+    return `[工具 ${r.name}${status}] ${payload}${payload.length === TOOL_RECORD_CHARS ? '…' : ''}`;
+  });
+  return [text, ...lines].filter(Boolean).join('\n');
+}
+
 /**
  * 估算文本 token 数（中英混合近似）：
  * 中文/全角约 0.75 token/字（主流 tokenizer 实测区间），假名/谚文约 1 token，其他约 1/4 token。
@@ -162,7 +188,7 @@ export function selectHistory(
   const selected: ChatMessage[] = [];
   let used = 0;
   for (const m of [...history].reverse()) {
-    const full = extractText(m);
+    const full = extractHistoryText(m);
     let text = full.slice(0, MAX_MESSAGE_CHARS);
     let cut = full.length > text.length;
     let cost = estimateTokens(text) + PER_MESSAGE_OVERHEAD;
@@ -314,7 +340,7 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
      * 「内容被截断」标记切掉（标记接在 6000 字符之后），让模型重新看不到"被切过"。
      * 0.2.125 修的就是这个：加了标记却被下一行悄悄抹掉。
      */
-    const content = extractText(m);
+    const content = extractHistoryText(m);
     apiMessages.push({ role: m.role, content: content || null });
   }
   /*

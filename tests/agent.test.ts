@@ -16,7 +16,7 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createBusyGuard, runExclusive } from '../src/lib/chat/busy-guard';
-import { runAgentTurn, selectHistory } from '../src/lib/ai/agent';
+import { extractHistoryText, runAgentTurn, selectHistory } from '../src/lib/ai/agent';
 import { readUndoPoints } from '../src/lib/undo/recorder';
 import { applyUndo } from '../src/lib/undo/apply';
 import { ChatError } from '../src/lib/ai/client';
@@ -16110,19 +16110,89 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.match(joined, /截断|没有发送|看不到/, '必须告诉模型"更早的内容没进来"，否则它会自信地基于不完整信息行动');
   });
 
-  ok('历史组装只发 text 块（tool/reasoning 有意丢弃，改它必须先改这条）', () => {
+  ok('历史文本 = 正文 + 工具摘要；思考不进历史', () => {
     const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
     const src = readFileSync(resolve(srcDir, 'lib/ai/agent.ts'), 'utf8');
-    assert.match(
-      src,
-      /const content = extractText\(m\);/,
-      '历史消息的正文只来自 extractText —— 这是有意为之：历史里的 tool 块没有配对的 tool_call_id，',
-    );
-    assert.match(
-      src,
-      /function extractText\(m: ChatMessage\): string \{\s*return m\.blocks\s*\.filter\(\(b\): b is \{ kind: 'text'; text: string \} => b\.kind === 'text'\)/,
-      'extractText 只读 text 块（reasoning 也不该进历史正文）',
-    );
+    // 预算与发送必须用同一份文本，否则"估算"和"实际发出去"会对不上（超窗 400 的老路子）
+    assert.match(src, /const full = extractHistoryText\(m\);/, '历史预算必须按含工具摘要的文本估算');
+    assert.match(src, /const content = extractHistoryText\(m\);/, '实际发送也必须用同一份文本');
+    assert.match(src, /b\.kind === 'tool' \? \[b\.record\] : \[\]/, 'extractHistoryText 必须读 tool 块');
+    assert.doesNotMatch(src, /const content = extractText\(m\);/, '不许再有只发正文的历史组装');
+  });
+
+  // ── D2-B6：历史工具结果转写（让模型看见"查过什么"） ──
+  console.log('\n[agent] 历史工具结果转写');
+
+  ok('纯文本消息：转写后与正文一致（不凭空加东西）', () => {
+    const m: ChatMessage = { id: 'm1', role: 'user', blocks: [{ kind: 'text', text: '帮我看看' }], createdAt: 0 };
+    assert.equal(extractHistoryText(m), '帮我看看');
+  });
+
+  ok('含工具块：带上工具名、状态与结果摘要', () => {
+    const m: ChatMessage = {
+      id: 'm2',
+      role: 'assistant',
+      createdAt: 0,
+      blocks: [
+        { kind: 'text', text: '我查一下' },
+        {
+          kind: 'tool',
+          record: {
+            id: 't1',
+            name: 'search_bookmarks',
+            args: '{"query":"Rust"}',
+            status: 'done',
+            result: '命中 12 条：Rust 异步实践 / Rust 并发模式 / …',
+          },
+        },
+      ],
+    };
+    const out = extractHistoryText(m);
+    assert.match(out, /^我查一下/);
+    assert.match(out, /\[工具 search_bookmarks\]/, '必须留下工具名——模型要知道"查过什么"');
+    assert.match(out, /命中 12 条/, '结论要保留');
+  });
+
+  ok('工具失败/取消：状态要标出来（别让模型以为拿到的是完整结果）', () => {
+    const m: ChatMessage = {
+      id: 'm3',
+      role: 'assistant',
+      createdAt: 0,
+      blocks: [
+        { kind: 'tool', record: { id: 't2', name: 'list_bookmarks', args: '{}', status: 'canceled', error: '已取消' } },
+      ],
+    };
+    const out = extractHistoryText(m);
+    assert.match(out, /（canceled）/, '状态必须可见');
+    assert.match(out, /已取消/);
+  });
+
+  ok('工具摘要超长会被截断（否则历史预算被长结果吃光）', () => {
+    const m: ChatMessage = {
+      id: 'm4',
+      role: 'assistant',
+      createdAt: 0,
+      blocks: [
+        { kind: 'tool', record: { id: 't3', name: 'export_bookmarks', args: '{}', status: 'done', result: 'x'.repeat(1000) } },
+      ],
+    };
+    const out = extractHistoryText(m);
+    assert.ok(out.length < 250, `摘要应被截断，实际 ${out.length} 字符`);
+    assert.ok(out.endsWith('…'), '截断要有省略号（否则看起来像结果就这么短）');
+  });
+
+  ok('思考内容绝不进历史正文（它是过程，不是对话内容）', () => {
+    const m: ChatMessage = {
+      id: 'm5',
+      role: 'assistant',
+      createdAt: 0,
+      blocks: [
+        { kind: 'reasoning', text: '内部推理：用户在测试我' },
+        { kind: 'text', text: '好的' },
+      ],
+    };
+    const out = extractHistoryText(m);
+    assert.equal(out, '好的', '思考不该被当作文本重新发回模型');
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

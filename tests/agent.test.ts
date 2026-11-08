@@ -49,6 +49,17 @@ import type { ReasoningPolicy } from '../src/lib/models/types';
 import { effortLabel, reasoningControl, toggleOptions } from '../src/lib/models/control';
 import { reasoningPayload } from '../src/lib/models/request';
 import { AA_NORMAL, composite, contrastRatio, parseCssColor, parseHex, relativeLuminance } from '../src/lib/ui/contrast';
+import {
+  applyLid,
+  consumeBlink,
+  EYE_SHAPES,
+  gazeOffset,
+  LID_MAX,
+  LID_MIN,
+  lerpPoly,
+  queueBlink,
+  shapeOf,
+} from '../src/lib/pet/eyes';
 import { READ_TOOL_NAMES, classifyTool } from '../src/lib/ai/turn-plan';
 import {
   CATALOG_CACHE_VERSION,
@@ -16427,6 +16438,70 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     const alpha = Number(m[1]);
     console.log(`   [DBG] 深色玻璃边框 alpha=${alpha}`);
     assert.ok(alpha >= 0.14, `深色玻璃边框只有 ${alpha}，浮层边界在近黑底上几乎看不见`);
+  });
+
+  // ── D4-B1：宠物眼睛（多边形眼型 + 眨眼队列 + 视线） ──
+  console.log('\n[pet] 眼睛');
+
+  ok('多边形插值：中点、端点、点数不一致必须抛错', () => {
+    const a: [number, number][] = [[0, -1], [1, 0]];
+    const b: [number, number][] = [[0, -0.5], [0.5, 0]];
+    const mid = lerpPoly(a, b, 0.5);
+    assert.deepEqual(mid[0], [0, -0.75]);
+    assert.deepEqual(mid[1], [0.75, 0]);
+    assert.deepEqual(lerpPoly(a, b, 0), a);
+    assert.deepEqual(lerpPoly(a, b, 1), b);
+    // 截断点数会让形状静默变形（动画里表现为"眼睛抽搐"），所以必须硬失败
+    assert.throws(() => lerpPoly(a, [[0, 0]], 0.5), /点数不一致/);
+  });
+
+  ok('眼睑：闭合留一丝缝、过冲允许到 1.08、只压 y 不压 x', () => {
+    const poly = EYE_SHAPES['normal']!.poly;
+    // 用字面值而不是 LID_MIN 常量：断言跟着被测常量走的话，改常量测试也会跟着改，永远绿
+    assert.equal(LID_MIN, 0.04, '闭合下限是 0.04（留一条缝，不是把眼睛压没）');
+    const closed = applyLid(poly, 0);
+    const ys = closed.map(([, y]) => Math.abs(y));
+    assert.ok(Math.min(...ys) <= 0.05, '完全闭合时 y 应压到下限附近');
+    assert.ok(Math.max(...ys) <= 0.05, '闭合时所有 y 都该在下限（一条缝，不是消失）');
+    const over = applyLid(poly, 2);
+    assert.ok(Math.max(...over.map(([, y]) => Math.abs(y))) <= LID_MAX, '过冲要被钳到 1.08');
+    // 横向坐标不受影响：不然眨眼时眼睛会左右抽动
+    assert.deepEqual(applyLid(poly, 0.5).map(([x]) => x), poly.map(([x]) => x));
+  });
+
+  ok('眨眼队列：单眨四次事件，按时间消费出 0.05 → 0.05 → 1.08 → 1', () => {
+    const q: { at: number; v: number }[] = [];
+    queueBlink(q, 1000, () => 0.9); // 0.9 ≥ 0.14 → 不双眨
+    assert.equal(q.length, 4);
+    // 时间没到 → 不消费
+    assert.equal(consumeBlink(q, 999), null);
+    // 逐帧推进：同一帧里可连消费多条（掉帧时不积压）
+    assert.equal(consumeBlink(q, 1000), LID_MIN);
+    assert.equal(consumeBlink(q, 1070), LID_MIN);
+    assert.equal(consumeBlink(q, 1050), null, '时间倒退不该消费任何事件');
+    assert.equal(consumeBlink(q, 1150), 1.08);
+    assert.equal(consumeBlink(q, 1300), 1);
+    assert.equal(consumeBlink(q, 5000), null, '队列空了返回 null（保留上一次的值）');
+  });
+
+  ok('21% 概率分支：random 低于阈值时追加第二次眨眼（6 事件）', () => {
+    const q: { at: number; v: number }[] = [];
+    queueBlink(q, 0, () => 0.1);
+    assert.equal(q.length, 6, '双眨才是"活的"，每次单眨反而机械');
+  });
+
+  ok('视线：近处按比例、远处饱和、零距离不动', () => {
+    assert.deepEqual(gazeOffset([100, 100], [100, 100], 3), { x: 0, y: 0 });
+    const near = gazeOffset([110, 100], [100, 100], 3);
+    assert.ok(Math.abs(near.x - 2.8) < 1e-9, '近处 0.28 倍距离');
+    const far = gazeOffset([10000, 100], [100, 100], 3);
+    assert.ok(Math.abs(far.x - 3) < 1e-9, '远处饱和到 maxRadius（不把瞳孔甩出眼眶）');
+    assert.ok(Math.abs(far.y) < 1e-9);
+  });
+
+  ok('未知眼型名回落到 normal（拼错状态名不该让宠物崩溃）', () => {
+    assert.deepEqual(shapeOf('nope'), EYE_SHAPES['normal']!.poly);
+    assert.deepEqual(shapeOf('happy'), EYE_SHAPES['happy']!.poly);
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

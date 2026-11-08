@@ -949,6 +949,9 @@ async function handleChatSend(
         safePost(port, e);
         if (e.type === 'chat:delta') {
           appendDraft(e.messageId, e.text);
+        } else if (e.type === 'chat:reasoning') {
+          // 思考也要进草稿：否则切标签页回来，思考区是空的（正文却在，看起来像"模型没思考"）
+          appendDraft(e.messageId, e.text, 'reasoning');
         } else if (e.type === 'chat:done' || e.type === 'chat:error' || e.type === 'chat:cancelled') {
           /*
            * 收尾：先把草稿落到**会话消息**里，再清掉草稿。

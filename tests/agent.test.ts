@@ -65,6 +65,7 @@ import {
   finalizeDraft,
   flushDraftNow,
   mergeDraft,
+  mergeDraftReasoning,
   readDraft,
   resetDraftForTest,
   STREAM_DRAFT_KEY,
@@ -16024,6 +16025,56 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     for (const w of writers) {
       assert.notEqual(classifyTool(w), 'read', `${w} 有副作用，不能并行执行`);
     }
+  });
+
+  // ── D2-B4：思考也进草稿（否则切标签页回来思考区是空的） ──
+  console.log('\n[agent] 思考草稿落盘');
+
+  await okA('思考增量进草稿的独立字段（与正文互不覆盖）', async () => {
+    resetDraftForTest();
+    storageMap.delete(STREAM_DRAFT_KEY);
+    appendDraft('r1', '想', 'reasoning');
+    appendDraft('r1', '一步', 'reasoning');
+    appendDraft('r1', '答案');
+    await new Promise((r) => setTimeout(r, 420));
+    const d = await readDraft();
+    assert.ok(d, '应写入草稿');
+    assert.equal(d!.reasoning, '想一步', '思考要独立累积');
+    assert.equal(d!.text, '答案', '正文不能被思考污染');
+  });
+
+  await okA('mergeDraftReasoning 只往更完整的方向合（绝不让思考变少）', async () => {
+    const draft = { messageId: 'r2', text: '', reasoning: '更长的思考', at: Date.now() };
+    assert.equal(mergeDraftReasoning('短', draft, 'r2'), '更长的思考');
+    assert.equal(mergeDraftReasoning('这是一段很长很长的思考内容', draft, 'r2'), '这是一段很长很长的思考内容');
+    assert.equal(mergeDraftReasoning('原有', draft, '别的消息'), '原有', 'messageId 不匹配就原样返回');
+  });
+
+  ok('恢复路径：含思考块的消息也必须被草稿补全（否则切标签页丢内容）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'stores/aiStore.ts'), 'utf8');
+    assert.match(
+      src,
+      /every\(\(b\) => b\.kind === 'text' \|\| b\.kind === 'reasoning'\)/,
+      'withDraft 的「可重排」判断漏了 reasoning 块 —— 带思考的回复会被整条跳过',
+    );
+    assert.match(src, /mergeDraftReasoning\(/, 'withDraft 必须合并思考');
+  });
+
+  ok('收尾落盘同样要处理思考块', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'lib/ai/stream-draft.ts'), 'utf8');
+    assert.match(
+      src,
+      /b\?\.kind === 'text' \|\| b\?\.kind === 'reasoning'/,
+      'finalizeDraft 的过滤漏了 reasoning —— 收尾时会被跳过，草稿白存',
+    );
+  });
+
+  ok('background 必须把 chat:reasoning 写进草稿', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'entrypoints/background.ts'), 'utf8');
+    assert.match(src, /appendDraft\(e\.messageId, e\.text, 'reasoning'\)/);
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

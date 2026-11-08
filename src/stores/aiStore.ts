@@ -18,7 +18,7 @@ import type { UndoPoint } from '@/lib/undo/types';
 import { undoReadiness } from '@/lib/undo/journal';
 import { UNDO_STORAGE_KEY } from '@/lib/undo/recorder';
 import { describeChatTrim, trimConversationsToBudget } from '@/lib/ai/chat-budget';
-import { mergeDraft, readDraft } from '@/lib/ai/stream-draft';
+import { mergeDraft, mergeDraftReasoning, readDraft } from '@/lib/ai/stream-draft';
 import { useBookmarkStore } from './bookmarkStore';
 
 /** storage key（popup 通过该 key 只读展示待删数） */
@@ -402,12 +402,22 @@ export const useAIStore = create<AIState>((set, get) => ({
       const withDraft = (msgs: ChatMessage[]): ChatMessage[] =>
         msgs.map((m) => {
           if (!draft || m.id !== draft.messageId || m.role !== 'assistant') return m;
-          // 只处理"纯文本"回复：含工具卡片的消息结构复杂，不在这里重排
-          if (!m.blocks.every((b) => b.kind === 'text')) return m;
-          const existing = m.blocks.map((b) => (b.kind === 'text' ? b.text : '')).join('');
-          const merged = mergeDraft(existing, draft, m.id);
-          if (merged === existing) return m;
-          return { ...m, blocks: [{ kind: 'text' as const, text: merged }] };
+          /*
+           * 只处理「纯文本 + 纯思考」的回复：含工具卡片的结构复杂，不在这里重排。
+           * 思考块**必须**算进这个判断——否则带思考的回复会被整条跳过，
+           * 切标签页回来就丢内容（这正是 0.2.x 修过的那个洞，加了思考块后会重新裂开）。
+           */
+          if (!m.blocks.every((b) => b.kind === 'text' || b.kind === 'reasoning')) return m;
+          const existingText = m.blocks.reduce((acc, b) => (b.kind === 'text' ? acc + b.text : acc), '');
+          const existingReasoning = m.blocks.reduce((acc, b) => (b.kind === 'reasoning' ? acc + b.text : acc), '');
+          const mergedText = mergeDraft(existingText, draft, m.id);
+          const mergedReasoning = mergeDraftReasoning(existingReasoning, draft, m.id);
+          if (mergedText === existingText && mergedReasoning === existingReasoning) return m;
+          const blocks: ChatMessage['blocks'] = [];
+          // 顺序固定：思考在前、正文在后（与流式时的到达顺序一致）
+          if (mergedReasoning) blocks.push({ kind: 'reasoning', text: mergedReasoning });
+          if (mergedText) blocks.push({ kind: 'text', text: mergedText });
+          return { ...m, blocks };
         });
 
       const revive = (msgs: ChatMessage[]): ChatMessage[] =>

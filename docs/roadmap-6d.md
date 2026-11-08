@@ -29,6 +29,26 @@
 
 ## 三、进度（按批追加，最新在上）
 
+### D2-B4 · 思考也进草稿（新块把老洞捅开了）— 2026-11-08
+
+- `stream-draft.ts`
+  - `StreamDraft.reasoning?`（旧草稿没有这个字段 = 空，不做版本迁移）
+  - `appendDraft(messageId, text, kind)`：思考与正文分开累积（混在一起就再也拆不开）
+  - `readDraft` 读 reasoning；新增 `mergeDraftReasoning`（只往更完整方向合）
+  - `finalizeDraft` 的「可重排」判断从 `kind === 'text'` 放宽到 `text | reasoning`
+- `background.ts`：`chat:reasoning` → `appendDraft(..., 'reasoning')`
+- `aiStore.ts`（恢复路径）：`withDraft` 按块重建 `[reasoning][text]`
+- 测试 938 → **943**（+5）
+- **证伪**：把 withDraft 的过滤改回 `kind === 'text'` →「含思考块的消息也必须被草稿补全」转红
+
+**为什么必须现在做**：加 reasoning 块之前那条过滤是 `kind === 'text'`。加了之后，
+**每一轮带思考的回复都会被整条跳过草稿合并**——这正是 0.2.x 修过的「切标签页丢内容」
+重新裂开。新功能把老洞捅开，是这类改动最典型的翻车方式（B6 当时把它记成"已知限制"，
+这一批把它补掉，并留下守卫不让它再裂）。
+
+**门**：tsc ✅ · 单测 943 ✅ · build 1.137s / 1.07 MB · e2e 199/199 · 113.5s
+**下一批 D2-B5**：上下文压缩实测（压缩前后省多少、压缩本身花多少往返）。
+
 ### D2-B3 · 工具能力分类单一来源（并行集合不再抄两份）— 2026-11-08
 
 - 删掉 `agent.ts` 里复制的那份 `READ_TOOLS`（15 项）；并行执行与「跳过逐回次确认」统一走 `classifyTool`

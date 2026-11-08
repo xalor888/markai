@@ -21,8 +21,15 @@ export const STREAM_DRAFT_KEY = 'markai.ai.draft';
 
 export interface StreamDraft {
   messageId: string;
-  /** 累积到的完整文本（不是增量） */
+  /** 累积到的完整正文（不是增量） */
   text: string;
+  /**
+   * 累积到的思考内容。
+   *
+   * 与正文分开存的理由同 ChatBlock：思考不是回复。
+   * 旧草稿没有这个字段（= 没有思考），读的时候按空串处理，不做版本迁移。
+   */
+  reasoning?: string;
   /** 最后一次写入的时间 */
   at: number;
 }
@@ -78,12 +85,20 @@ export async function flushDraftNow(): Promise<void> {
   await writeNow();
 }
 
-/** 收到一段增量：累积并节流落盘 */
-export function appendDraft(messageId: string, text: string): void {
+/**
+ * 收到一段增量：累积并节流落盘。
+ *
+ * `kind` 决定落到哪个字段——思考与正文分开累积，因为恢复时要按块重建
+ * `[reasoning][text]`，混在一起就再也拆不开了。
+ */
+export function appendDraft(messageId: string, text: string, kind: 'text' | 'reasoning' = 'text'): void {
   if (!buffer || buffer.messageId !== messageId) {
-    buffer = { messageId, text, at: Date.now() };
+    buffer = kind === 'reasoning'
+      ? { messageId, text: '', reasoning: text, at: Date.now() }
+      : { messageId, text, at: Date.now() };
   } else {
-    buffer.text += text;
+    if (kind === 'reasoning') buffer.reasoning = (buffer.reasoning ?? '') + text;
+    else buffer.text += text;
     buffer.at = Date.now();
   }
   if (timer) return;
@@ -113,7 +128,12 @@ export async function readDraft(): Promise<StreamDraft | null> {
     const data = await chrome.storage.local.get(STREAM_DRAFT_KEY);
     const raw = data[STREAM_DRAFT_KEY] as Partial<StreamDraft> | undefined;
     if (!raw || typeof raw.messageId !== 'string' || typeof raw.text !== 'string') return null;
-    return { messageId: raw.messageId, text: raw.text, at: typeof raw.at === 'number' ? raw.at : 0 };
+    return {
+      messageId: raw.messageId,
+      text: raw.text,
+      ...(typeof raw.reasoning === 'string' ? { reasoning: raw.reasoning } : {}),
+      at: typeof raw.at === 'number' ? raw.at : 0,
+    };
   } catch {
     return null;
   }
@@ -143,6 +163,16 @@ export function mergeDraft(existing: string, draft: StreamDraft | null, messageI
   return draft.text;
 }
 
+
+/**
+ * 合并思考内容，规则与 mergeDraft 同一条：**只往更完整的方向合**。
+ * 草稿里的思考更短就原样返回已有内容，绝不让用户眼前的思考变少。
+ */
+export function mergeDraftReasoning(existing: string, draft: StreamDraft | null, messageId: string): string {
+  const next = draft?.messageId === messageId ? (draft.reasoning ?? '') : '';
+  if (next.length <= existing.length) return existing;
+  return next;
+}
 
 /**
  * 把草稿的最终内容写回会话消息，然后清掉草稿。
@@ -176,16 +206,21 @@ export async function finalizeDraft(aiStorageKey: string): Promise<boolean> {
       const messages = conv.messages.map((m) => {
         const msg = m as { id?: string; role?: string; blocks?: { kind?: string; text?: string }[]; streaming?: boolean };
         if (msg.id !== draft.messageId || !Array.isArray(msg.blocks)) return m;
-        const onlyText = msg.blocks.every((b) => b?.kind === 'text');
-        if (!onlyText) return m;
-        const existing = msg.blocks.map((b) => b.text ?? '').join('');
-        if (draft.text.length <= existing.length) {
-          // 内容已经足够完整：只把 streaming 收尾，不动文本
-          touched = true;
-          return { ...msg, streaming: false };
-        }
+        // 只处理「纯文本 + 纯思考」的回复：含工具卡片的消息结构复杂，不在这里重排。
+        // （思考块也必须是可处理类型，否则带思考的回复会被整条跳过——那正是"切标签页丢内容"的复现条件）
+        const onlyChat = msg.blocks.every((b) => b?.kind === 'text' || b?.kind === 'reasoning');
+        if (!onlyChat) return m;
+        const existingText = msg.blocks.filter((b) => b?.kind === 'text').map((b) => b.text ?? '').join('');
+        const existingReasoning = msg.blocks.filter((b) => b?.kind === 'reasoning').map((b) => b.text ?? '').join('');
+        const nextText = draft.text.length > existingText.length ? draft.text : existingText;
+        const nextReasoning = mergeDraftReasoning(existingReasoning, draft, msg.id ?? '');
+        const changed = nextText !== existingText || nextReasoning !== existingReasoning;
         touched = true;
-        return { ...msg, streaming: false, blocks: [{ kind: 'text', text: draft.text }] };
+        if (!changed) return { ...msg, streaming: false };
+        const blocks: { kind: string; text: string }[] = [];
+        if (nextReasoning) blocks.push({ kind: 'reasoning', text: nextReasoning });
+        if (nextText) blocks.push({ kind: 'text', text: nextText });
+        return { ...msg, streaming: false, blocks };
       });
       return touched ? { ...conv, messages } : c;
     });

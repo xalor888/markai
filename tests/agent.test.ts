@@ -72,6 +72,7 @@ import {
   type ChatterState,
 } from '../src/lib/pet/chatter';
 import { FACT_THRESHOLDS, flattenForFacts, petFacts } from '../src/lib/pet/facts';
+import { buildSuggestion } from '../src/lib/pet/suggest';
 import {
   addDecline,
   alreadyKnown,
@@ -16845,7 +16846,7 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
     assert.match(src, /petFacts\(flattenForFacts\(roots\)\)/, '文案必须来自事实源，不许写死');
     assert.match(src, /data-testid="pet-line"/, '缺少稳定锚点');
-    assert.match(src, /\{petLine && \(/, '没有可说的就不显示——绝不为了"活跃"编一句');
+    assert.match(src, /petLine && \(/, '没有可说的就不显示——绝不为了"活跃"编一句');
   });
 
   // ── D5-B3：习惯提取（候选而非生效） ──
@@ -16934,6 +16935,77 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.match(src, /data-testid="habit-candidate"/, '缺少稳定锚点');
     assert.match(src, /要我记住这句话吗/, '必须先问，不能悄悄写进记忆');
     assert.match(src, /onDeclineHabit\(habit\.text\)/, '"不用"必须真的写入拒绝列表');
+  });
+
+  // ── D5-B5：主动建议（观察 + 习惯 → 一次可执行的提议） ──
+  console.log('\n[pet] 主动建议');
+
+  const dupFacts = () =>
+    petFacts({
+      bookmarks: [
+        { id: '1', title: 'a', url: 'https://a.com/x' },
+        { id: '2', title: 'a2', url: 'https://a.com/x' },
+        { id: '3', title: 'b', url: 'https://b.com/y' },
+        { id: '4', title: 'b2', url: 'https://b.com/y' },
+      ],
+      folders: [],
+    });
+
+  ok('引用你确认过的习惯，并给出可发送的 prompt', () => {
+    const s = buildSuggestion(dupFacts(), [{ content: '按语言给技术类书签分类' }]);
+    assert.ok(s, '有重复链接就该有建议');
+    assert.match(s!.text, /按你惯用的「按语言给技术类书签分类」/, '文案要引用习惯（这才是"记得你"）');
+    assert.match(s!.prompt, /按语言给技术类书签分类/, 'prompt 也要带上规则，否则 Agent 不知道按什么合');
+    assert.equal(s!.affectsWrites, true, '会改书签就必须让 UI 能提示');
+  });
+
+  ok('没有习惯时给通用文案（不假装知道你习惯什么）', () => {
+    const s = buildSuggestion(dupFacts(), []);
+    assert.ok(s);
+    assert.doesNotMatch(s!.text, /惯用/, '没习惯就别提习惯');
+    assert.match(s!.prompt, /重复链接/);
+  });
+
+  ok('优先级：重复链接 > 单域名聚集 > 空文件夹（一次只给一条）', () => {
+    const all = petFacts({
+      bookmarks: [
+        ...Array.from({ length: 6 }, (_, i) => ({ id: `h${i}`, title: `h${i}`, url: `https://github.com/p${i}` })),
+        { id: 'd1', title: 'd1', url: 'https://dup.com/x' },
+        { id: 'd2', title: 'd2', url: 'https://dup.com/x' },
+        { id: 'd3', title: 'd3', url: 'https://dup.com/y' },
+        { id: 'd4', title: 'd4', url: 'https://dup.com/y' },
+      ],
+      folders: [
+        { id: 'f1', title: 'e1', childCount: 0 },
+        { id: 'f2', title: 'e2', childCount: 0 },
+        { id: 'f3', title: 'e3', childCount: 0 },
+      ],
+    });
+    const s = buildSuggestion(all, []);
+    assert.equal(s?.id, 'suggest-merge-dups', '重复链接优先级最高');
+  });
+
+  ok('只剩"总量大"时不给建议（说了也不知道做什么）', () => {
+    const onlyTotal = petFacts({
+      bookmarks: Array.from({ length: 1600 }, (_, i) => ({ id: String(i), title: `t${i}`, url: `https://site-${i}.com/` })),
+      folders: [],
+    });
+    assert.equal(buildSuggestion(onlyTotal), null);
+  });
+
+  ok('建议 id 稳定（数量变化不该换 id，否则冷却失效）', () => {
+    const a = buildSuggestion(dupFacts());
+    const b = buildSuggestion(dupFacts().concat([{ id: 'x', text: '更多重复', weight: 9 }]));
+    assert.equal(a?.id, 'suggest-merge-dups');
+    assert.equal(b?.id ?? 'suggest-merge-dups', 'suggest-merge-dups');
+  });
+
+  ok('主动建议：点「开始」只是发一句话，绝不自动执行', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
+    assert.match(src, /data-testid="pet-suggestion"/, '缺少稳定锚点');
+    assert.match(src, /onChip\(suggestion\.prompt\)/, '「开始」只能把 prompt 当一句话发给 Agent');
+    assert.doesNotMatch(src, /executeTool\(/, '面板里不许直接调工具——那会绕过确认');
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

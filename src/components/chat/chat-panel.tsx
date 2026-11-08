@@ -38,6 +38,7 @@ import { BrandMark } from '@/components/theme/theme-provider';
 import { PetFace } from '@/components/pet/pet-face';
 import { hasRunningTool, shouldCelebrate, stateFromAgent, type PetState } from '@/lib/pet/state';
 import { flattenForFacts, petFacts } from '@/lib/pet/facts';
+import { buildSuggestion, type Suggestion } from '@/lib/pet/suggest';
 import {
   addDecline,
   alreadyKnown,
@@ -155,11 +156,12 @@ export function ChatPanel({
    * 频率模型（pickChatter：90s 间隔 / 30min 冷却 / 被打断静默）留给后台定时器那一层——
    * 面板里每渲染一次就"说话"的话，克制规则等于没有。
    */
-  const petLine = useMemo(() => {
-    const facts = petFacts(flattenForFacts(roots));
-    const top = facts.sort((a, b) => b.weight - a.weight)[0];
-    return top?.text ?? null;
-  }, [roots]);
+  // 事实只算一次：一句话与建议共用（两处各算一遍会得出不一致的数字）
+  const petFactsList = useMemo(() => petFacts(flattenForFacts(roots)), [roots]);
+  const petLine = useMemo(
+    () => [...petFactsList].sort((a, b) => b.weight - a.weight)[0]?.text ?? null,
+    [petFactsList],
+  );
 
   const selectedFolderId = useBookmarkStore((s) => s.selectedFolderId);
   const config = useConfigStore((s) => s.config);
@@ -217,6 +219,9 @@ export function ChatPanel({
       ) ?? null
     );
   }, [messages, memories, declines]);
+
+  // 主动建议：观察 + 你确认过的习惯 → 一条可执行的提议（不会自动执行）
+  const petSuggestion = useMemo(() => buildSuggestion(petFactsList, memories), [petFactsList, memories]);
 
   const loadMemories = useMemoryStore((s) => s.load);
   const toggleMemory = useMemoryStore((s) => s.toggle);
@@ -899,6 +904,7 @@ export function ChatPanel({
               petState={petState}
               petLine={petLine}
               habit={habitCandidate}
+              suggestion={petSuggestion}
               onAcceptHabit={async (text) => {
                 await addMemoryItem(text, 'habit');
                 await loadMemories();
@@ -1110,6 +1116,7 @@ function EmptyState({
   petState,
   petLine,
   habit,
+  suggestion,
   onAcceptHabit,
   onDeclineHabit,
 }: {
@@ -1124,16 +1131,38 @@ function EmptyState({
   petLine: string | null;
   /** 待确认的习惯候选（一次只问一条） */
   habit: HabitCandidate | null;
+  suggestion: Suggestion | null;
   onAcceptHabit: (text: string) => Promise<void>;
   onDeclineHabit: (text: string) => Promise<void>;
 }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-5 px-5 py-6 text-center">
       <PetFace size={72} state={petState} interactive />
-      {petLine && (
-        <p className="-mt-3 max-w-[248px] text-2xs leading-4 text-muted-foreground/90" data-testid="pet-line">
-          {petLine}
-        </p>
+      {suggestion ? (
+        /*
+         * 主动建议：一句具体可做的事，带「开始」。
+         * 绝不自动执行——点「开始」只是把它当成一句话发给 Agent，
+         * 真正改书签仍然走既有的逐次确认。
+         */
+        <div
+          data-testid="pet-suggestion"
+          className="w-full max-w-[248px] rounded-md border border-border bg-card px-2.5 py-2 text-left"
+        >
+          <p className="text-2xs leading-4 text-muted-foreground">我注意到一件事</p>
+          <p className="mt-1 text-xs leading-5 text-foreground">{suggestion.text}</p>
+          <div className="mt-2 flex items-center gap-1.5">
+            <Button size="sm" variant="secondary" onClick={() => onChip(suggestion.prompt)}>
+              开始
+            </Button>
+            <span className="text-2xs text-muted-foreground">会先征求你确认</span>
+          </div>
+        </div>
+      ) : (
+        petLine && (
+          <p className="-mt-3 max-w-[248px] text-2xs leading-4 text-muted-foreground/90" data-testid="pet-line">
+            {petLine}
+          </p>
+        )
       )}
       {habit && (
         /*

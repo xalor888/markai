@@ -1054,7 +1054,7 @@ function EmptyState({
 }) {
   return (
     <div className="flex h-full flex-col items-center justify-center gap-5 px-5 py-6 text-center">
-      <PetFace size={72} state={petState} />
+      <PetFace size={72} state={petState} interactive />
       <div className="space-y-1">
         <p className="text-sm font-medium text-foreground">我是你的书签管家</p>
         <p className="max-w-[248px] text-xs leading-5 text-muted-foreground">

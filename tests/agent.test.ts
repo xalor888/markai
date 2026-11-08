@@ -16672,6 +16672,39 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.ok(tiltDeg(10) > tiltDeg(5), '位移越大倾斜越大（未到限幅时）');
   });
 
+  // ── D4-B6：拖拽甩抛接上宠物（D4 收口） ──
+  console.log('\n[pet] 拖拽手感');
+
+  ok('只有空态的大宠物可拖拽（头部 26px 的那个不开——太难点中）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
+    assert.match(src, /<PetFace size=\{72\} state=\{petState\} interactive \/>/, '空态大宠物应可拖拽');
+    assert.match(src, /<PetFace size=\{26\} state=\{petState\} \/>/, '头部小宠物不应可拖拽');
+  });
+
+  ok('拖拽物理接在 rAF 里，不是 CSS 过渡（甩抛需要惯性+回弹+回位三段）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/pet/pet-face.tsx'), 'utf8');
+    assert.match(src, /springStep\(d\.sx, 0, dt\)/, '松手后要用弹簧回位');
+    assert.match(src, /bounceOff\(/, '撞边界要回弹');
+    assert.match(src, /tiltDeg\(dx\)/, '拖拽要带倾斜');
+    assert.doesNotMatch(src, /transition.*transform/, '位移不能用 CSS 过渡（那样没有惯性）');
+  });
+
+  ok('reduced-motion：拖拽退化为亮度脉冲（不做位移）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/pet/pet-face.tsx'), 'utf8');
+    assert.match(src, /if \(reducedMotion\) \{/, '按下时要走替代分支');
+    assert.match(src, /filter: 'brightness/, '替代反馈必须是可见的（亮度脉冲）');
+  });
+
+  ok('松手后不许再给速度（上一次 move 的速度就是甩出去的速度）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/pet/pet-face.tsx'), 'utf8');
+    const up = src.slice(src.indexOf('const onUp ='), src.indexOf('const eye ='));
+    assert.doesNotMatch(up, /vel\s*:/, 'onUp 里不该再设置速度（会把最后一段位移乘成 0）');
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

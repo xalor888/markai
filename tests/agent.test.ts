@@ -60,6 +60,7 @@ import {
   queueBlink,
   shapeOf,
 } from '../src/lib/pet/eyes';
+import { breathScale, lookOf, stateFromAgent, type PetState } from '../src/lib/pet/state';
 import { READ_TOOL_NAMES, classifyTool } from '../src/lib/ai/turn-plan';
 import {
   CATALOG_CACHE_VERSION,
@@ -16502,6 +16503,52 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
   ok('未知眼型名回落到 normal（拼错状态名不该让宠物崩溃）', () => {
     assert.deepEqual(shapeOf('nope'), EYE_SHAPES['normal']!.poly);
     assert.deepEqual(shapeOf('happy'), EYE_SHAPES['happy']!.poly);
+  });
+
+  // ── D4-B2：宠物渲染（状态参数 + SVG 守卫） ──
+  console.log('\n[pet] 渲染');
+
+  ok('状态参数：睡着不跟随指针、思考比待机眨眼更勤', () => {
+    const idle = lookOf('idle');
+    const sleeping = lookOf('sleeping');
+    const thinking = lookOf('thinking');
+    assert.equal(sleeping.gazeRange, 0, '睡着时跟随指针会立刻"醒"');
+    assert.ok(sleeping.lidBase < 0.2, '睡着时眼睛接近闭合');
+    assert.ok(thinking.blinkEveryMs < idle.blinkEveryMs, '思考时眨眼更频繁');
+    assert.ok(thinking.breathPeriodMs < idle.breathPeriodMs, '思考时呼吸更快');
+    assert.equal(lookOf('nope' as PetState).eye, 'normal', '未知状态回落 idle');
+  });
+
+  ok('呼吸：正弦周期，端点回到 1，半周期回到另一个端点', () => {
+    const period = 3200;
+    const amp = 0.02;
+    assert.ok(Math.abs(breathScale(0, period, amp) - 1) < 1e-9);
+    assert.ok(Math.abs(breathScale(period / 4, period, amp) - (1 + amp)) < 1e-9);
+    assert.ok(Math.abs(breathScale(period / 2, period, amp) - 1) < 1e-9);
+    assert.ok(Math.abs(breathScale(period * 0.75, period, amp) - (1 - amp)) < 1e-9);
+    assert.equal(breathScale(100, 0, amp), 1, '周期为 0 时不该除零');
+  });
+
+  ok('Agent 状态映射：工具在跑 > 本轮在跑 > 空闲', () => {
+    assert.equal(stateFromAgent(false, false), 'idle');
+    assert.equal(stateFromAgent(true, false), 'thinking');
+    assert.equal(stateFromAgent(true, true), 'working');
+    assert.equal(stateFromAgent(false, true), 'working', '工具在跑就是 working，即使本轮标记已结束');
+  });
+
+  ok('宠物组件：reduced-motion 下不跑 rAF，且不成为读屏噪音', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/pet/pet-face.tsx'), 'utf8');
+    assert.match(src, /prefers-reduced-motion: reduce/);
+    assert.match(src, /if \(reduced\)/, 'reduced-motion 必须提前返回，不进循环');
+    assert.match(src, /aria-hidden="true"/, '宠物是装饰：状态已有文字表达，不该重复给读屏');
+    assert.match(src, /data-testid="pet-face"/, '缺少稳定测试锚点');
+  });
+
+  ok('Agent 空态已换成宠物（不再用静态品牌图标）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
+    assert.match(src, /<PetFace/);
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

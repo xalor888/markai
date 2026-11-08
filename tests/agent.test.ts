@@ -16,7 +16,7 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createBusyGuard, runExclusive } from '../src/lib/chat/busy-guard';
-import { runAgentTurn } from '../src/lib/ai/agent';
+import { runAgentTurn, selectHistory } from '../src/lib/ai/agent';
 import { readUndoPoints } from '../src/lib/undo/recorder';
 import { applyUndo } from '../src/lib/undo/apply';
 import { ChatError } from '../src/lib/ai/client';
@@ -16075,6 +16075,54 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
     const src = readFileSync(resolve(srcDir, 'entrypoints/background.ts'), 'utf8');
     assert.match(src, /appendDraft\(e\.messageId, e\.text, 'reasoning'\)/);
+  });
+
+  // ── D2-B5：历史选择与压缩（三条路径都不许静默） ──
+  console.log('\n[agent] 历史选择与压缩');
+
+  const mkMessages = (n: number, len = 200): ChatMessage[] =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `m${i}`,
+      role: (i % 2 === 0 ? 'user' : 'assistant') as ChatMessage['role'],
+      blocks: [{ kind: 'text' as const, text: 'x'.repeat(len) }],
+      createdAt: i,
+    }));
+
+  ok('预算足够：全部纳入，不产生摘要/截断说明', () => {
+    const kept = selectHistory(mkMessages(20), 100_000, true);
+    assert.equal(kept.length, 20, '预算够就不该丢消息');
+    const joined = kept.map((m) => m.blocks.flatMap((b) => (b.kind === 'text' ? [b.text] : [])).join('')).join('');
+    assert.equal(joined.includes('【早期对话摘要】'), false);
+    assert.equal(joined.includes('没有发送'), false);
+  });
+
+  ok('预算不足 + autoCompress：早期消息变成摘要块（不是静默丢弃）', () => {
+    const kept = selectHistory(mkMessages(60), 300, true);
+    const joined = kept.map((m) => m.blocks.flatMap((b) => (b.kind === 'text' ? [b.text] : [])).join('')).join('');
+    assert.match(joined, /【早期对话摘要】/, '开启压缩时必须留下摘要，否则模型完全不知道前面聊过什么');
+    assert.ok(kept.length < 60, '应该只保留最近的一部分');
+  });
+
+  ok('预算不足 + 未开压缩：插入截断说明（模型要知道有缺失）', () => {
+    const kept = selectHistory(mkMessages(60), 300, false);
+    const joined = kept.map((m) => m.blocks.flatMap((b) => (b.kind === 'text' ? [b.text] : [])).join('')).join('');
+    assert.equal(joined.includes('【早期对话摘要】'), false, '没开压缩就不该编摘要');
+    assert.match(joined, /截断|没有发送|看不到/, '必须告诉模型"更早的内容没进来"，否则它会自信地基于不完整信息行动');
+  });
+
+  ok('历史组装只发 text 块（tool/reasoning 有意丢弃，改它必须先改这条）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'lib/ai/agent.ts'), 'utf8');
+    assert.match(
+      src,
+      /const content = extractText\(m\);/,
+      '历史消息的正文只来自 extractText —— 这是有意为之：历史里的 tool 块没有配对的 tool_call_id，',
+    );
+    assert.match(
+      src,
+      /function extractText\(m: ChatMessage\): string \{\s*return m\.blocks\s*\.filter\(\(b\): b is \{ kind: 'text'; text: string \} => b\.kind === 'text'\)/,
+      'extractText 只读 text 块（reasoning 也不该进历史正文）',
+    );
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

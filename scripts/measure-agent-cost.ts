@@ -12,6 +12,8 @@ import { estimateRequestTokens, estimateTokens } from '../src/lib/ai/agent';
 import { PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT, TOOL_DEFINITIONS } from '../src/lib/ai/prompts';
 import { effectiveContextWindow, getModelContextWindow } from '../src/lib/providers';
 import { TOOL_META } from '../src/lib/ai/tools';
+import { selectHistory } from '../src/lib/ai/agent';
+import type { ChatMessage } from '../src/lib/ai/types';
 import { classifyTool } from '../src/lib/ai/turn-plan';
 import type { ApiMessage } from '../src/lib/ai/client';
 
@@ -99,6 +101,68 @@ const usable = Math.round(window * 0.8) - fixed;
 console.log(
   `  这样的一轮在 128K 预算里装得下约 ${Math.floor(usable / turnTokens)} 轮（含系统提示词与工具定义）`,
 );
+
+console.log('\n【上下文压缩】autoCompress 开/关，在 128K 预算下各能留下什么');
+const mkHistory = (turns: number): ChatMessage[] => {
+  const h: ChatMessage[] = [];
+  for (let i = 0; i < turns; i++) {
+    h.push({ id: `u${i}`, role: 'user', blocks: [{ kind: 'text', text: `第${i}轮：帮我整理一下这批书签，别动工作那个文件夹` }], createdAt: i * 2 });
+    h.push({ id: `a${i}`, role: 'assistant', blocks: [{ kind: 'text', text: `好的，第${i}轮已处理，移动 12 个书签到「稍后读」。` }], createdAt: i * 2 + 1 });
+  }
+  return h;
+};
+const history = mkHistory(400); // 800 条消息，远超 128K 预算
+const rawTokens = history.reduce((acc, m) => acc + estimateTokens(m.blocks.map((b) => ('text' in b ? b.text : '')).join('')), 0);
+const budget = Math.round(window * 0.8);
+
+for (const [label, autoCompress] of [['开启', true], ['关闭（默认）', false]] as const) {
+  const kept = selectHistory(history, budget, autoCompress);
+  const keptTexts = kept.map((m) => m.blocks.map((b) => ('text' in b ? b.text : '')).join(''));
+  const keptTokens = keptTexts.reduce((acc, t) => acc + estimateTokens(t), 0);
+  const hasSummary = keptTexts.some((t) => t.includes('【早期对话摘要】'));
+  const hasTruncNote = keptTexts.some((t) => t.includes('没有发送') || t.includes('截断'));
+  console.log(
+    `  ${label.padEnd(10)} 原 ${history.length} 条（${fmt(rawTokens)} tok）→ 留 ${kept.length} 条（${fmt(keptTokens)} tok）` +
+      ` · 摘要${hasSummary ? '有' : '无'} · 截断说明${hasTruncNote ? '有' : '无'} · 丢弃 ${history.length - kept.length} 条`,
+  );
+}
+console.log('  压缩是**本地摘要**（早期消息每条截 200 字符），不额外调用模型 —— 不花往返');
+
+// 历史里的工具结果：UI 看得见，模型看不见
+console.log('\n【历史工具结果对模型不可见】历史组装只取 text 块（tool/reasoning 都丢掉）');
+const toolHeavy: ChatMessage[] = mkHistory(200).map((m, idx) =>
+  idx % 4 === 2
+    ? {
+        ...m,
+        blocks: [
+          ...m.blocks,
+          {
+            kind: 'tool' as const,
+            record: {
+              id: `t${idx}`,
+              name: 'search_bookmarks',
+              args: '{"query":"Rust"}',
+              status: 'done' as const,
+              result: JSON.stringify(Array.from({ length: 12 }, (_, i) => ({ title: `Rust 异步 ${i}`, url: `https://x/${i}` }))),
+            },
+          },
+        ],
+      }
+    : m,
+);
+const textTokens2 = toolHeavy.reduce(
+  (acc, m) => acc + estimateTokens(m.blocks.flatMap((b) => (b.kind === 'text' ? [b.text] : [])).join('')),
+  0,
+);
+const toolTokens2 = toolHeavy.reduce(
+  (acc, m) => acc + estimateTokens(m.blocks.flatMap((b) => (b.kind === 'tool' ? [b.record.result ?? ''] : [])).join('')),
+  0,
+);
+console.log(
+  `  200 轮里：正文 ${fmt(textTokens2)} tok · 工具结果 ${fmt(toolTokens2)} tok（全部没有进请求，` +
+    `占历史可发送内容的 ${pct(toolTokens2, textTokens2 + toolTokens2)}）`,
+);
+console.log('  → 模型"记不住"刚才查到的数据，用户问「那些重复的」它只能重查一遍（多一次往返）');
 
 console.log('\n【结论】');
 const toolShare = (toolTokens / (toolTokens + systemTokens)) * 100;

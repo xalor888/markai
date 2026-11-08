@@ -153,7 +153,7 @@ export function estimateRequestTokens(apiMessages: ApiMessage[]): number {
  * - 预算用尽后停止；至少保留最近 1 条
  * - autoCompress 开启时，超预算的早期消息合并为摘要（占用固定小预算）
  */
-function selectHistory(
+export function selectHistory(
   history: ChatMessage[],
   budget: number,
   autoCompress: boolean,

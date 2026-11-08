@@ -16337,6 +16337,55 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.doesNotMatch(uiSrc('components/command/command-palette.tsx'), /bg-card shadow-xl/, '命令面板还是实心底');
   });
 
+  // ── D3-B4：图标尺寸与动效降级 ──
+  console.log('\n[ui] 图标标尺与动效');
+
+  ok('不许出现 10px 图标（11px 以下一律不用，这是既有规矩）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const files = readdirSync(resolve(srcDir, 'components'), { recursive: true, encoding: 'utf8' })
+      .filter((f) => String(f).endsWith('.tsx'));
+    const offenders: string[] = [];
+    for (const f of files) {
+      const txt = readFileSync(resolve(srcDir, 'components', String(f)), 'utf8');
+      if (/\bh-2\.5\b/.test(txt)) offenders.push(String(f));
+    }
+    assert.deepEqual(offenders, [], `这些组件还在用 10px 图标：${offenders.join(', ')}`);
+  });
+
+  ok('图标尺寸集中在 12px / 14px 两档（离散值不该占多数）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const files = readdirSync(resolve(srcDir, 'components'), { recursive: true, encoding: 'utf8' })
+      .filter((f) => String(f).endsWith('.tsx'));
+    let small = 0;
+    let all = 0;
+    for (const f of files) {
+      const txt = readFileSync(resolve(srcDir, 'components', String(f)), 'utf8');
+      for (const m of txt.matchAll(/\bh-([0-9][0-9.]*)\b/g)) {
+        const v = Number(m[1]);
+        // 只统计"图标量级"区间 2–4.5rem×4 = 8–18px：
+        // h-0/h-0.5/h-1.5 是分隔线与动画占位，h-5 以上是大图标/布局，都不属于"图标主力"
+        if (!Number.isFinite(v) || v < 2 || v > 4.5) continue;
+        all++;
+        if (v === 3 || v === 3.5) small++;
+      }
+    }
+    assert.ok(all > 50, `统计样本异常（${all}）`);
+    const share = small / all;
+    console.log(`   [DBG] 12/14px 占图标量级尺寸的 ${(share * 100).toFixed(1)}%（${small}/${all}）`);
+    assert.ok(share >= 0.6, `主力尺寸占比只有 ${(share * 100).toFixed(1)}%，图标标尺已经散掉了`);
+  });
+
+  ok('prefers-reduced-motion 必须有通配兜底（未来新动画自动覆盖）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const css = readFileSync(resolve(srcDir, 'assets/main.css'), 'utf8');
+    const block = css.slice(css.indexOf('@media (prefers-reduced-motion: reduce)'));
+    assert.ok(block.length > 0, '缺少 reduced-motion 块');
+    assert.match(block, /animation-duration:\s*0\.01ms/, '缺少动画时长兜底');
+    assert.match(block, /transition-duration:\s*0\.01ms/, '缺少过渡时长兜底');
+    // 用 0.01ms 而不是 0：设成 0 会让依赖 transitionend/animationend 的收尾代码永远等不到回调
+    assert.doesNotMatch(block, /\b0ms\b !important/, '不要写成 0ms（事件不会触发）');
+  });
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

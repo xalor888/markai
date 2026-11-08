@@ -312,6 +312,19 @@
   .stream-cursor {
     animation: none;
   }
+  /*
+   * 通配兜底：未来新加的动画/过渡不必再逐个登记。
+   * 用 0.01ms 而不是 0 是为了让 transitionend/animationend 仍然触发——
+   * 设成 0 会让依赖事件收尾的代码（例如等待过渡结束再卸载浮层）永远等不到回调。
+   */
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* ── AI 回复 Markdown 渲染（react-markdown + remark-gfm）──

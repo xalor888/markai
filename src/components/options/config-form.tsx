@@ -1156,17 +1156,17 @@ export function ConfigForm() {
         </h2>
         <ul className="mt-2 space-y-1.5 text-2xs leading-4 text-muted-foreground">
           <li className="flex gap-2">
-            <ChevronRight className="mt-1 h-2.5 w-2.5 shrink-0" />
+            <ChevronRight className="mt-1 h-3 w-3 shrink-0" />
             API Key 仅存于浏览器本地，不同步到云端；请求由后台直接发向你填的 Base URL。
           </li>
           <li className="flex gap-2">
-            <ChevronRight className="mt-1 h-2.5 w-2.5 shrink-0" />
+            <ChevronRight className="mt-1 h-3 w-3 shrink-0" />
             内置预设（OpenAI / DeepSeek / Moonshot / 智谱 / Ollama / OpenCode）都是服务商官方地址。
             若你选了「自定义」并填了自己的 Base URL，请求就会经过**那个**地址——
             它是不是中转、由谁运营，只有你自己知道，请只填你信任的端点。
           </li>
           <li className="flex gap-2">
-            <ChevronRight className="mt-1 h-2.5 w-2.5 shrink-0" />
+            <ChevronRight className="mt-1 h-3 w-3 shrink-0" />
             删除默认需你确认；浏览器根文件夹（书签栏等）永远不可删除。
           </li>
         </ul>

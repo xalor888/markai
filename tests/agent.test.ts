@@ -72,6 +72,7 @@ import {
   type ChatterState,
 } from '../src/lib/pet/chatter';
 import { FACT_THRESHOLDS, flattenForFacts, petFacts } from '../src/lib/pet/facts';
+import { alreadyKnown, dedupeHabits, extractHabits, habitFromSentence, normalizeHabit } from '../src/lib/pet/habits';
 import { READ_TOOL_NAMES, classifyTool } from '../src/lib/ai/turn-plan';
 import {
   CATALOG_CACHE_VERSION,
@@ -16835,6 +16836,61 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.match(src, /petFacts\(flattenForFacts\(roots\)\)/, '文案必须来自事实源，不许写死');
     assert.match(src, /data-testid="pet-line"/, '缺少稳定锚点');
     assert.match(src, /\{petLine && \(/, '没有可说的就不显示——绝不为了"活跃"编一句');
+  });
+
+  // ── D5-B3：习惯提取（候选而非生效） ──
+  console.log('\n[pet] 习惯提取');
+
+  ok('强指令 → rule（0.8）；偏好 → preference（0.6）；条件 → 0.5', () => {
+    const strong = habitFromSentence('工作那个文件夹永远别动');
+    assert.ok(strong, '明确边界最值得记住');
+    assert.equal(strong!.category, 'rule');
+    assert.equal(strong!.confidence, 0.8);
+
+    const pref = habitFromSentence('我习惯按语言给技术类书签分类');
+    assert.equal(pref?.category, 'preference');
+    assert.equal(pref?.confidence, 0.6);
+
+    const cond = habitFromSentence('除非我明确说了，否则别删任何书签');
+    assert.ok(cond, '带前提的约束也要抓住');
+    assert.equal(cond!.confidence, 0.5);
+  });
+
+  ok('一次任务指令不该变成长期习惯', () => {
+    assert.equal(habitFromSentence('帮我整理一下这个文件夹'), null, '这是任务，不是偏好');
+    assert.equal(habitFromSentence('把这些书签都放到稍后读'), null);
+  });
+
+  ok('闲聊不提取（宁可漏，也不要编）', () => {
+    assert.equal(habitFromSentence('你好，今天怎么样'), null);
+    assert.equal(habitFromSentence('这个链接打不开'), null);
+    assert.equal(habitFromSentence(''), null);
+  });
+
+  ok('归一化：去前缀词与句末标点，保留原意', () => {
+    assert.equal(normalizeHabit('请帮我  别动那个文件夹。'), '别动那个文件夹');
+    assert.equal(normalizeHabit('麻烦你按语言分类！'), '按语言分类');
+    assert.equal(normalizeHabit('  别动  '), '别动');
+  });
+
+  ok('去重：同一件事说两次只留一条，置信度略升（重复是证据不是新条目）', () => {
+    const a = habitFromSentence('别动工作那个文件夹');
+    const b = habitFromSentence('别动 工作那个文件夹。');
+    assert.ok(a && b);
+    const merged = dedupeHabits([a!, b!]);
+    assert.equal(merged.length, 1, '两条相似候选必须合并');
+    assert.ok(merged[0]!.confidence > 0.8, '重复出现应该略微抬高置信度');
+  });
+
+  ok('extractHabits 只从用户原话里挑出表达偏好的那半句', () => {
+    const got = extractHabits(['我把链接发你看下。别动工作那个文件夹。']);
+    assert.equal(got.length, 1, '一句闲聊 + 一句偏好，只该提后者');
+    assert.match(got[0]!.text, /别动/);
+  });
+
+  ok('alreadyKnown：已有记忆不再重复建议', () => {
+    assert.equal(alreadyKnown('别动工作那个文件夹', [{ text: '别动工作那个文件夹。' }]), true);
+    assert.equal(alreadyKnown('别动工作那个文件夹', [{ text: '按语言分类' }]), false);
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

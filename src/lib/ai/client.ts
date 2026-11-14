@@ -2,6 +2,7 @@
 
 import { normalizeBaseUrl } from '../providers';
 import { createSseAccumulator, finalizeToolCalls, type StreamToolCall } from './stream';
+import { lookupActiveModel } from '@/lib/models/runtime';
 import { buildRequestHeaders, getStableSessionId } from './request-headers';
 import type { AIConfig } from './types';
 import { reasoningPayload } from '@/lib/models/request';
@@ -9,11 +10,14 @@ import { reasoningPayload } from '@/lib/models/request';
 /** AI 请求错误（携带用户可读的中文信息） */
 export class ChatError extends Error {
   status?: number;
+  /** 显式不可重试：例如推理模型正在思考、只是还没吐字，重发只会把思考从头再来一遍 */
+  retriable?: boolean;
 
-  constructor(message: string, status?: number) {
+  constructor(message: string, status?: number, opts?: { retriable?: boolean }) {
     super(message);
     this.name = 'ChatError';
     this.status = status;
+    this.retriable = opts?.retriable;
   }
 }
 
@@ -76,8 +80,24 @@ export interface StreamHandlers {
 
 /** 首字节超时：从发出请求到收到**第一个字节**（含推理模型的长思考） */
 const FIRST_CHUNK_TIMEOUT = 120_000;
+/**
+ * 推理模型的首字节窗口：思考本身也是工作，不能因为"没吐字"就 2 分钟掐掉重来。
+ * 普通模型 120s 没响应大概率是网关挂了；推理模型可能真的在想 5 分钟。
+ */
+const REASONING_FIRST_TIMEOUT = 480_000;
 /** 空闲超时：两次数据之间的最大间隔（网关挂起、连接被掐断都落在这里） */
 const IDLE_TIMEOUT = 60_000;
+
+/**
+ * 这个请求是不是推理模型。
+ * 目录可用时以能力为准；目录没预热时用显式档位 / 常见模型名兜底。
+ */
+export function isReasoningRequest(config: AIConfig): boolean {
+  const model = lookupActiveModel(config.model);
+  if (model) return model.reasoning.supported;
+  if (config.reasoningEffort && config.reasoningEffort !== 'auto') return true;
+  return /(?:^|[-_/])(o1|o3|o4|r1|reasoner|thinking|qwq|k2)(?:$|[-_/])/i.test(config.model);
+}
 /** 失败自动重试次数（不含首次请求） */
 const MAX_RETRIES = 5;
 /** 指数退避基数：1s → 2s → 4s → 8s → 16s */
@@ -86,6 +106,7 @@ const RETRY_BASE_MS = 1000;
 /** 可重试的错误：网络层（无 status）、限流 429、服务端 5xx。认证/参数/取消类不重试 */
 export function isRetriableError(e: unknown): boolean {
   if (!(e instanceof ChatError)) return false;
+  if (e.retriable === false) return false;
   const status = e.status;
   if (status === undefined) return true; // 网络层错误 / 超时 / 传输中断
   if (status === 429) return true; // 限流：退避后重试
@@ -156,11 +177,18 @@ class ActivityWatchdog {
     this.timer = null;
   }
 
+  /** 这一轮超时是不是「一个字节都没收到」 */
+  firstChunkTimeout(): boolean {
+    return !this.received;
+  }
+
   /** 超时文案：区分"一直没响应"与"回复中途断了" */
   timeoutMessage(): string {
     return this.received
       ? `AI 回复在传输过程中中断（超过 ${Math.round(this.idleMs / 1000)} 秒没有新数据）。`
-      : `AI 服务在 ${Math.round(this.firstMs / 1000)} 秒内没有任何响应，请稍后重试。`;
+      : this.firstMs >= 240_000
+        ? `模型已经思考了 ${Math.round(this.firstMs / 60)} 分钟，仍然没有输出。可以继续等待，或停止后重试。`
+        : `AI 服务在 ${Math.round(this.firstMs / 1000)} 秒内没有任何响应。可能是模型仍在思考，也可能是连接挂了；请手动重试。`;
   }
 }
 
@@ -223,11 +251,27 @@ export async function chatCompletion(
     },
   };
 
+  const reasoning = isReasoningRequest(config);
   let retried = 0;
   for (;;) {
-    handlers.onStatus?.({ phase: 'connecting', attempt: retried + 1, startedAt: Date.now() });
+    // 推理模型从请求发出那一刻就在思考，不该先显示「连接模型」让人以为还没开始
+    handlers.onStatus?.({
+      phase: reasoning ? 'thinking' : 'connecting',
+      attempt: retried + 1,
+      startedAt: Date.now(),
+    });
     try {
-      return await requestStream(url, headers, config, messages, tools, signal, wrappedHandlers);
+      return await requestStream(
+        url,
+        headers,
+        config,
+        messages,
+        tools,
+        signal,
+        wrappedHandlers,
+        reasoning ? REASONING_FIRST_TIMEOUT : FIRST_CHUNK_TIMEOUT,
+        reasoning,
+      );
     } catch (e) {
       // 流式被拒绝（部分代理/旧端点不支持 stream:true）时，仅在尚无任何输出时降级为非流式重试一次；
       // 仅对「端点类」状态码降级（400/404/405），内容性错误（422+）重试只会浪费一次请求
@@ -277,6 +321,8 @@ async function requestStream(
   tools: unknown[],
   signal: AbortSignal,
   handlers: StreamHandlers,
+  firstMs: number = FIRST_CHUNK_TIMEOUT,
+  reasoning = false,
 ): Promise<AssistantTurn> {
   // 已中止的 signal 不会触发 addEventListener 回调，必须显式检查
   if (signal.aborted) throw new ChatError('请求已取消', 499);
@@ -284,8 +330,17 @@ async function requestStream(
   const ctrl = new AbortController();
   const onAbort = () => ctrl.abort();
   signal.addEventListener('abort', onAbort);
-  const watchdog = new ActivityWatchdog(ctrl, FIRST_CHUNK_TIMEOUT, IDLE_TIMEOUT);
+  const watchdog = new ActivityWatchdog(ctrl, firstMs, IDLE_TIMEOUT);
   watchdog.arm();
+  /*
+   * 推理模型「一直没吐字」不等于挂起：它可能正在思考。
+   * 这种情况不能自动重试——重试会让整段思考从头再来，用户看到的是永远等不到结果。
+   * 只有真正的中途空闲超时才允许重连。
+   */
+  const timeoutError = () =>
+    new ChatError(watchdog.timeoutMessage(), undefined, {
+      retriable: !watchdog.firstChunkTimeout(),
+    });
 
   let accumulator: ReturnType<typeof createSseAccumulator> | null = null;
 
@@ -307,10 +362,10 @@ async function requestStream(
         signal: ctrl.signal,
       });
     } catch (e) {
-      if (watchdog.timedOut) throw new ChatError(watchdog.timeoutMessage());
+      if (watchdog.timedOut) throw timeoutError();
       throw toNetworkError(e);
     }
-    if (watchdog.timedOut) throw new ChatError(watchdog.timeoutMessage());
+    if (watchdog.timedOut) throw timeoutError();
     if (!response.ok) throw await toHttpError(response);
     handlers.onStatus?.({ phase: 'thinking', startedAt: Date.now() });
 
@@ -340,7 +395,7 @@ async function requestStream(
       try {
         ({ done, value } = await reader.read());
       } catch (e) {
-        if (watchdog.timedOut) throw new ChatError(watchdog.timeoutMessage());
+        if (watchdog.timedOut) throw timeoutError();
         throw e;
       }
       if (done) break;
@@ -350,7 +405,7 @@ async function requestStream(
   } catch (e) {
     if (signal.aborted) throw new ChatError('请求已取消', 499);
     if (e instanceof ChatError) throw e;
-    if (watchdog.timedOut) throw new ChatError(watchdog.timeoutMessage());
+    if (watchdog.timedOut) throw timeoutError();
     throw toNetworkError(e);
   } finally {
     watchdog.stop();

@@ -16541,6 +16541,17 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.match(src, /phase: 'streaming'/, '首字/首思考到达时必须发出 streaming 状态');
   });
 
+  ok('推理模型思考期间不能自动重试（重试会把思考从头再来）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'lib/ai/client.ts'), 'utf8');
+    assert.match(src, /REASONING_FIRST_TIMEOUT\s*=\s*480_000/, '推理模型首字节窗口必须显著放宽');
+    assert.match(src, /retriable:\s*!watchdog\.firstChunkTimeout\(\)/, '首字节超时（可能是长思考）不能被自动重试');
+    assert.match(src, /phase: reasoning \? 'thinking' : 'connecting'/, '推理请求一开始就应显示「模型思考中」');
+    const ui = readFileSync(resolve(srcDir, 'components/chat/activity-status.tsx'), 'utf8');
+    assert.match(ui, /模型思考中/, '状态文案不能说「等待模型」');
+    assert.match(ui, /不会自动重试/, '长时间思考的提示必须说明不会自动重试');
+  });
+
   ok('阶段状态必须投递并在 UI 里可观测（连接 / 等首字节 / 工具 / 重试）', () => {
     const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
     const agent = readFileSync(resolve(srcDir, 'lib/ai/agent.ts'), 'utf8');
@@ -17485,6 +17496,42 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     for (const key of ['Agent 面板重做', '思考强度可调', '模型目录自动匹配', '管家感', '设置页重做']) {
       assert.ok(src.includes(key), `README 缺少「${key}」的说明`);
     }
+  });
+
+  // ── T28: 布局不变量（列宽必须挂在真实盒子上） ──
+  console.log('\n[layout] 三栏列宽与超长标题');
+
+  ok('书签树列宽挂在真实 wrapper 上，而不是 ErrorBoundary（否则会被静默丢弃）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const ws = readFileSync(resolve(srcDir, 'components/workspace/workspace.tsx'), 'utf8');
+    // 反例：`<ErrorBoundary area="书签树" className="w-56 shrink-0">` —— 正常态是 display:contents，
+    // className 不生效，树退回"按内容撑宽"，库里一条超长标题就能把中栏挤成 0。
+    assert.doesNotMatch(
+      ws,
+      /<ErrorBoundary[^>]*className={?["'][^"']*\bw-(?:52|56)\b/,
+      '书签树的宽度类名不能写在 ErrorBoundary 上（正常态不生成盒子）',
+    );
+    assert.match(
+      ws,
+      /<div className="flex w-56 min-w-0 shrink-0 flex-col overflow-hidden">/,
+      '完整页的树列必须有真实盒子承载 w-56 并允许收缩（min-w-0）',
+    );
+    assert.match(
+      ws,
+      /<div className="absolute inset-y-0 left-0 z-30 w-52 min-w-0">/,
+      '侧边栏抽屉必须有真实盒子承载 absolute 与 w-52（否则浮层会退化成文档流里的宽块）',
+    );
+  });
+
+  ok('书签树自己绝不能被内容撑宽（超长标题必须省略号收口）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const tree = readFileSync(resolve(srcDir, 'components/sidebar/bookmark-tree.tsx'), 'utf8');
+    assert.match(
+      tree,
+      /flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden/,
+      '树根必须 w-full + min-w-0 + overflow-hidden：列宽由外层给定，内容不得反向撑开',
+    );
+    assert.match(tree, /className="truncate"/, '标题必须 truncate，否则长标题会把行撑成横向长条');
   });
 
   console.log(`\n全部通过：${passed} 项 ✔`);

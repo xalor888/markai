@@ -493,9 +493,21 @@ export function Workspace({
       */}
       <div className="relative flex min-h-0 flex-1 overflow-hidden">
         {mode === 'full' ? (
-          <ErrorBoundary area="书签树" className="w-56 shrink-0">
-            <BookmarkTree className="h-full border-r border-border" />
-          </ErrorBoundary>
+          /*
+           * 宽度必须挂在**真实的盒子**上，不能挂在 ErrorBoundary 上。
+           *
+           * ErrorBoundary 正常渲染时是 `display: contents`（为了错误态之外零布局影响），
+           * 这层盒子根本不存在——写在它身上的 `w-56 shrink-0` 会被整条丢弃。
+           * 树于是退回「按内容撑宽」：书签库里有哪怕一条超长标题，
+           * 树的 max-content 就会顶到视口宽度，把中栏挤成 0、把 Agent 面板顶出
+           * `overflow-hidden` 的可视区——整页看起来就是「只剩一棵撑满全屏的树」，
+           * 而且没有任何东西能把它缩回去（实测 5128px 树 / 0px 列表）。
+           */
+          <div className="flex w-56 min-w-0 shrink-0 flex-col overflow-hidden">
+            <ErrorBoundary area="书签树">
+              <BookmarkTree className="h-full min-w-0 border-r border-border" />
+            </ErrorBoundary>
+          </div>
         ) : treeCollapsed ? (
           /* 收起态：只留一条 36px 的操作条，中栏拿回宽度 */
           <div className="animate-fade-in flex w-9 shrink-0 flex-col items-center border-r border-border bg-card pt-2">
@@ -529,12 +541,14 @@ export function Workspace({
              * 而它没有被边界包住时，抛错的后果是**整个工作区被卸载**（白屏），
              * 连带列表和 Agent 面板一起消失。现在最坏情况只是"树这块坏了，其余照常"。
              */}
-            <ErrorBoundary area="书签树" className="absolute inset-y-0 left-0 z-30 w-52">
-              <BookmarkTree
-                collapsible
-                className="animate-fade-in h-full border-r border-border bg-card shadow-lg"
-              />
-            </ErrorBoundary>
+            <div className="absolute inset-y-0 left-0 z-30 w-52 min-w-0">
+              <ErrorBoundary area="书签树">
+                <BookmarkTree
+                  collapsible
+                  className="animate-fade-in h-full border-r border-border bg-card shadow-lg"
+                />
+              </ErrorBoundary>
+            </div>
           </>
         )}
         {/* 一个面板渲染出错不该让整个工作区白屏：中栏与 Agent 面板各包一层边界 */}

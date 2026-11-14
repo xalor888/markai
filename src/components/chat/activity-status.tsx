@@ -23,7 +23,7 @@ export function useElapsedSeconds(startedAt?: number): number {
 
 const PHASE_LABEL: Record<Activity['phase'], string> = {
   connecting: '连接模型',
-  thinking: '等待模型',
+  thinking: '模型思考中',
   streaming: '生成中',
   tool: '调用工具',
   retrying: '重试中',
@@ -70,7 +70,7 @@ export function ActivityStatus({ activity, streaming }: { activity: Activity | n
       <span className="truncate">
         {labelOf(activity)}
         {seconds > 0 ? ` · ${seconds}s` : ''}
-        {stalled ? ' · 仍在等待' : ''}
+        {stalled ? (activity.phase === 'thinking' ? ' · 推理中' : ' · 仍在连接') : ''}
       </span>
     </span>
   );
@@ -81,14 +81,18 @@ export function StallBanner({ activity, onCancel }: { activity: Activity | null;
   const seconds = useElapsedSeconds(activity?.startedAt);
   if (!activity) return null;
   const waiting = activity.phase === 'connecting' || activity.phase === 'thinking';
-  if (!waiting || seconds < 30) return null;
+  // 思考中的模型本来就可能长时间不吐字，给它更长的宽限；连接阶段 30s 足够说明问题
+  const threshold = activity.phase === 'thinking' ? 60 : 30;
+  if (!waiting || seconds < threshold) return null;
   return (
     <div
       className="mb-1 flex items-center gap-2 rounded-md border border-accent/30 bg-accent-muted px-2.5 py-1.5 text-2xs text-foreground"
       data-testid="agent-stall"
     >
       <span className="min-w-0 flex-1">
-        模型已经 {seconds} 秒没有新输出，仍在等待响应（超时会自动重试）。
+        {activity.phase === 'thinking'
+          ? `模型已经思考了 ${seconds} 秒，还没有输出。有些推理模型不会流式吐思考过程；这里会继续等，不会自动重试。`
+          : `连接模型已经 ${seconds} 秒还没建立响应，可能是网络或网关问题。`}
       </span>
       <button
         type="button"

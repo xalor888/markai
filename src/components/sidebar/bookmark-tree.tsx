@@ -280,7 +280,13 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
   };
 
   return (
-    <div className={cn('flex h-full min-h-0 flex-col bg-card', className)}>
+    /*
+     * `w-full min-w-0 overflow-hidden` 是**列宽的护栏**，不是装饰：
+     * 树的宽度由外层（完整页 w-56 / 侧边栏抽屉 w-52）给定，自己绝不能再被内容撑开。
+     * 反例（0.2.168 之前）：外层宽度写在 ErrorBoundary 上被丢弃 → 宽度退回 max-content，
+     * 库里一条超长标题就能把树撑到 5000px+，中栏被挤成 0、Agent 面板被顶出可视区。
+     */
+    <div className={cn('flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-card', className)}>
       <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3">
         <BookMarked className="h-3.5 w-3.5 text-accent" />
         <span className="text-2xs font-semibold tracking-wider text-muted-foreground uppercase">书签</span>

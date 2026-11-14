@@ -41,6 +41,20 @@ export interface AssistantTurn {
 }
 
 /** 流式回调（由 Agent 循环转发给 UI） */
+export type StreamPhase = 'connecting' | 'thinking' | 'streaming' | 'retrying';
+
+export interface StreamStatus {
+  phase: StreamPhase;
+  /** 第几次尝试（从 1 开始） */
+  attempt?: number;
+  /** 给用户看的一句话（工具名、错误摘要） */
+  detail?: string;
+  /** 重试前的等待时间 */
+  waitMs?: number;
+  /** 这个阶段开始的时间（工具心跳沿用第一次的开始时间） */
+  startedAt?: number;
+}
+
 export interface StreamHandlers {
   onText: (text: string) => void;
   /**
@@ -51,6 +65,8 @@ export interface StreamHandlers {
   onToolCall: (toolCall: ApiToolCall) => void;
   /** 请求失败自动重试提示（attempt 从 1 开始） */
   onRetry?: (attempt: number) => void;
+  /** 阶段变化：连接 / 等待首字节 / 开始出字 / 重试中。UI 用它显示"到底在干什么" */
+  onStatus?: (status: StreamStatus) => void;
   /**
    * 重试会重发整轮、且上一轮已经吐出过内容时调用：
    * UI 必须把那段半截文本作废，否则两段回复会首尾相接（重复/看不懂的拼接）。
@@ -190,6 +206,17 @@ export async function chatCompletion(
       hasOutput = true;
       handlers.onText(t);
     },
+    /*
+     * 思考增量必须在这里转发。
+     *
+     * 之前 wrappedHandlers 只包了 onText / onToolCall，requestStream 拿到的
+     * handlers.onReasoning 是 undefined —— 模型明明流了 reasoning_content，
+     * UI 却一个思考块都收不到。这就是"还是没有展示思考过程"的根因。
+     */
+    onReasoning: (t) => {
+      hasOutput = true;
+      handlers.onReasoning?.(t);
+    },
     onToolCall: (tc) => {
       hasOutput = true;
       handlers.onToolCall(tc);
@@ -198,6 +225,7 @@ export async function chatCompletion(
 
   let retried = 0;
   for (;;) {
+    handlers.onStatus?.({ phase: 'connecting', attempt: retried + 1, startedAt: Date.now() });
     try {
       return await requestStream(url, headers, config, messages, tools, signal, wrappedHandlers);
     } catch (e) {
@@ -226,8 +254,16 @@ export async function chatCompletion(
         handlers.onRestart?.();
         hasOutput = false; // UI 已清空，后续可重新投递
       }
+      const waitMs = Math.min(RETRY_BASE_MS * 2 ** (retried - 1), 8_000);
       handlers.onRetry?.(retried);
-      await sleep(Math.min(RETRY_BASE_MS * 2 ** (retried - 1), 16_000), signal);
+      handlers.onStatus?.({
+        phase: 'retrying',
+        attempt: retried + 1,
+        detail: e instanceof ChatError ? e.message : String(e),
+        waitMs,
+        startedAt: Date.now(),
+      });
+      await sleep(waitMs, signal);
     }
   }
 }
@@ -276,11 +312,27 @@ async function requestStream(
     }
     if (watchdog.timedOut) throw new ChatError(watchdog.timeoutMessage());
     if (!response.ok) throw await toHttpError(response);
+    handlers.onStatus?.({ phase: 'thinking', startedAt: Date.now() });
 
     const reader = response.body?.getReader();
     if (!reader) throw new ChatError('AI 服务返回了空响应。');
 
-    accumulator = createSseAccumulator({ onText: handlers.onText, onReasoning: handlers.onReasoning });
+    let announcedStreaming = false;
+    const announceStreaming = () => {
+      if (announcedStreaming) return;
+      announcedStreaming = true;
+      handlers.onStatus?.({ phase: 'streaming', startedAt: Date.now() });
+    };
+    accumulator = createSseAccumulator({
+      onText: (t) => {
+        announceStreaming();
+        handlers.onText(t);
+      },
+      onReasoning: (t) => {
+        announceStreaming();
+        handlers.onReasoning?.(t);
+      },
+    });
 
     for (;;) {
       let done: boolean;

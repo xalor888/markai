@@ -56,6 +56,7 @@ import { addMemoryItem } from '@/lib/ai/memory';
 import { readOrganizeLog } from '@/lib/ai/organize-log';
 import { Switch } from '@/components/ui/switch';
 import { filterSlashCommands } from '@/lib/chat/slash';
+import { ActivityStatus, StallBanner } from './activity-status';
 import { MessageView } from './message-view';
 
 /** 快捷指令 chip */
@@ -94,6 +95,7 @@ export function ChatPanel({
 }) {
   const messages = useAIStore((s) => s.messages);
   const streaming = useAIStore((s) => s.streaming);
+  const activity = useAIStore((s) => s.activity);
 
   const send = useAIStore((s) => s.send);
   const cancel = useAIStore((s) => s.cancel);
@@ -440,13 +442,13 @@ export function ChatPanel({
           <BookMarked className="h-3.5 w-3.5" strokeWidth={2.2} />
         </span>
         <span className="shrink-0 text-xs font-semibold text-foreground">Agent</span>
-        <span className="flex shrink-0 items-center gap-1 text-2xs text-muted-foreground">
-          <span
-            className={cn('h-1.5 w-1.5 rounded-full', streaming ? 'animate-pulse bg-accent' : 'bg-success')}
-            title={streaming ? '正在生成回复…' : '就绪'}
-          />
-          <span className="hidden sm:inline">{streaming ? '正在回复' : '就绪'}</span>
-        </span>
+        <span
+          className={cn(
+            'h-1.5 w-1.5 shrink-0 rounded-full',
+            streaming || activity ? 'animate-pulse bg-accent' : 'bg-success',
+          )}
+          title={activity ? '正在处理' : streaming ? '正在生成回复…' : '就绪'}
+        />
         {/* 操作区：设置入口不在这里重复（工作区顶栏已有），只留本面板自己的动作 */}
         <div className="ml-auto flex shrink-0 items-center gap-0.5">
           <Button
@@ -526,6 +528,26 @@ export function ChatPanel({
           </Button>
         </div>
       </div>
+
+      {/*
+       * 阶段条：头部那点宽度放不下「连接模型 · 31s · 仍在等待」，
+       * 一截就只剩「连接模型…」，等于没说。这里单独占一行，宽度够、而且一直可见。
+       */}
+      {(activity || streaming) && (
+        <div
+          className="flex h-7 shrink-0 items-center gap-2 border-b border-border bg-accent-muted/50 px-3 text-2xs text-muted-foreground"
+          data-testid="agent-activity-strip"
+        >
+          <ActivityStatus activity={activity} streaming={streaming} />
+          <button
+            type="button"
+            onClick={cancel}
+            className="ml-auto shrink-0 rounded border border-border bg-background/60 px-1.5 py-0.5 font-medium text-foreground hover:bg-muted"
+          >
+            停止
+          </button>
+        </div>
+      )}
 
       {/* 消息区 */}
       <div className="relative min-h-0 flex-1">
@@ -734,6 +756,7 @@ export function ChatPanel({
             ))}
           </div>
         )}
+        <StallBanner activity={activity} onCancel={cancel} />
         <div className="rounded-xl border border-border bg-background p-1.5 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/15">
           <Textarea
             data-testid="chat-input"
@@ -742,7 +765,7 @@ export function ChatPanel({
             onChange={(e) => setInput(e.target.value)}
             onInput={(e) => autoGrow(e.currentTarget)}
             onKeyDown={onKeyDown}
-            placeholder={streaming ? 'Agent 正在回复…' : '问点什么，或让我整理书签…'}
+            placeholder={streaming ? 'Agent 正在处理，可点右侧停止…' : '问点什么，或让我整理书签…'}
             rows={1}
             className="max-h-24 min-h-9 w-full resize-none border-0 bg-transparent px-2 py-1.5 text-md focus-visible:border-0 focus-visible:ring-0"
           />

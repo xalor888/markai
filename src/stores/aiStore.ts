@@ -101,6 +101,16 @@ interface AIState {
   undoNoticeAt: number | null;
   streaming: boolean;
   streamingMessageId: string | null;
+  /**
+   * 当前阶段（连接 / 等首字节 / 出字 / 跑工具 / 重试）。
+   * UI 用它显示「正在干什么 + 已经多久」，而不是一个转圈图标让人猜。
+   */
+  activity: {
+    phase: 'connecting' | 'thinking' | 'streaming' | 'tool' | 'retrying';
+    detail?: string;
+    attempt?: number;
+    startedAt: number;
+  } | null;
   port: chrome.runtime.Port | null;
 
   load: () => Promise<void>;
@@ -339,6 +349,7 @@ export const useAIStore = create<AIState>((set, get) => ({
   undoNoticeAt: null,
   streaming: false,
   streamingMessageId: null,
+  activity: null,
   port: null,
 
   async load() {
@@ -661,6 +672,19 @@ export const useAIStore = create<AIState>((set, get) => ({
   handleOutbound(evt) {
     switch (evt.type) {
       case 'chat:start':
+        set({ activity: { phase: 'connecting', startedAt: Date.now() } });
+        break;
+
+      case 'chat:status':
+        if (evt.messageId !== get().streamingMessageId) break;
+        set({
+          activity: {
+            phase: evt.phase,
+            ...(evt.detail ? { detail: evt.detail } : {}),
+            ...(evt.attempt !== undefined ? { attempt: evt.attempt } : {}),
+            startedAt: evt.startedAt ?? Date.now(),
+          },
+        });
         break;
 
       case 'chat:delta':
@@ -837,7 +861,7 @@ export const useAIStore = create<AIState>((set, get) => ({
           );
         }
         // 一轮结束：清掉可能还挂着的计划卡片（后台已按"未批准"结算，卡片不该继续等）
-        set({ streaming: false, streamingMessageId: null, pendingPlan: null });
+        set({ streaming: false, streamingMessageId: null, activity: null, pendingPlan: null });
         void get()._persist();
         // 一轮结束 = 一个撤销点已落盘，刷新「撤销本次操作」按钮的可用状态
         void get().refreshUndo();
@@ -846,6 +870,7 @@ export const useAIStore = create<AIState>((set, get) => ({
 
       case 'chat:error': {
         flushDeltaNow(set);
+        set({ activity: null });
         updateActiveMessages(set, (msgs) =>
           msgs.map((m) => (m.id === evt.messageId ? { ...m, streaming: false } : m)),
         );

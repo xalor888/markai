@@ -984,7 +984,9 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     ok('异常向上传播（由 background 层转为 chat:error 事件）', () => {
       // runAgentTurn 对未中止的请求直接抛出，background.handleChatSend 捕获后发送 chat:error
       assert.ok(caught instanceof ChatError);
-      assert.equal(events.length, 0, 'agent 循环自身不产生 error 事件（避免双重上报）');
+      // 阶段状态（chat:status）允许存在；这里钉的是「不产生 chat:error」避免双重上报
+      const terminal = events.filter((e) => e.type !== 'chat:status');
+      assert.equal(terminal.length, 0, 'agent 循环自身不产生 error 事件（避免双重上报）');
     });
   }
 
@@ -1196,7 +1198,13 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     await runTurn('hi', events);
     ok('网络错误后自动重连并完成', () => {
       assert.equal(fetchCalls.length, 3, '共 3 次请求：2 次失败 + 1 次成功');
-      assert.ok(events.some((e) => e.type === 'chat:delta' && 'text' in e && (e as { text: string }).text.includes('重试')), '应有重试提示文本');
+      // 重试只发状态事件：正文里不能出现「正在重试」，否则会被当成模型说的话
+      assert.ok(events.some((e) => e.type === 'chat:status' && e.phase === 'retrying'), '应有重试状态事件');
+      assert.equal(
+        events.some((e) => e.type === 'chat:delta' && 'text' in e && (e as { text: string }).text.includes('重试')),
+        false,
+        '重试提示不能写进正文',
+      );
       assert.ok(events.some((e) => e.type === 'chat:done'), '最终正常完成');
       assert.ok(events.some((e) => e.type === 'chat:delta' && 'text' in e && (e as { text: string }).text.includes('重连成功')), '内容完整');
     });
@@ -16524,6 +16532,25 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.equal(next[1]!.blocks.length, 1);
     assert.equal(next[1]!.blocks[0]!.kind, 'text');
     assert.deepEqual(next[1], msgs[1], '其他消息必须原样不动');
+  });
+
+  ok('client 包装层必须转发 onReasoning（否则思考在包装处被吞掉）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'lib/ai/client.ts'), 'utf8');
+    assert.match(src, /onReasoning:\s*\(t\)\s*=>\s*\{[\s\S]*handlers\.onReasoning\?\.\(t\)/, 'wrappedHandlers 没把思考转发给上层');
+    assert.match(src, /phase: 'streaming'/, '首字/首思考到达时必须发出 streaming 状态');
+  });
+
+  ok('阶段状态必须投递并在 UI 里可观测（连接 / 等首字节 / 工具 / 重试）', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const agent = readFileSync(resolve(srcDir, 'lib/ai/agent.ts'), 'utf8');
+    assert.match(agent, /type: 'chat:status'/, 'agent 没有投递阶段状态');
+    assert.match(agent, /toolHeartbeat/, '工具执行必须有心跳，不能静默等待');
+    const store = readFileSync(resolve(srcDir, 'stores/aiStore.ts'), 'utf8');
+    assert.match(store, /activity:/, 'store 没接住 activity');
+    const ui = readFileSync(resolve(srcDir, 'components/chat/activity-status.tsx'), 'utf8');
+    assert.match(ui, /data-testid="agent-activity"/, 'UI 没有可观测的状态锚点');
+    assert.match(ui, /data-testid="agent-stall"/, '长时间无输出时缺少可操作的提示');
   });
 
   ok('agent 必须把思考往上送（解析了却不投递 = 用户永远看不到）', () => {

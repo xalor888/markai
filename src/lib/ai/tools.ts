@@ -1475,6 +1475,10 @@ async function moveBookmarks(args: unknown, onProgress?: (text: string) => void,
       if (node && !node.url) await assertNoCycle(id, pid);
       await jMove(id, { parentId: pid, ...(index !== undefined ? { index } : {}) });
       doneCount++;
+      // 批量移动也要有进度：既让 UI 显示到第几项，也重置 executeTool 的空闲超时
+      if (doneCount === 1 || doneCount % 5 === 0 || doneCount === ordered.length) {
+        onProgress?.(`已移动 ${doneCount}/${ordered.length}`);
+      }
     } catch (e) {
       failures.push({ id, error: e instanceof Error ? e.message : String(e) });
     }
@@ -2225,6 +2229,9 @@ function normalizeToolArgs(args: unknown): unknown {
 }
 
 /** 执行工具调用（args 为 JSON 字符串；onProgress 供长任务上报进度） */
+/** 工具空闲超时：这么久没有进度就中止，避免 UI 永远停在「执行中」 */
+const TOOL_IDLE_TIMEOUT_MS = 180_000;
+
 export async function executeTool(
   name: string,
   argsJson: string,
@@ -2240,21 +2247,54 @@ export async function executeTool(
     throw new Error('工具参数不是合法 JSON');
   }
   const args = normalizeToolArgs(rawArgs);
+  /*
+   * 把取消信号透传给工具，同时给每次调用加一道「空闲超时」。
+   *
+   * 以前 abort 只挡在工具之间：正在执行的长工具会一路跑完（cleanup_sweep 递归整棵树、
+   * 再对候选并发做 HTTP 检测），用户点了停止，后台仍在烧网络；UI 则永远显示「执行中」。
+   * 这里用**活动式**超时：每收到一次进度回调就重新计时，只有真的卡住才中止。
+   */
+  const ctrl = new AbortController();
+  const onParentAbort = () => ctrl.abort();
+  if (signal) {
+    if (signal.aborted) ctrl.abort();
+    else signal.addEventListener('abort', onParentAbort, { once: true });
+  }
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let timedOut = false;
+  let rejectTimeout: ((error: Error) => void) | null = null;
+  const idle = new Promise<never>((_, reject) => {
+    rejectTimeout = reject;
+  });
+  const bumpTimeout = () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timedOut = true;
+      ctrl.abort();
+      rejectTimeout?.(new Error(`工具「${name}」超过 ${Math.round(TOOL_IDLE_TIMEOUT_MS / 60_000)} 分钟没有进度，已中止`));
+    }, TOOL_IDLE_TIMEOUT_MS);
+  };
+  bumpTimeout();
   try {
-    /*
-     * 把取消信号透传给工具。
-     *
-     * 此前 `executeTool` 没有 signal：abort 只挡在**工具之间**（每次工具调用前后
-     * 各有一道门），正在执行的长工具会**一路跑完**。`cleanup_sweep` 要递归遍历整棵树
-     * 再对每个保留候选做并发 HTTP 存活检测——用户点「取消」之后它还在烧 CPU 和网络，
-     * 界面上却已经显示取消了。
-     */
-    return await entry.handler(args, onProgress, signal);
+    const running = entry.handler(
+      args,
+      (text) => {
+        bumpTimeout();
+        onProgress?.(text);
+      },
+      ctrl.signal,
+    );
+    const result = await Promise.race([running, idle]);
+    return result;
   } catch (e) {
+    if (timedOut) throw new Error(`工具「${name}」长时间没有进度，已中止；可以缩小范围后重试。`);
     if (e instanceof z.ZodError) {
       throw new Error(`参数不合法：${e.issues.map((i) => i.message).join('；')}`);
     }
     throw e instanceof Error ? e : new Error(String(e));
+  } finally {
+    if (timer) clearTimeout(timer);
+    signal?.removeEventListener('abort', onParentAbort);
   }
 }
 

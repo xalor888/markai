@@ -41,6 +41,7 @@ import { useBookmarkStore, findNode, resolveTitlePath } from '@/stores/bookmarkS
 import type { ChatMessage, ToolCallRecord } from '@/lib/ai/types';
 import { mutatedEmptyReplyNote, retrySafety } from '@/lib/chat/retry-safety';
 import { cn } from '@/lib/utils';
+import { useElapsedSeconds } from './activity-status';
 import { DeletionCard } from './deletion-card';
 
 /** 工具名 → 图标映射 */
@@ -157,6 +158,7 @@ function summarize(record: ToolCallRecord): string {
 const ToolChip = memo(function ToolChip({ record }: { record: ToolCallRecord }) {
   // 错误时自动展开详情，问题立即可见
   const [expanded, setExpanded] = useState(record.status === 'error'); // canceled 不自动展开
+  const runningFor = useElapsedSeconds(record.status === 'running' ? record.startedAt : undefined);
   const Icon = TOOL_ICONS[record.name] ?? Wrench;
   const meta = TOOL_META[record.name];
 
@@ -178,6 +180,11 @@ const ToolChip = memo(function ToolChip({ record }: { record: ToolCallRecord }) 
         )}
         <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
         <span className="shrink-0 text-xs font-medium text-foreground">{meta?.label ?? record.name}</span>
+        {record.status === 'running' && (
+          <span className="shrink-0 text-2xs text-muted-foreground/70">
+            {runningFor > 0 ? `${runningFor}s` : '刚刚开始'}
+          </span>
+        )}
         {record.status === 'running' && record.result && (
           // 长任务（check_urls_bulk / auto_categorize）实时进度
           <span className="min-w-0 truncate text-2xs text-muted-foreground">{record.result}</span>

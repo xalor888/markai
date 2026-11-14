@@ -39,6 +39,10 @@ export interface ToolCallRecord {
   result?: string; // 执行结果（JSON 文本）
   error?: string;
   deletions?: DeletionProposal[]; // propose_deletions 的提议载荷
+  /** 开始执行的时间（UI 用它显示"已经跑了多久"，不用自己猜） */
+  startedAt?: number;
+  /** 执行耗时（结束时由 agent 填） */
+  durationMs?: number;
 }
 
 /** 聊天块：文本或工具调用（按到达顺序排列，保证时序正确） */
@@ -207,6 +211,18 @@ export type ChatOutbound =
    * 没有它，"回复中途断流 → 自动重试"就会把两段文本首尾相接，用户看到重复拼接的怪回复。
    */
   | { type: 'chat:restart'; messageId: string }
+  /**
+   * 阶段状态：连接模型 / 等待首字节 / 正在出字 / 正在跑工具 / 重试等待。
+   * 没有它的时候，长时间无增量只能靠一个转圈图标，用户不知道是在思考还是卡死。
+   */
+  | {
+      type: 'chat:status';
+      messageId: string;
+      phase: 'connecting' | 'thinking' | 'streaming' | 'tool' | 'retrying';
+      detail?: string;
+      attempt?: number;
+      startedAt?: number;
+    }
   | { type: 'chat:tool_start'; messageId: string; record: ToolCallRecord }
   /** 计划模式：本回次待执行的写操作清单，等 UI 确认后才会执行 */
   | { type: 'chat:plan'; messageId: string; steps: { name: string; label: string; count: number; countDeclared: boolean; summary: string; preview: boolean }[] }

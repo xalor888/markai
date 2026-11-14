@@ -4,7 +4,7 @@ import { chatCompletion, ChatError, type ApiMessage, type ApiToolCall } from './
 import { formatMemoriesForPrompt, getMemories, type MemoryItem } from './memory';
 import { personalInstruction } from '@/lib/pet/personal';
 import { buildTimeContext, PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT, TOOL_DEFINITIONS } from './prompts';
-import { executeTool, type ToolOutput } from './tools';
+import { executeTool, TOOL_META, type ToolOutput } from './tools';
 import { applyPlan, buildPlan, classifyTool, stepCountOf, type PlannedStep } from './turn-plan';
 // 只读/写/声明/闸门的分类**只有 turn-plan 一份**：历史上同一份名单抄成两份，
 // 结果一份加了新工具、另一份没加——并行集合与确认集合开始互相矛盾，谁也说不清哪份是真的。
@@ -433,13 +433,31 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
           safePost(onEvent, {
             type: 'chat:tool_start',
             messageId,
-            record: { id: tc.id, name: tc.function.name, args: tc.function.arguments, status: 'running' },
+            record: {
+            id: tc.id,
+            name: tc.function.name,
+            args: tc.function.arguments,
+            status: 'running',
+            startedAt: Date.now(),
+          },
           }),
         // 重发前先让 UI 作废上一轮的半截文本：否则重试成功后的回复会接在残文后面
         onRestart: () => safePost(onEvent, { type: 'chat:restart', messageId }),
-        // 自动重连进度：在回复中追加提示（重试成功后会继续输出，用户可感知恢复过程）
-        onRetry: (attempt) =>
-          safePost(onEvent, { type: 'chat:delta', messageId, text: `\n（请求失败，正在自动重试 ${attempt}/5…）` }),
+        /*
+         * 重试不再往正文里塞一行字。
+         * 那一行会进入消息正文、被复制、被当成模型说的话；现在只发状态事件，
+         * UI 在头部显示「重试 2/5 · 4s」，正文保持干净。
+         */
+        onRetry: () => {},
+        onStatus: (status) =>
+          safePost(onEvent, {
+            type: 'chat:status',
+            messageId,
+            phase: status.phase,
+            ...(status.detail ? { detail: status.detail } : {}),
+            ...(status.attempt !== undefined ? { attempt: status.attempt } : {}),
+            startedAt: status.startedAt ?? Date.now(),
+          }),
       });
     } catch (e) {
       if (signal.aborted) {
@@ -492,6 +510,8 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
         record: { id: tc.id, name: tc.function.name, args: tc.function.arguments, status: 'running' },
       });
     }
+    const toolStartedAt = new Map<string, number>();
+    for (const tc of turn.toolCalls) toolStartedAt.set(tc.id, Date.now());
     const runOne = async (
       tc: ApiToolCall,
     ): Promise<{ out?: ToolOutput; error?: string }> => {
@@ -529,6 +549,30 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
         return { error: e instanceof Error ? e.message : String(e) };
       }
     };
+    /*
+     * 工具心跳：没有进度回调的工具（move_bookmarks / merge_folders 等）也要让 UI 知道
+     * "还在跑"。每 4 秒发一次当前工具名与开始时间；UI 用 startedAt 自己算秒数。
+     */
+    const toolStartedAt0 = Date.now();
+    let toolDetail = ordered.map(({ tc }) => TOOL_META[tc.function.name]?.label ?? tc.function.name).join('、');
+    safePost(onEvent, {
+      type: 'chat:status',
+      messageId,
+      phase: 'tool',
+      detail: toolDetail,
+      startedAt: toolStartedAt0,
+    });
+    let roundErrors = 0;
+    const toolHeartbeat = setInterval(() => {
+      safePost(onEvent, {
+        type: 'chat:status',
+        messageId,
+        phase: 'tool',
+        detail: toolDetail,
+        startedAt: toolStartedAt0,
+      });
+    }, 4000);
+    try {
     // 读类工具并行
     await Promise.all(
       ordered
@@ -554,6 +598,8 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
           declared.map((d) => ({ name: d.tool, args: JSON.stringify({ ...(d.count !== undefined ? { count: d.count } : {}) }) })),
         ).map((p, idx) => ({ ...p, summary: declared[idx]?.summary ?? p.summary }));
         safePost(onEvent, { type: 'chat:plan', messageId, steps });
+        toolDetail = '等待你确认计划';
+        safePost(onEvent, { type: 'chat:status', messageId, phase: 'tool', detail: toolDetail, startedAt: toolStartedAt0 });
         let approved = false;
         if (params.requestPlanApproval) {
           try {
@@ -657,7 +703,7 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
       results.set(i, await runOne(tc));
     }
     // 按原顺序发送结果事件并回填模型
-    let roundErrors = 0;
+    roundErrors = 0;
     for (const { tc, i } of ordered) {
       const r = results.get(i);
       if (r?.out) {
@@ -683,6 +729,8 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
           status: 'done',
           result: content,
           deletions: r.out.deletions,
+          startedAt: toolStartedAt.get(tc.id),
+          durationMs: Date.now() - (toolStartedAt.get(tc.id) ?? Date.now()),
         };
         safePost(onEvent, { type: 'chat:tool_done', messageId, record });
         apiMessages.push({ role: 'tool', tool_call_id: tc.id, content });
@@ -695,10 +743,16 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
           args: tc.function.arguments,
           status: signal.aborted ? 'canceled' : 'error',
           error: msg,
+          startedAt: toolStartedAt.get(tc.id),
+          durationMs: Date.now() - (toolStartedAt.get(tc.id) ?? Date.now()),
         };
         safePost(onEvent, { type: 'chat:tool_error', messageId, record });
         apiMessages.push({ role: 'tool', tool_call_id: tc.id, content: `执行失败：${msg}` });
       }
+    }
+
+    } finally {
+      clearInterval(toolHeartbeat);
     }
 
     // 收敛保护：整轮工具全部失败且连续 2 轮 → 停止，避免模型反复重试同一错误白烧请求

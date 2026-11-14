@@ -423,7 +423,7 @@ export function ChatPanel({
   return (
     <div
       data-testid="chat-panel"
-      className={cn('relative flex h-full min-h-0 flex-col bg-card', className)}
+      className={cn('relative flex h-full min-h-0 flex-col bg-background', className)}
       style={style}
     >
       {/*
@@ -710,7 +710,7 @@ export function ChatPanel({
         {slashMatches.length > 0 && !streaming && (
           <div
             data-testid="slash-menu"
-            className="markai-glass animate-slide-up absolute right-3 bottom-full left-3 z-10 mb-1 overflow-hidden rounded-xl p-1"
+            className="markai-glass markai-glass-liquid animate-slide-up absolute right-3 bottom-full left-3 z-10 mb-1 overflow-hidden rounded-xl p-1"
           >
             <p className="px-2 py-1 text-2xs font-medium text-muted-foreground/70">斜杠命令</p>
             {slashMatches.map((command, i) => (

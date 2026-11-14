@@ -153,7 +153,7 @@ src/
 │ ├── ai/ # client（SSE+降级）/ agent（工具循环）/ tools（书签工具执行器）/ prompts / types
 │ ├── providers.ts # OpenAI / DeepSeek / Moonshot / Ollama 预设
 │ └── ...
-└── assets/main.css # Tailwind v4 设计 token（Slate + Indigo；常规界面禁阴影，仅浮层用玻璃 / 液态折射）
+└── assets/main.css # Tailwind v4 设计 token（Slate + Indigo；常规界面禁阴影，仅浮层用光学玻璃）
 ```
 
 ## 许可

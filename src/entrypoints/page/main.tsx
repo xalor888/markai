@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { ErrorBoundary } from '@/components/common/error-boundary';
 import '@/assets/main.css';
 import { ThemeProvider } from '@/components/theme/theme-provider';
+import { installLiquidGlass } from '@/lib/ui/liquid-glass-global';
 import { ToastViewport } from '@/components/toast/toast';
 import { Workspace } from '@/components/workspace/workspace';
 import { initBookmarkListeners, initUIWindowSync, resolveTitlePath, useBookmarkStore } from '@/stores/bookmarkStore';
@@ -76,6 +77,8 @@ function PageApp() {
     </>
   );
 }
+
+installLiquidGlass();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <ErrorBoundary area="MarkAI 工作区">

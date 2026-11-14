@@ -1417,7 +1417,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
        */}
       {selectedIds.length > 0 && !overview && (
         <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center px-3">
-          <div className="markai-glass pointer-events-auto animate-slide-up flex items-center gap-1 rounded-xl p-1">
+          <div className="markai-glass markai-glass-liquid relative pointer-events-auto animate-slide-up flex items-center gap-1 rounded-xl p-1">
             <span className="px-2 text-2xs font-medium text-foreground">
               已选 <span className="tabular-nums text-accent">{selectedIds.length}</span> 项
             </span>
@@ -1470,7 +1470,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
                     onClick={() => setSelectionMenuOpen(false)}
                     aria-hidden="true"
                   />
-                  <div className="markai-glass animate-slide-up absolute right-0 bottom-full z-20 mb-2 w-44 rounded-lg p-1">
+                  <div className="markai-glass markai-glass-liquid animate-slide-up absolute right-0 bottom-full z-20 mb-2 w-44 rounded-lg p-1">
                     {[
                       { icon: ExternalLink, label: '打开所选', run: openSelected },
                       { icon: Copy, label: '复制网址', run: copySelectedUrls },

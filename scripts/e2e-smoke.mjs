@@ -467,6 +467,19 @@ async function run() {
     await openMenu();
     const items = await ev(`[...document.querySelectorAll('[role="menuitem"]')].map(b => b.textContent.trim())`);
     check('「更多」菜单打开并列出入口', items.length >= 5, JSON.stringify(items.slice(0, 12)));
+
+    // 液态玻璃是全局的：菜单也不能漏（之前只有对话框/命令面板有）
+    const menuGlass = await waitFor(
+      async () =>
+        (await ev(`(() => {
+          const m = document.querySelector('[data-testid="more-menu"]');
+          if (!m) return false;
+          const cs = getComputedStyle(m);
+          return m.classList.contains('markai-glass-liquid') && cs.backdropFilter.indexOf('blur') >= 0;
+        })()`)) === true,
+      4000,
+    );
+    check('「更多」菜单也吃到全局液态玻璃', menuGlass === true, JSON.stringify({ menuGlass }));
     await ev(`(() => { document.querySelector('[data-testid="more-trigger"]')?.click(); return true; })()`);
   }
 
@@ -616,24 +629,18 @@ async function run() {
     })()`);
     check('Ctrl/⌘+K 能打开命令面板', open);
 
-    /*
-     * 液态玻璃只在 Chromium 生效：位移滤镜必须真的挂上，
-     * 否则 data-liquid 会停在 off，面板看起来只是普通磨砂。
-     */
-    if (await ev(`CSS.supports('backdrop-filter', 'url(#x)')`)) {
-      const liquid = await waitFor(
-        async () =>
-          (await ev(`(() => {
-            const p = document.querySelector('[data-testid="command-palette"]');
-            return p
-              ? p.dataset.liquid === 'on' &&
-                  document.querySelectorAll('#markai-liquid-defs filter').length > 0
-              : false;
-          })()`)) === true,
-        4000,
-      );
-      check('命令面板的液态玻璃建好了位移滤镜', liquid === true, JSON.stringify({ liquid }));
-    }
+    // 液态玻璃走光学层：类名必须在、真实模糊必须生效（不做 backdrop url）
+    const liquid = await waitFor(
+      async () =>
+        (await ev(`(() => {
+          const p = document.querySelector('[data-testid="command-palette"]');
+          if (!p) return false;
+          const cs = getComputedStyle(p);
+          return p.classList.contains('markai-glass-liquid') && cs.backdropFilter.indexOf('blur') >= 0;
+        })()`)) === true,
+      4000,
+    );
+    check('命令面板的液态玻璃生效（光学层 + 真实模糊）', liquid === true, JSON.stringify({ liquid }));
 
     const search = await ev(`(async () => {
       const input = document.querySelector('[data-testid="command-palette"] input');

@@ -1,7 +1,6 @@
 import { X } from 'lucide-react';
-import { useEffect, type KeyboardEvent, type ReactNode } from 'react';
+import { useEffect, useRef, type KeyboardEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
-import { useLiquidGlass } from '@/lib/ui/use-liquid-glass';
 import { cn } from '@/lib/utils';
 
 /**
@@ -29,8 +28,7 @@ export function Dialog({
   /** 稳定锚点：e2e 用它定位，不依赖文案（改文案不该让测试变红） */
   testId?: string;
 }) {
-  /* 液态玻璃：尺寸稳定后生成位移图；不支持的环境只留下磨砂（data-liquid="off"） */
-  const panelRef = useLiquidGlass<HTMLDivElement>({ active: open, bezel: 7, scale: 6 });
+  const panelRef = useRef<HTMLDivElement>(null);
 
   // Esc 关闭 + 锁定背景滚动 + 打开聚焦面板 + 关闭还原焦点（原生对话框行为）
   useEffect(() => {

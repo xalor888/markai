@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client';
 import { ErrorBoundary } from '@/components/common/error-boundary';
 import '@/assets/main.css';
 import { ThemeProvider } from '@/components/theme/theme-provider';
+import { installLiquidGlass } from '@/lib/ui/liquid-glass-global';
 import { ToastViewport } from '@/components/toast/toast';
 import { ConfigForm } from '@/components/options/config-form';
 import { SettingsShell } from '@/components/options/settings-layout';
@@ -37,6 +38,8 @@ function OptionsApp() {
     </div>
   );
 }
+
+installLiquidGlass();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <ErrorBoundary area="MarkAI 设置">

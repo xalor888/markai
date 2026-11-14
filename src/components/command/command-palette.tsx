@@ -20,7 +20,6 @@ import { searchCommands, type CommandItem } from '@/lib/command/search';
 import { buildPaletteGroups } from '@/lib/command/palette';
 import { readRecent, recordRecent, type RecentEntry } from '@/lib/command/recent';
 import { openUrl } from '@/lib/open-url';
-import { useLiquidGlass } from '@/lib/ui/use-liquid-glass';
 import { cn } from '@/lib/utils';
 
 /** 动作图标的轻量映射：CommandItem 是纯数据，不把 React 组件塞进 lib */
@@ -55,8 +54,6 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
   const [recent, setRecent] = useState<RecentEntry[]>([]);
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
-  /* 液态玻璃：命令面板自带 scrim，背景有层次，适合开一点色散 */
-  const panelRef = useLiquidGlass<HTMLDivElement>({ active: open, bezel: 7, scale: 6, aberration: 2 });
 
   const roots = useBookmarkStore((s) => s.roots);
   const selectFolder = useBookmarkStore((s) => s.selectFolder);
@@ -251,12 +248,11 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
       onClick={() => onOpenChange(false)}
     >
       <div
-        ref={panelRef}
         role="dialog"
         data-testid="command-palette"
         aria-modal="true"
         aria-label="命令面板"
-        className="markai-glass markai-glass-liquid animate-fade-in w-full max-w-xl overflow-hidden rounded-xl"
+        className="markai-glass markai-glass-liquid relative animate-fade-in w-full max-w-xl overflow-hidden rounded-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2.5 border-b border-border px-4">

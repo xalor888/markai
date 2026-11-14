@@ -7,6 +7,7 @@ import { AI_STORAGE_KEY } from '@/stores/aiStore';
 import type { AIConfig, ChatMessage, DeletionProposal } from '@/lib/ai/types';
 import { resolveConfig, PROVIDERS } from '@/lib/providers';
 import { ThemeProvider } from '@/components/theme/theme-provider';
+import { installLiquidGlass } from '@/lib/ui/liquid-glass-global';
 import { ToastViewport } from '@/components/toast/toast';
 import { openUrl } from '@/lib/open-url';
 import { ORGANIZE_LOG_KEY, readOrganizeLog, summarizeOrganizeLog, type OrganizeStats } from '@/lib/ai/organize-log';
@@ -392,6 +393,8 @@ function PopupApp() {
     </div>
   );
 }
+
+installLiquidGlass();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <ErrorBoundary area="MarkAI 弹出窗">

@@ -1,5 +1,12 @@
 # MarkAI 液态玻璃（Liquid Glass）选型与落地方案
 
+> **⚠️ 2026-11-14 实测修正（重要）**
+> `backdrop-filter: url(#filter)` 在**普通网页**（file:// / http）里能折射（Chrome 156 实测通过），
+> 但在 **chrome-extension:// 页面**里会被 Chromium 静默丢弃：`CSS.supports` 返回 true、computed style 也显示 `url(#f)`，
+> 实际背景却完全不采样（同页 `filter: url(#f)` 正常，只有 backdrop 版本失效）。headless 与带窗口模式都复现。
+> 因此 MarkAI 最终采用的是**光学玻璃层**（真实模糊 + 厚边色散 + 指针反光），不是 SVG 折射。
+> 下面的 SVG 章节保留为调研记录，不能直接用于扩展页面；文中“已实现”的描述以第 0 节为准。
+
 > 目标：给 MarkAI 这套 WXT + React 19 + Tailwind v4 的侧边栏插件，找 **已经在开源项目里被验证过** 的液态玻璃做法，并筛出能真正落在这个 420px 窄面板上的那一档。
 >
 > 结论先行：**纯 CSS 的「真折射」只有 Chromium 能渲染**（`backdrop-filter: url(#svgFilter)`）；MarkAI 又只能在浮层上做玻璃（侧边栏看不到网页本体）。所以最合适的不是照搬某个 WebGL 库，而是：
@@ -15,23 +22,24 @@
 
 | 改动 | 文件 | 说明 |
 | --- | --- | --- |
-| 滤镜引擎 | [liquid-glass.ts](../src/lib/ui/liquid-glass.ts) | 圆角矩形 SDF → 半分辨率位移图（LRU 8 组尺寸缓存）→ 建 `<filter>`；`supportsLiquidGlass()` 运行时特性门 |
-| React 绑定 | [use-liquid-glass.ts](../src/lib/ui/use-liquid-glass.ts) | `active` 依赖解决「关闭时 return null、ref 后挂」；ResizeObserver 140ms 去抖；指针只写 `--liquid-mx/--liquid-my`，无 rAF |
-| 样式 | [main.css](../src/assets/main.css#L503) | `--liquid-*` 深浅色 token；`.markai-glass-liquid` 基础磨砂；`[data-liquid="on"]` 才叠 `url(#filter)`；rim 用 `::before` + mask；噪声层浅/深两档 |
-| 应用点 | [dialog.tsx](../src/components/ui/dialog.tsx#L84)、[command-palette.tsx](../src/components/command/command-palette.tsx#L254) | 追加 `markai-glass-liquid`；`animate-scale-in` → `animate-fade-in` |
-| 回归测试 | [agent.test.ts](../tests/agent.test.ts) | 新增 2 条：应用点/深浅 token；特性门 + 回退分支 |
+| 光学玻璃层 | [main.css](../src/assets/main.css#L503) | 真实模糊（`blur(8px) saturate(1.8) brightness(1.02)`）+ 5px 厚边色散（冷/暖两色）+ 内高光 + 外投影；深浅色 token 两套 |
+| 指针反光 | [liquid-glass-global.ts](../src/lib/ui/liquid-glass-global.ts) | 文档级 `pointermove`，只给最近的 `.markai-glass-liquid` 写 `--liquid-mx/--liquid-my`；无观察器、无 rAF |
+| 应用点 | 对话框、命令面板、Toast、更多菜单、工作区下拉、书签树菜单、列表批量条、聊天快捷面板 | 全部挂 `markai-glass-liquid` |
+| 回归测试 | [agent.test.ts](../tests/agent.test.ts) | 全局覆盖 + 深浅 token + 「禁止 backdrop url」+ 指针反光 |
 
-真实扩展（Chrome for Testing 156，headless）实测：
+真实扩展（Chrome for Testing 156，headless / 带窗口均验证）：
 
-- 命令面板打开 → `data-liquid="on"`，`backdrop-filter: url(#…) blur(8px) saturate(1.45)`，`#markai-liquid-defs` 里 1 个 filter；
-- Esc 关闭 → filter 与 defs 容器一并移除（0 个）；连开两次 id 不重复、不叠加；
-- 对话框同路径；浅色 / 深色 token 都生效；
-- e2e 新增一条「命令面板真的建了位移滤镜」的检查，全量 **200/200** 通过；单测 **1050** 项通过。
-- headless 下 `chrome.tabs.create({ active:false })` 的 URL 会停在 `about:blank`（未激活标签不提交 URL），所以「后台打开」用例的判据改成：多一个非激活标签 + 当前标签不变；URL 命中作为附加条件。
+- `backdrop-filter: url(#f)` 在扩展页会把背景丢成空白；`filter: url(#f)` 正常 —— 这是扩展页面的渲染限制。
+- 改为光学层后：面板有真实背景模糊、5px 厚边（左冷右暖）、内高光与指针反光；所有浮层一致。
+- e2e **201/201** 通过；单测 **1050** 项通过。
 
-| 真实扩展 · 命令面板 | 真实扩展 · 对话框 | 深色对话框 |
+| 真实扩展 · 命令面板 | 真实扩展 · 更多菜单 | 真实扩展 · Toast |
 | --- | --- | --- |
-| ![real palette](prototypes/real-palette.png) | ![real dialog](prototypes/real-dialog.png) | ![real dialog dark](prototypes/real-dialog-dark.png) |
+| ![real palette](prototypes/real-palette-global.png) | ![real menu](prototypes/real-menu-global.png) | ![real toast](prototypes/real-toast-global.png) |
+
+| 真实扩展 · 对话框 | 深色对话框 |
+| --- | --- |
+| ![real dialog](prototypes/real-dialog.png) | ![real dialog dark](prototypes/real-dialog-dark.png) |
 
 ---
 
@@ -139,7 +147,7 @@ gh search repos "backdrop-filter svg" --sort stars
 | --- | --- | --- | --- |
 | **A. 现状玻璃（保留）** | 菜单、Toast、列表内浮动操作条、聊天快捷面板 | 72% 底色 + `blur(12px) saturate(1.4)` + 1px inset 高光 | 0 |
 | **B. 液态描边（所有浏览器）** | 上述全部浮层 | A 之上再加：1px 渐变 rim（`mask-composite: exclude`）、指针跟随高光、极轻颗粒、`corner-shape: squircle`（Chrome 139+） | 纯 CSS，无重绘风险 |
-| **C. 折射（仅 Chromium）** | **只给对话框 + 命令面板**（它们自带 scrim，背景有层次） | `backdrop-filter: url(#f) blur(8px) saturate(1.45)`；位移图只作用于 6–8px 边带 | 打开时重建一次位移图（半分辨率 ≈1.3ms），静态时 0 成本 |
+| **C. 光学玻璃（所有 Chromium）** | 所有浮层 | `backdrop-filter: blur(8px) saturate(1.8)` + 5px 厚边色散 + 内高光 + 指针反光 | 纯 CSS + 一个 pointermove 监听，零滤镜重建 |
 
 **明确不做**：
 - 不给侧边栏容器本身做玻璃（扩展页面看不到网页，只会糊到自己的纯色底）。
@@ -194,7 +202,7 @@ gh search repos "backdrop-filter svg" --sort stars
 
 > 注意：`.markai-glass-liquid` 不要写进 `@layer`。现有 `.markai-glass` 就是放在 layer 外，否则组件上的 `shadow-*` 工具类会把玻璃高光盖掉（[main.css](../src/assets/main.css#L466) 的注释已记过这个坑）。
 
-### 6.3 Chromium 位移滤镜（每个浮层一个 filter）
+### 6.3 Chrome 位移滤镜（调研记录，扩展页面不可用）
 
 位移图 = 圆角矩形 SDF 的法线，只在边带（bezel）里有值：
 

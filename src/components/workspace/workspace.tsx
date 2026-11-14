@@ -400,7 +400,7 @@ export function Workspace({
           {searchFocused && !searchQuery && recentSearches.length > 0 && (
             <div
               data-testid="search-recent"
-              className="markai-glass animate-fade-in absolute top-full right-0 left-0 z-30 mt-1 rounded-lg p-1"
+              className="markai-glass markai-glass-liquid animate-fade-in absolute top-full right-0 left-0 z-30 mt-1 rounded-lg p-1"
             >
               <div className="flex items-center justify-between px-2 py-1">
                 <span className="flex items-center gap-1 text-2xs text-muted-foreground">

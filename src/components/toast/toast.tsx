@@ -26,7 +26,7 @@ export function ToastViewport() {
           onClick={() => remove(t.id)}
           className={cn(
             // 浮层用玻璃层：Toast 下面压着的是书签列表，能糊出真实层次
-            'markai-glass pointer-events-auto cursor-pointer animate-slide-up rounded-lg px-3 py-2.5',
+            'markai-glass markai-glass-liquid relative pointer-events-auto cursor-pointer animate-slide-up rounded-lg px-3 py-2.5',
             t.variant === 'destructive' && 'border-destructive/40',
             t.variant === 'success' && 'border-success/40',
             t.variant === 'default' && 'border-border',

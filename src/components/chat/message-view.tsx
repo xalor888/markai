@@ -82,15 +82,39 @@ const TOOL_ICONS: Record<string, LucideIcon> = {
  *  - 流式时自动展开（用户能看见模型正在想什么），结束后自动收起成一行摘要；
  *  - 思考很长时不会把答案挤到屏幕外——这正是「显示思考」最容易做坏的地方。
  */
-function ReasoningBlock({ text, streaming }: { text: string; streaming: boolean }) {
+function ReasoningBlock({
+  text,
+  streaming,
+  defaultOpen = false,
+}: {
+  text: string;
+  streaming: boolean;
+  /** 最新一条回复默认展开：思考过程不该藏在一次点击后面（历史消息仍折叠，避免刷屏） */
+  defaultOpen?: boolean;
+}) {
   const chars = text.length;
+  const [expanded, setExpanded] = useState(defaultOpen || streaming);
+  /*
+   * 流式期间强制展开：用户能看见模型正在想什么；此时点 summary 不生效，
+   * 免得「刚收起又被下一段增量顶开」的拉扯感。流结束后的开合由用户自己决定。
+   */
+  const open = streaming || expanded;
   return (
     <details
-      open={streaming}
+      open={open}
+      onToggle={(e) => {
+        if (!streaming) setExpanded(e.currentTarget.open);
+      }}
       data-testid="reasoning-block"
-      className="group/reason select-text rounded-md border border-border bg-background px-3 py-2 text-2xs text-muted-foreground"
+      data-open={open ? 'true' : 'false'}
+      className="group/reason select-text rounded-md border border-border bg-background px-3 py-2.5 text-xs text-muted-foreground"
     >
-      <summary className="cursor-pointer list-none">
+      <summary
+        className="flex cursor-pointer list-none items-center justify-between gap-2"
+        onClick={(e) => {
+          if (streaming) e.preventDefault();
+        }}
+      >
         <span className="inline-flex items-center gap-1.5 transition-colors hover:text-foreground">
           <Brain className="h-3 w-3 shrink-0" />
           <span>{streaming ? '正在思考…' : `思考过程 · ${chars} 字`}</span>
@@ -98,8 +122,11 @@ function ReasoningBlock({ text, streaming }: { text: string; streaming: boolean 
             <ChevronRight className="h-3 w-3 shrink-0 transition-transform group-open/reason:rotate-90" />
           )}
         </span>
+        {!streaming && (
+          <span className="shrink-0 text-[10px] text-muted-foreground/60">{open ? '收起' : '展开'}</span>
+        )}
       </summary>
-      <div className="mt-1.5 max-h-72 overflow-y-auto whitespace-pre-wrap leading-relaxed">{text}</div>
+      <div className="mt-2 max-h-80 overflow-y-auto whitespace-pre-wrap leading-[1.7] text-muted-foreground/90">{text}</div>
     </details>
   );
 }
@@ -321,22 +348,27 @@ export const MessageView = memo(function MessageView({
           </p>
         )}
         {message.blocks.map((block, i) => {
-          const isLast = i === message.blocks.length - 1;
+          const isLastBlock = i === message.blocks.length - 1;
           return block.kind === 'text' ? (
             <div
               key={i}
               className={cn(
                 // 助手气泡要与面板底色（bg-card）区分开：用 muted 底色而不是 card 半透明，
                 // 后者在 card 上几乎看不出差别，等于「有背景但没效果」
-                'select-text rounded-md rounded-tl-xs border border-border bg-bubble px-3 py-2.5 text-foreground',
+                'select-text rounded-md rounded-tl-xs border border-border bg-card px-3 py-2.5 text-foreground',
                 !streaming && 'hover:border-border',
               )}
             >
               <MarkdownText text={block.text} />
-              {streaming && isLast && block.text && <span className="stream-cursor ml-0.5 inline-block h-3.5 w-[2px] translate-y-0.5 bg-accent" />}
+              {streaming && isLastBlock && block.text && <span className="stream-cursor ml-0.5 inline-block h-3.5 w-[2px] translate-y-0.5 bg-accent" />}
             </div>
           ) : block.kind === 'reasoning' ? (
-            <ReasoningBlock key={`reasoning-${i}`} text={block.text} streaming={streaming && isLast} />
+            <ReasoningBlock
+              key={`reasoning-${i}`}
+              text={block.text}
+              streaming={streaming && isLastBlock}
+              defaultOpen={isLast}
+            />
           ) : block.record.deletions && block.record.deletions.length > 0 ? (
             <DeletionCard key={block.record.id} proposals={block.record.deletions} />
           ) : (

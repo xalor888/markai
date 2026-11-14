@@ -16822,7 +16822,7 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.doesNotMatch(toast, /bg-card/, '用了玻璃层就不该再叠 bg-card（会盖掉半透明）');
   });
 
-  ok('液态玻璃：只有带遮罩的对话框 / 命令面板用，且深浅色都有 token', () => {
+  ok('液态玻璃覆盖所有浮层（不是只给对话框），且深浅色都有 token', () => {
     const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
     const css = readFileSync(resolve(srcDir, 'assets/main.css'), 'utf8');
     const light = css.slice(0, css.indexOf('.dark {'));
@@ -16832,22 +16832,42 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
       assert.ok(theme.includes('--liquid-tint'), '液态玻璃缺底色 token');
       assert.ok(theme.includes('--liquid-rim-a'), '液态玻璃缺描边 token');
     }
-    for (const file of ['components/ui/dialog.tsx', 'components/command/command-palette.tsx']) {
+    const surfaces = [
+      'components/ui/dialog.tsx',
+      'components/command/command-palette.tsx',
+      'components/toast/toast.tsx',
+      'components/workspace/more-menu.tsx',
+      'components/workspace/workspace.tsx',
+      'components/sidebar/bookmark-tree.tsx',
+      'components/bookmark-list/bookmark-list.tsx',
+      'components/chat/chat-panel.tsx',
+    ];
+    for (const file of surfaces) {
       const txt = readFileSync(resolve(srcDir, file), 'utf8');
       assert.match(txt, /markai-glass-liquid/, `${file} 没有挂液态玻璃类`);
-      assert.match(txt, /useLiquidGlass/, `${file} 没有调用 useLiquidGlass`);
+    }
+    for (const file of ['page', 'sidepanel', 'options', 'popup']) {
+      const txt = readFileSync(resolve(srcDir, `entrypoints/${file}/main.tsx`), 'utf8');
+      assert.match(txt, /installLiquidGlass/, `${file} 入口没有启动全局液态玻璃`);
     }
   });
 
-  ok('液态玻璃：折射必须有特性门，且回退分支不能只剩透底', () => {
+  ok('液态玻璃走光学层：不用 backdrop url（扩展页会丢背景），回退不能只剩透底', () => {
     const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
     const css = readFileSync(resolve(srcDir, 'assets/main.css'), 'utf8');
-    assert.match(css, /\.markai-glass-liquid\[data-liquid='on'\]/, '折射必须在 data-liquid="on" 下才生效');
+    /*
+     * chrome-extension:// 页面里 `backdrop-filter: url(#filter)` 会静默失败：
+     * CSS.supports 返回 true、computed 也显示 url，但背景变成空白（普通网页正常）。
+     * 所以这里必须钉住「不用 url」——否则下一个人又会被 supporting 骗一次。
+     */
+    assert.doesNotMatch(css, /backdrop-filter:\s*url\(/, '扩展页面不支持 backdrop url，改用光学层');
+    assert.match(css, /\.markai-glass-liquid::before/, '玻璃必须有边缘厚度（rim）');
+    assert.match(css, /backdrop-filter: blur\(var\(--liquid-blur\)\)/, '真实模糊必须保留');
     const fallback = css.slice(css.indexOf('@supports not ((backdrop-filter'));
     assert.ok(fallback.includes('.markai-glass-liquid'), '降级分支漏了液态玻璃类');
-    const lib = readFileSync(resolve(srcDir, 'lib/ui/use-liquid-glass.ts'), 'utf8');
-    assert.match(lib, /supportsLiquidGlass\(\)/, 'hook 必须先做特性检测');
-    assert.match(lib, /data-liquid/, 'hook 必须写出可观测的降级标记');
+    const lib = readFileSync(resolve(srcDir, 'lib/ui/liquid-glass-global.ts'), 'utf8');
+    assert.match(lib, /pointermove/, '指针反光必须由全局监听驱动');
+    assert.match(lib, /--liquid-mx/, '指针高光必须写进 CSS 变量');
   });
 
   ok('组件里不许出现裸的 backdrop-filter（一律走 markai-glass）', () => {
@@ -17408,15 +17428,16 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
   // ── D6-B2：常驻开销与思考折叠（回归复测发现的两点） ──
   console.log('\n[pet] 常驻开销');
 
-  ok('历史消息里的思考是折叠的（只有流式中才展开）', () => {
+  ok('最新回复的思考默认展开，历史消息折叠；流式中强制展开', () => {
     const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
     const src = readFileSync(resolve(srcDir, 'components/chat/message-view.tsx'), 'utf8');
-    assert.match(src, /open=\{streaming\}/, '折叠状态必须由 streaming 决定');
+    assert.match(src, /defaultOpen=\{isLast\}/, '最新一条回复的思考必须默认展开，否则用户以为没思考');
     assert.match(
       src,
-      /streaming=\{streaming && isLast\}/,
-      '只有"正在流式的最后一块"才展开——历史消息一律折叠',
+      /useState\(defaultOpen \|\| streaming\)/,
+      '历史消息默认折叠；流式中必须展开',
     );
+    assert.match(src, /const open = streaming \|\| expanded;/, '流式期间不能被用户收起');
   });
 
   // ── D6-B3：文档与实现对齐（新引入的外部请求不能藏在代码里） ──

@@ -19,6 +19,7 @@ import {
   LocateFixed,
   Route,
   Pencil,
+  Tag,
   ScanSearch,
   Search,
   Sparkles,
@@ -91,7 +92,9 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
    * 过滤词与列表共用同一个来源（顶栏那个唯一的搜索框）。
    * 重做前树有自己的一份 state，于是"搜一下"要分别搜两次、结果还各截一半。
    */
-  const filter = useBookmarkStore((s) => s.searchQuery);
+  const rawFilter = useBookmarkStore((s) => s.searchQuery);
+  // `#标签` 是全局标签视图，不是树内标题过滤：树继续展示完整结构，避免出现「匹配 0 项」
+  const filter = rawFilter.trim().startsWith('#') ? '' : rawFilter;
   const setFilter = useBookmarkStore((s) => s.setSearchQuery);
   const listRef = useRef<HTMLDivElement>(null);
 
@@ -278,9 +281,9 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
 
   return (
     <div className={cn('flex h-full min-h-0 flex-col bg-card', className)}>
-      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
-        <BookMarked className="h-3.5 w-3.5 text-accent/70" />
-        <span className="text-2xs font-semibold tracking-wide text-muted-foreground">书签</span>
+      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3">
+        <BookMarked className="h-3.5 w-3.5 text-accent" />
+        <span className="text-2xs font-semibold tracking-wider text-muted-foreground uppercase">书签</span>
         {/* 紧凑模式：把树收成图标条，给中栏让出宽度（侧边栏只有四百来像素） */}
         {collapsible && (
           <button
@@ -662,13 +665,17 @@ const TreeRow = memo(function TreeRow({
         setContextMenu(menu);
       }}
       className={cn(
-        'relative flex h-8 cursor-pointer items-center gap-2 rounded-sm pr-2.5 text-xs transition-colors',
+        'relative flex h-8 cursor-pointer items-center gap-1.5 rounded-md pr-2 text-xs transition-colors',
         selected ? 'bg-accent-muted font-medium text-accent' : 'text-foreground hover:bg-muted',
         active && 'ring-1 ring-inset ring-ring/40',
         dragOver && 'bg-accent-muted/50 ring-1 ring-inset ring-accent/50',
       )}
       style={{ paddingLeft: depth * 12 + 8 }}
     >
+      {/* 选中态左侧标记：和列表的选中行同一套语言，不靠整块高亮去"喊" */}
+      {selected && (
+        <span className="pointer-events-none absolute top-1.5 bottom-1.5 left-1 w-0.5 rounded-full bg-accent" />
+      )}
       {/* 书签行间拖放定位条（与选中指示条区分：半透明） */}
       {!isFolder && isDropTarget && dropTarget!.position === 'above' && (
         <span className="pointer-events-none absolute -top-0.5 right-1 left-1 h-0.5 rounded-full bg-accent/60" />
@@ -699,7 +706,10 @@ const TreeRow = memo(function TreeRow({
           只数直接子项（O(1)），不做递归——递归会让整棵树在每次渲染时变慢。 */}
       {isFolder && (node.children?.length ?? 0) > 0 && (
         <span
-          className="ml-auto shrink-0 pl-1 text-2xs tabular-nums text-muted-foreground/60"
+          className={cn(
+            'ml-auto shrink-0 rounded-md px-1.5 py-px text-2xs tabular-nums',
+            selected ? 'bg-card/70 text-accent' : 'bg-muted text-muted-foreground/70',
+          )}
           aria-label={`${node.children!.length} 项`}
         >
           {node.children!.length}
@@ -1189,6 +1199,7 @@ export function ContextMenuOverlay() {
         ...moveRows,
         'sep',
         { icon: ScanSearch, label: multiSelected ? ORGANIZE_LABEL.selection(selectedIds.length) : ORGANIZE_LABEL.analyze, onClick: analyzeAction },
+        { icon: Tag, label: multiSelected ? `添加标签（${selectedIds.length}）` : '标签…', onClick: () => { close(); if (node) openDialog({ kind: 'tags', bookmarkIds: multiSelected ? [...selectedIds] : [node.id] }); } },
         { icon: Pencil, label: '重命名', onClick: () => { close(); openDialog({ kind: 'rename', bookmarkId: node?.id ?? '' }); } },
         { icon: Trash2, label: multiSelected ? `删除所选（${selectedIds.length}）` : '删除', danger: true, onClick: deleteAction },
       ];

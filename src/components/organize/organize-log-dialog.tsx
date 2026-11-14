@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   CheckCircle2,
@@ -23,6 +23,7 @@ import {
 } from '@/lib/ai/organize-log';
 import { ORGANIZE_OPTOUT_KEY, type OptOutEntry } from '@/lib/ai/organize-optout';
 import { formatIsoDate, formatRelativeTime, getHost } from '@/lib/format';
+import { dayLabel } from '@/lib/bookmarks/timeline';
 import { cn } from '@/lib/utils';
 import { pushToast } from '@/lib/toast';
 import { Badge } from '@/components/ui/badge';
@@ -451,12 +452,19 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
           role="list"
           aria-label={onlyFailed ? '失败的整理记录' : '整理记录'}
         >
-          {visibleEntries.map((e) => {
+          {visibleEntries.map((e, idx) => {
             const failed = e.action === 'failed';
             const skipped = e.action === 'skipped';
+            const day = dayLabel(e.at);
+            const prevDay = idx > 0 ? dayLabel(visibleEntries[idx - 1]!.at) : null;
             return (
+              <Fragment key={e.id}>
+              {day !== prevDay && (
+                <div className="sticky top-0 z-10 border-b border-border/60 bg-muted/70 px-3 py-1 text-2xs font-medium text-muted-foreground backdrop-blur">
+                  {day}
+                </div>
+              )}
               <div
-                key={e.id}
                 role="listitem"
                 className={cn(
                   'flex items-start gap-2.5 border-b border-border/60 px-3 py-2.5 last:border-b-0',
@@ -521,6 +529,7 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
                   </button>
                 )}
               </div>
+              </Fragment>
             );
           })}
         </div>

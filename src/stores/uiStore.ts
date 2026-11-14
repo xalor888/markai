@@ -9,7 +9,9 @@ export type BookmarkDialog =
   | { kind: 'edit-url'; bookmarkId: string }
   | { kind: 'delete'; bookmarkId: string }
   | { kind: 'delete-many'; bookmarkIds: string[] }
-  | { kind: 'move'; bookmarkIds: string[] };
+  | { kind: 'move'; bookmarkIds: string[] }
+  | { kind: 'tags'; bookmarkIds: string[] }
+  | { kind: 'remove-tags'; bookmarkIds: string[] };
 
 /** 中栏主视图：文件夹列表 / 时间线（纯时间排序，只有书签个体） */
 

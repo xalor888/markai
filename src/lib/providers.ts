@@ -2,6 +2,7 @@
 
 import type { AIConfig, ReasoningEffort } from './ai/types';
 import { lookupActiveModel } from './models/runtime';
+import { sanitizeEffort } from './models/effort';
 
 /** Provider 预设描述 */
 export interface ProviderPreset {
@@ -95,19 +96,26 @@ export const PROVIDERS: ProviderPreset[] = [
   },
 ];
 
-/** 思考强度的合法档位（与 ai/types.ts 的 ReasoningEffort 同源） */
+/**
+ * 标准档位（与 ai/types.ts 的 ReasoningEffort 同源）。
+ *
+ * 只作为**建议**与排序参考，不是白名单：用户可以在设置页自定义任意合法 token，
+ * 见 `lib/models/effort.ts`。
+ */
 export const REASONING_EFFORTS = ['auto', 'none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
 
 /**
- * 归一化思考强度：未知值 → auto。
+ * 归一化思考强度：去空白/转小写/校验 token → 合法值原样保留，其余回落 auto。
  *
- * 为什么不「保留原值」：旧配置里可能躺着上游已删除的档位（或用户手改的乱码），
- * 原样发给服务商会得到 400 或静默忽略——两种结果都比「跟随模型」更糟。
+ * 历史版本只认白名单（目录快照里的 8 个值）。那条规则的问题是：
+ * 用户明确在设置页填了 `ultra`，读配置时却被静默改成 `auto`——
+ * **界面说会发、请求里没有**，比"上游不认"更难排查。
+ *
+ * 现在把"是否合法"交给同一道净化规则（长度/字符集），而不是交给目录快照。
+ * 真正发不发得通，由端点自己回答；设置页会把实际字段写在预览里。
  */
 export function normalizeReasoningEffort(value?: string | null): ReasoningEffort {
-  if (typeof value !== 'string') return 'auto';
-  const v = value.trim().toLowerCase();
-  return (REASONING_EFFORTS as readonly string[]).includes(v) ? (v as ReasoningEffort) : 'auto';
+  return (sanitizeEffort(value) || 'auto') as ReasoningEffort;
 }
 
 export function getPreset(id?: string): ProviderPreset | undefined {

@@ -59,7 +59,7 @@ export function reasoningControl(policy: ReasoningPolicy | null, modelId: string
     return {
       mode: 'unknown',
       options: [{ value: 'auto', label: '默认' }],
-      hint: `目录里没有「${modelId || '这个模型'}」的元数据，思考强度按默认发送（不指定档位）。`,
+      hint: `目录里没有「${modelId || '这个模型'}」的元数据：默认不指定档位；需要的话可以用「自定义」强制发送。`,
       efforts: [],
       interactive: false,
     };
@@ -68,7 +68,7 @@ export function reasoningControl(policy: ReasoningPolicy | null, modelId: string
     return {
       mode: 'unsupported',
       options: [{ value: 'auto', label: '默认' }],
-      hint: '该模型不支持思考，不会发送任何思考参数。',
+      hint: '目录显示该模型不支持思考，默认不发送任何思考参数；你仍可以用「自定义」强制指定。',
       efforts: [],
       interactive: false,
     };
@@ -77,7 +77,7 @@ export function reasoningControl(policy: ReasoningPolicy | null, modelId: string
     return {
       mode: 'toggle',
       options: toggleOptions(),
-      hint: '该模型只能开关思考，没有中间档。',
+      hint: '该模型只能开关思考，没有中间档；目录外的档位可以用「自定义」强制发送。',
       efforts: [],
       interactive: true,
     };
@@ -86,7 +86,7 @@ export function reasoningControl(policy: ReasoningPolicy | null, modelId: string
     return {
       mode: 'immutable',
       options: [{ value: 'auto', label: '自动' }],
-      hint: '该模型会自动思考，档位不可调（目录里没有可选项）。',
+      hint: '该模型会自动思考、档位不可调（目录里没有可选项）；可以用「自定义」强制指定。',
       efforts: [],
       interactive: false,
     };
@@ -94,7 +94,7 @@ export function reasoningControl(policy: ReasoningPolicy | null, modelId: string
   return {
     mode: 'effort',
     options: [{ value: 'auto', label: '默认' }, ...policy.efforts.map((e) => ({ value: e, label: effortLabel(e) }))],
-    hint: `该模型支持的档位：${policy.efforts.map(effortLabel).join(' · ')}。默认 = 按模型自己的推荐值。`,
+    hint: `该模型支持的档位：${policy.efforts.map(effortLabel).join(' · ')}。默认 = 按模型自己的推荐值；目录外的值可用「自定义」。`,
     efforts: policy.efforts,
     interactive: true,
   };

@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>MarkAI · Liquid Glass 效果原型</title>
+<style>
+  /* ── 与 src/assets/main.css 同名的 token，方便直接对照 ── */
+  :root {
+    --color-background: #f7f8fa;
+    --color-foreground: #101828;
+    --color-card: #ffffff;
+    --color-muted: #eef1f5;
+    --color-muted-foreground: #5a6572;
+    --color-border: #e4e8ee;
+    --color-accent: #4f46e5;
+    --color-accent-foreground: #ffffff;
+
+    --glass-surface: rgb(255 255 255 / 0.72);
+    --glass-border: rgb(16 24 40 / 0.1);
+    --glass-highlight: rgb(255 255 255 / 0.6);
+    --glass-blur: 12px;
+    --glass-saturate: 1.4;
+
+    /* 液态玻璃新增 token */
+    --liquid-tint: rgb(255 255 255 / 0.72);
+    --liquid-ring: 0px;
+    --liquid-rim-a: rgb(255 255 255 / 0.92);
+    --liquid-rim-b: rgb(255 255 255 / 0.1);
+    --liquid-sheen: rgb(255 255 255 / 0.5);
+    --liquid-blur: 8px;
+    --liquid-saturate: 1.45;
+    --liquid-grain: 0.045;
+    --liquid-shadow: 0 10px 28px -10px rgb(16 24 40 / 0.22);
+  }
+  .dark {
+    --color-background: #0e1116;
+    --color-foreground: #e3e8ef;
+    --color-card: #151a21;
+    --color-muted: #1c222b;
+    --color-muted-foreground: #98a3b2;
+    --color-border: #262d38;
+    --color-accent: #818cf8;
+    --color-accent-foreground: #10131a;
+
+    --glass-surface: rgb(21 26 33 / 0.72);
+    --glass-border: rgb(227 232 239 / 0.16);
+    --glass-highlight: rgb(255 255 255 / 0.08);
+
+    --liquid-tint: rgb(21 26 33 / 0.74);
+    --liquid-rim-a: rgb(255 255 255 / 0.34);
+    --liquid-rim-b: rgb(255 255 255 / 0.04);
+    --liquid-sheen: rgb(255 255 255 / 0.16);
+    --liquid-shadow: 0 10px 28px -10px rgb(0 0 0 / 0.6);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--color-background);
+    color: var(--color-foreground);
+    font: 13px/1.5 -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    user-select: none;
+  }
+  .shell { max-width: 420px; margin: 0 auto; padding: 12px 12px 48px; }
+  .bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 2px 2px 10px; }
+  .brand { font-weight: 800; font-size: 15px; letter-spacing: -0.01em; }
+  .bar-actions { display: flex; gap: 6px; }
+  .chip {
+    border: 1px solid var(--color-border); background: var(--color-card); color: var(--color-foreground);
+    border-radius: 6px; padding: 4px 8px; font-size: 11px; cursor: pointer; font-family: inherit;
+  }
+  .chip[aria-pressed="true"] { border-color: var(--color-accent); color: var(--color-accent); }
+
+  .caption { display: flex; align-items: center; gap: 6px; margin: 14px 2px 0; font-size: 10.5px; font-weight: 700;
+    letter-spacing: 0.05em; text-transform: uppercase; color: var(--color-muted-foreground); }
+  .caption::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--color-accent); }
+
+  .stage { position: relative; margin-top: 8px; height: 300px; overflow: hidden; border-radius: 14px;
+    border: 1px solid var(--color-border); background: var(--color-background); }
+  .list { display: flex; flex-direction: column; gap: 2px; padding: 8px; }
+  .row { display: flex; align-items: center; gap: 8px; padding: 8px 9px; border-radius: 8px;
+    background: var(--color-card); border: 1px solid var(--color-border); }
+  .favicon { width: 18px; height: 18px; border-radius: 5px; flex: 0 0 auto; display: grid; place-items: center;
+    color: #fff; font-size: 10px; font-weight: 700; }
+  .row-title { font-size: 12.5px; font-weight: 600; }
+  .row-sub { font-size: 10.5px; color: var(--color-muted-foreground); }
+  .tags { display: flex; gap: 4px; margin-top: 2px; }
+  .tag { font-size: 9.5px; line-height: 14px; padding: 0 5px; border-radius: 999px; border: 1px solid; }
+  .tag.blue { color: #1d4ed8; border-color: #bfdbfe; background: #eff6ff; }
+  .tag.green { color: #15803d; border-color: #bbf7d0; background: #f0fdf4; }
+  .tag.amber { color: #b45309; border-color: #fde68a; background: #fffbeb; }
+  .dark .tag.blue { color: #93c5fd; border-color: #1e3a8a; background: #172554; }
+  .dark .tag.green { color: #6ee7b7; border-color: #14532d; background: #052e16; }
+  .dark .tag.amber { color: #fcd34d; border-color: #78350f; background: #451a03; }
+
+  .scrim { position: absolute; inset: 0; background: rgb(0 0 0 / 0.3); }
+  .dialog { position: absolute; left: 24px; right: 24px; top: 104px; border-radius: 10px; overflow: hidden; }
+  .dialog-body { position: relative; padding: 12px; }
+  .dialog-title { margin: 0 0 3px; font-size: 12.5px; font-weight: 600; color: var(--color-foreground); }
+  .dialog-text { margin: 0; font-size: 11px; color: var(--color-muted-foreground); }
+  .dialog-actions { display: flex; gap: 6px; justify-content: flex-end; margin-top: 10px; }
+  .btn { border-radius: 5px; border: 1px solid var(--color-border); background: var(--color-card);
+    color: var(--color-foreground); padding: 3px 9px; font-size: 11px; font-family: inherit; }
+  .btn.primary { background: var(--color-accent); color: var(--color-accent-foreground); border-color: transparent;
+    font-weight: 600; }
+
+  /* ── A：现状玻璃（对照） ── */
+  .glass-current {
+    background: var(--glass-surface);
+    border: 1px solid var(--glass-border);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturate));
+    box-shadow: inset 0 1px 0 var(--glass-highlight), var(--liquid-shadow);
+  }
+
+  /* ── B：液态玻璃 ──
+     外框只负责 backdrop-filter（折射）；tint 满铺，边缘用 1px 高光描边 + 内阴影压边。 */
+  .glass-liquid {
+    /* 不在这里写 position：调用方（.dialog / .palette）已经是 absolute，
+       在这里写 relative 会覆盖掉它，把浮层拽回文档流。 */
+    isolation: isolate;
+    border-radius: inherit;
+    backdrop-filter: blur(var(--liquid-blur)) saturate(var(--liquid-saturate));
+    box-shadow: inset 0 1px 0 var(--glass-highlight), var(--liquid-shadow);
+  }
+  .glass-liquid[data-refract="on"] {
+    backdrop-filter: var(--liquid-filter, none) blur(var(--liquid-blur)) saturate(var(--liquid-saturate));
+  }
+  .glass-liquid__tint {
+    position: absolute; inset: var(--liquid-ring); border-radius: inherit;
+    background: var(--liquid-tint); pointer-events: none;
+    /* 上亮下暗的双色描边 + 边缘压色：白底上单靠白色高光是看不见的 */
+    box-shadow:
+      inset 0 1px 0 var(--glass-highlight),
+      inset 0 -1px 0 rgb(16 24 40 / 0.06),
+      0 0 0 1px rgb(16 24 40 / 0.06),
+      inset 0 0 10px 1px color-mix(in srgb, var(--liquid-tint) 70%, transparent);
+  }
+  .glass-liquid__sheen {
+    position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+    background:
+      radial-gradient(120% 90% at var(--mx, 28%) var(--my, -25%),
+        color-mix(in srgb, var(--liquid-sheen) 100%, transparent), transparent 62%),
+      linear-gradient(160deg, color-mix(in srgb, var(--liquid-sheen) 40%, transparent), transparent 48%);
+  }
+  .glass-liquid__rim {
+    position: absolute; inset: 0; border-radius: inherit; pointer-events: none; padding: 1px;
+    background: linear-gradient(150deg, var(--liquid-rim-a), var(--liquid-rim-b) 40%, var(--liquid-rim-b) 60%, var(--liquid-rim-a));
+    -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+    -webkit-mask-composite: xor;
+    mask: linear-gradient(#000 0 0) content-box exclude, linear-gradient(#000 0 0);
+  }
+  .glass-liquid__grain {
+    position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+    opacity: var(--liquid-grain); mix-blend-mode: overlay; background-size: 110px 110px;
+    background-image: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='110' height='110'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='110' height='110' filter='url(%23n)' opacity='.9'/%3E%3C/svg%3E");
+  }
+  /* Chrome 139+ 的连续曲率；旧浏览器只剩 border-radius，不报错 */
+  @supports (corner-shape: squircle) {
+    .dialog, .palette { corner-shape: squircle; }
+  }
+
+  /* ── 命令面板 ── */
+  .palette { position: absolute; left: 20px; right: 20px; top: 92px; border-radius: 12px; overflow: hidden; }
+  .palette-body { position: relative; padding: 10px 12px; }
+  .palette-head { display: flex; align-items: center; gap: 8px; }
+  .palette-head input {
+    flex: 1; min-width: 0; background: transparent; border: 0; outline: 0;
+    color: var(--color-foreground); font-size: 12px; font-family: inherit;
+  }
+  .key { font-size: 10px; color: var(--color-muted-foreground); border: 1px solid var(--color-border);
+    border-radius: 4px; padding: 0 4px; }
+  .palette-divider { height: 1px; background: var(--color-border); margin: 8px -4px 6px; }
+  .suggestion { font-size: 11px; color: var(--color-muted-foreground); padding: 4px 6px; border-radius: 5px; }
+  .suggestion.active { background: var(--color-accent); color: var(--color-accent-foreground); }
+
+  .foot { margin: 14px 2px 0; font-size: 11px; line-height: 1.65; color: var(--color-muted-foreground); }
+  .foot code { font-size: 10.5px; }
+  .support { display: inline-flex; align-items: center; gap: 4px; }
+  #defs { position: absolute; width: 0; height: 0; overflow: hidden; }
+</style>
+</head>
+<body>
+<svg id="defs" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg>
+
+<div class="shell">
+  <div class="bar">
+    <div class="brand">MarkAI · Liquid Glass</div>
+    <div class="bar-actions">
+      <button class="chip" id="theme" aria-pressed="false">深色</button>
+      <button class="chip" id="compare" aria-pressed="false">对比：A</button>
+      <button class="chip" id="refract" aria-pressed="true">折射：开</button>
+    </div>
+  </div>
+
+  <div class="caption">对话框 · 同一位置 A/B 切换</div>
+  <div class="stage">
+    <div class="list" id="list-dialog"></div>
+    <div class="scrim"></div>
+
+    <!-- A：现状 -->
+    <div class="dialog glass-current" id="dialog-a">
+      <div class="dialog-body">
+        <h3 class="dialog-title">确认删除 3 个失效书签？</h3>
+        <p class="dialog-text">会从收藏夹移除所选条目，10 秒内可撤销。</p>
+        <div class="dialog-actions">
+          <button class="btn">取消</button><button class="btn primary">删除</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- B：液态 -->
+    <div class="dialog glass-liquid" id="dialog-b" data-refract="on" hidden>
+      <div class="glass-liquid__tint"></div>
+      <div class="glass-liquid__sheen"></div>
+      <div class="glass-liquid__grain"></div>
+      <div class="glass-liquid__rim"></div>
+      <div class="dialog-body">
+        <h3 class="dialog-title">确认删除 3 个失效书签？</h3>
+        <p class="dialog-text">会从收藏夹移除所选条目，10 秒内可撤销。</p>
+        <div class="dialog-actions">
+          <button class="btn">取消</button><button class="btn primary">删除</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="caption">命令面板 · 折射 + 指针高光</div>
+  <div class="stage">
+    <div class="list" id="list-palette"></div>
+    <div class="scrim" style="background: rgb(16 24 40 / 0.25); backdrop-filter: blur(2px)"></div>
+    <div class="palette glass-liquid" id="palette" data-refract="on">
+      <div class="glass-liquid__tint"></div>
+      <div class="glass-liquid__sheen"></div>
+      <div class="glass-liquid__grain"></div>
+      <div class="glass-liquid__rim"></div>
+      <div class="palette-body">
+        <div class="palette-head">
+          <span aria-hidden="true">⌘</span>
+          <input placeholder="搜索书签、标签或命令…" />
+          <span class="key">Esc</span>
+        </div>
+        <div class="palette-divider"></div>
+        <div class="suggestion active">整理全部书签</div>
+        <div class="suggestion">按标签移动…</div>
+        <div class="suggestion">清理失效链接</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="foot">
+    镜片：<code>backdrop-filter: url(#…) blur(8px) saturate(1.45)</code>。位移图由圆角矩形 SDF 法线生成，只在 6~8px 边带折射；中央保持 72~74% 底色，满足 AA。<br>
+    仅 Chromium 渲染：<span class="support" id="support">检测中</span>。Firefox / Safari 自动退回左侧 A 的 CSS 玻璃，不降可读性。
+  </div>
+</div>
+
+<script>
+/* ── 演示数据 ── */
+const FAVICONS = ['#4f46e5', '#15803d', '#b45309', '#be123c', '#6d28d9', '#0e7490'];
+const TAGS = [['blue', '设计'], ['green', '阅读'], ['amber', '待整理']];
+function fillList(id, count, offset) {
+  const host = document.getElementById(id);
+  for (let i = 0; i < count; i++) {
+    const color = FAVICONS[(i + offset) % FAVICONS.length];
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML =
+      '<span class="favicon" style="background:' + color + '">' + (i + 1) + '</span>' +
+      '<span style="min-width:0"><span class="row-title">设计灵感 · 收藏 ' + (i + 1) + '</span>' +
+      '<div class="row-sub">example.com/notes/' + (i + 1) + '</div>' +
+      '<div class="tags">' + TAGS.map(function (t) {
+        return '<span class="tag ' + t[0] + '">' + t[1] + '</span>';
+      }).join('') + '</div></span>';
+    host.appendChild(row);
+  }
+}
+fillList('list-dialog', 7, 0);
+fillList('list-palette', 9, 3);
+
+/* ── 位移图：圆角矩形 SDF 法线，只在边带产生折射 ──
+   半分辨率生成（长边封顶 320），双线性放大足够平滑，单次 <1.5ms。 */
+function roundedRectSDF(x, y, w, h, r) {
+  const hw = w / 2, hh = h / 2;
+  const qx = Math.abs(x - hw) - hw + r;
+  const qy = Math.abs(y - hh) - hh + r;
+  return Math.min(Math.max(qx, qy), 0) + Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) - r;
+}
+
+function displacementMap(w, h, radius, bezel) {
+  const scale = Math.min(1, 320 / Math.max(w, h));
+  const mw = Math.max(8, Math.round(w * scale));
+  const mh = Math.max(8, Math.round(h * scale));
+  const r = radius * scale;
+  const bez = bezel * scale;
+
+  const canvas = document.createElement('canvas');
+  canvas.width = mw;
+  canvas.height = mh;
+  const ctx = canvas.getContext('2d');
+  const image = ctx.createImageData(mw, mh);
+  const data = image.data;
+
+  for (let y = 0; y < mh; y++) {
+    for (let x = 0; x < mw; x++) {
+      const s = roundedRectSDF(x + 0.5, y + 0.5, mw, mh, r);
+      let nx = 0, ny = 0;
+      if (s < 0) {
+        const e = 0.8;
+        const gx = roundedRectSDF(x + 0.5 + e, y + 0.5, mw, mh, r) - roundedRectSDF(x + 0.5 - e, y + 0.5, mw, mh, r);
+        const gy = roundedRectSDF(x + 0.5, y + 0.5 + e, mw, mh, r) - roundedRectSDF(x + 0.5, y + 0.5 - e, mw, mh, r);
+        const len = Math.hypot(gx, gy) || 1;
+        nx = gx / len;
+        ny = gy / len;
+      }
+      const t = Math.min(1, Math.max(0, -s / bez));
+      const k = t * t * (3 - 2 * t);
+      const i = (y * mw + x) * 4;
+      data[i] = Math.round(128 - nx * k * 127);
+      data[i + 1] = Math.round(128 - ny * k * 127);
+      data[i + 2] = 128;
+      data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(image, 0, 0);
+  return { url: canvas.toDataURL(), w: mw, h: mh };
+}
+
+const supportsRefraction = CSS.supports('backdrop-filter', 'url(#probe)');
+
+/* 每个元素一个 filter：尺寸不同，位移图不能共用。 */
+function buildFilter(el, id, options) {
+  const opts = Object.assign({ radius: 12, bezel: 16, scale: 26, aberration: 0 }, options);
+  const w = el.offsetWidth;
+  const h = el.offsetHeight;
+  if (w < 8 || h < 8) return;
+
+  const map = displacementMap(w, h, opts.radius, opts.bezel);
+  const mapEl =
+    '<feImage href="' + map.url + '" x="0" y="0" width="' + w + '" height="' + h + '" preserveAspectRatio="none" result="map"/>';
+
+  const channels = [
+    ['r', '1 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 1 0'],
+    ['g', '0 0 0 0 0  0 1 0 0 0  0 0 0 0 0  0 0 0 1 0'],
+    ['b', '0 0 0 0 0  0 0 0 0 0  0 0 1 0 0  0 0 0 1 0']
+  ];
+  const diff = opts.aberration;
+  let chain;
+  if (diff > 0) {
+    /* 三通道不同位移量 → 边缘色散（只在大面板上开，代价是 3 次位移） */
+    chain = channels.map(function (c, i) {
+      const s = opts.scale - i * diff;
+      return '<feDisplacementMap in="SourceGraphic" in2="map" scale="' + s +
+        '" xChannelSelector="R" yChannelSelector="G" result="d' + c[0] + '"/>' +
+        '<feColorMatrix in="d' + c[0] + '" type="matrix" values="' + c[1] + '" result="' + c[0] + '"/>';
+    }).join('') +
+      '<feBlend in="r" in2="g" mode="screen" result="rg"/><feBlend in="rg" in2="b" mode="screen"/>';
+  } else {
+    /* 单次位移：不拆通道，颜色保持原样 */
+    chain = '<feDisplacementMap in="SourceGraphic" in2="map" scale="' + opts.scale +
+      '" xChannelSelector="R" yChannelSelector="G"/>';
+  }
+
+  const markup =
+    '<filter id="' + id + '" x="0%" y="0%" width="100%" height="100%" color-interpolation-filters="sRGB">' +
+    mapEl + chain + '</filter>';
+
+  document.getElementById('defs').insertAdjacentHTML('beforeend', markup);
+  el.style.setProperty('--liquid-filter', 'url(#' + id + ')');
+}
+
+function liquidParams(el, radius) {
+  /* 小面板 / 文本面板：位移更克制，避免把背景里的色块拉成竖条 */
+  const small = el.classList.contains('palette');
+  return small
+    ? { radius: radius, bezel: 7, scale: 6, aberration: 2 }
+    : { radius: radius, bezel: 7, scale: 6, aberration: 0 };
+}
+
+let counter = 0;
+const liquids = [];
+function ensureBuilt(item) {
+  if (!supportsRefraction) return;
+  if (!item.el.offsetWidth || !item.el.offsetHeight) return;
+  if (document.getElementById(item.id)) return;
+  buildFilter(item.el, item.id, liquidParams(item.el, item.radius));
+}
+function install(root) {
+  root.querySelectorAll('.glass-liquid').forEach(function (el) {
+    const id = 'markai-lg-' + (++counter);
+    const radius = parseFloat(getComputedStyle(el).borderTopLeftRadius) || 12;
+    liquids.push({ el: el, id: id, radius: radius });
+    if (supportsRefraction) buildFilter(el, id, liquidParams(el, radius));
+    else el.dataset.refract = 'off';
+  });
+}
+
+install(document);
+
+/* 尺寸变化才重建，滚动/指针都不触发 filter 重算。 */
+let resizeTimer = 0;
+const observer = new ResizeObserver(function () {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(function () {
+    document.getElementById('defs').innerHTML = '';
+    liquids.forEach(ensureBuilt);
+  }, 140);
+});
+liquids.forEach(function (item) { observer.observe(item.el); });
+
+/* 指针高光：只写两个 CSS 变量，不跑 rAF。 */
+document.querySelectorAll('.glass-liquid').forEach(function (el) {
+  el.addEventListener('pointermove', function (event) {
+    const box = el.getBoundingClientRect();
+    el.style.setProperty('--mx', ((event.clientX - box.left) / box.width) * 100 + '%');
+    el.style.setProperty('--my', ((event.clientY - box.top) / box.height) * 100 + '%');
+  });
+});
+
+/* ── 控件 ── */
+const themeBtn = document.getElementById('theme');
+const compareBtn = document.getElementById('compare');
+const refractBtn = document.getElementById('refract');
+const dialogA = document.getElementById('dialog-a');
+const dialogB = document.getElementById('dialog-b');
+
+themeBtn.addEventListener('click', function () {
+  document.documentElement.classList.toggle('dark');
+  const dark = document.documentElement.classList.contains('dark');
+  themeBtn.textContent = dark ? '浅色' : '深色';
+  themeBtn.setAttribute('aria-pressed', String(dark));
+});
+
+let liquidVisible = false;
+function setVariant(isLiquid) {
+  liquidVisible = isLiquid;
+  dialogA.hidden = isLiquid;
+  dialogB.hidden = !isLiquid;
+  /* 隐藏时尺寸为 0，滤镜要等它可见后再建 */
+  if (isLiquid) requestAnimationFrame(function () { liquids.forEach(ensureBuilt); });
+  compareBtn.textContent = '对比：' + (isLiquid ? 'B' : 'A');
+  compareBtn.setAttribute('aria-pressed', String(isLiquid));
+}
+compareBtn.addEventListener('click', function () { setVariant(!liquidVisible); });
+
+refractBtn.addEventListener('click', function () {
+  const on = refractBtn.getAttribute('aria-pressed') !== 'true';
+  refractBtn.setAttribute('aria-pressed', String(on));
+  refractBtn.textContent = '折射：' + (on ? '开' : '关');
+  document.querySelectorAll('.glass-liquid').forEach(function (el) { el.dataset.refract = on ? 'on' : 'off'; });
+});
+
+/* 截图/演示直达：#b 显示液态，#dark 深色 */
+if (location.hash.indexOf('dark') >= 0) { document.documentElement.classList.add('dark'); themeBtn.textContent = '浅色'; themeBtn.setAttribute('aria-pressed','true'); }
+if (location.hash.indexOf('b') >= 0 && location.hash.indexOf('dark') < 0) setVariant(true);
+if (location.hash.indexOf('b') >= 0 && location.hash.indexOf('dark') >= 0) setVariant(true);
+document.getElementById('support').textContent = supportsRefraction
+  ? '支持（SVG 位移可渲染）'
+  : '不支持，已回退 CSS 玻璃';
+</script>
+</body>
+</html>

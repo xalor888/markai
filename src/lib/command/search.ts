@@ -21,6 +21,8 @@ export interface CommandItem {
   url?: string;
   /** 动作才有 */
   run?: () => void;
+  /** 动作图标的轻量标记（纯字符串，不把 React 组件塞进数据层） */
+  iconKey?: string;
 }
 
 /** 各匹配方式的得分：越"贴近"越高 */

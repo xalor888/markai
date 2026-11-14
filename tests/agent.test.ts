@@ -27,11 +27,31 @@ import type { AIConfig, ChatInbound, ChatMessage, ChatOutbound, DeletionProposal
 import { getModelContextWindow, normalizeReasoningEffort, resolveConfig } from '../src/lib/providers';
 import { activeCatalogSize, lookupActiveModel, setActiveCatalog } from '../src/lib/models/runtime';
 import { z } from 'zod';
-import { flattenBookmarks, sortTimeline, groupByDay, filterTimeline, dayLabel, pageGroups } from '../src/lib/bookmarks/timeline';
+import { flattenBookmarks, sortTimeline, groupByDay, groupByDomain, filterTimeline, filterTimelineByRange, dayLabel, pageGroups, uniqueUrls } from '../src/lib/bookmarks/timeline';
+import { analyzeLibrary, describeDuplicates, normalizeUrlForDup, pickDuplicateKeeper } from '../src/lib/bookmarks/insights';
+import { predictFolder } from '../src/lib/bookmarks/predict';
+import { buildWeeklyReview, weekKeyOf, weekStartOf } from '../src/lib/bookmarks/weekly-review';
+import {
+  addTags,
+  collectTagCounts,
+  idsForTag,
+  MAX_TAGS_PER_BOOKMARK,
+  normalizeTag,
+  normalizeTagList,
+  pruneTagMap,
+  deleteTag,
+  renameTag,
+} from '../src/lib/bookmarks/tags';
+import { colorForTag, colorVarOf, normalizeColorId, TAG_COLORS } from '../src/lib/bookmarks/tag-colors';
+import { buildTagBackup, mergeTagBackup, parseTagBackup } from '../src/lib/bookmarks/tag-backup';
 import { registrableDomain } from '../src/lib/bookmarks/domain';
 import { createDelayedOpen } from '../src/lib/bookmarks/delayed-open';
 import { buildRequestHeaders, getStableSessionId, parseCustomHeaders } from '../src/lib/ai/request-headers';
 import { groupCommands, SCORE, scoreItem, searchCommands, type CommandItem } from '../src/lib/command/search';
+import { buildPaletteGroups } from '../src/lib/command/palette';
+import { normalizeSearchQuery, reduceSearchHistory, SEARCH_HISTORY_LIMIT } from '../src/lib/search/history';
+import { filterSlashCommands, SLASH_COMMANDS } from '../src/lib/chat/slash';
+import { RECENT_LIMIT, reduceRecent, type RecentEntry } from '../src/lib/command/recent';
 import { analyzeBookmarks, runHealthCheck } from '../src/lib/health';
 import {
   canonicalProviderId,
@@ -48,20 +68,8 @@ import {
 import type { ReasoningPolicy } from '../src/lib/models/types';
 import { effortLabel, reasoningControl, toggleOptions } from '../src/lib/models/control';
 import { reasoningPayload } from '../src/lib/models/request';
+import { describeEffortRequest, effortInputIssue, sanitizeEffort } from '../src/lib/models/effort';
 import { AA_NORMAL, composite, contrastRatio, parseCssColor, parseHex, relativeLuminance } from '../src/lib/ui/contrast';
-import {
-  applyLid,
-  consumeBlink,
-  EYE_SHAPES,
-  gazeOffset,
-  LID_MAX,
-  LID_MIN,
-  lerpPoly,
-  queueBlink,
-  shapeOf,
-} from '../src/lib/pet/eyes';
-import { breathScale, hasRunningTool, lookOf, shouldCelebrate, stateFromAgent, type PetState } from '../src/lib/pet/state';
-import { bounceOff, isResting, springStep, squash, tiltDeg } from '../src/lib/pet/physics';
 import {
   DEFAULT_CHATTER_CONFIG,
   INTERRUPT_MUTE_MS,
@@ -8329,6 +8337,29 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.equal(oldest[oldest.length - 1]!.id, 'b4');
     });
 
+    ok('最近打开：按 dateLastUsed 倒序，从未打开的排最后', () => {
+      const recentItems = [
+        { id: 'a', title: 'A', url: 'https://a.example', path: '', dateAdded: NOW - 9e6, dateLastUsed: NOW },
+        { id: 'b', title: 'B', url: 'https://b.example', path: '', dateAdded: NOW, dateLastUsed: NOW - 864e5 },
+        { id: 'c', title: 'C', url: 'https://c.example', path: '', dateAdded: NOW, dateLastUsed: 0 },
+      ];
+      assert.deepEqual(
+        sortTimeline(recentItems, 'recent').map((i) => i.id),
+        ['a', 'b', 'c'],
+        '收藏时间最旧但今天打开过的 a 应排第一；从未打开的 c 最后',
+      );
+    });
+
+    ok('最近打开分组：日期头按 dateLastUsed，而不是收藏时间', () => {
+      const recentItems = [
+        { id: 'a', title: 'A', url: 'https://a.example', path: '', dateAdded: NOW - 9e6, dateLastUsed: NOW },
+        { id: 'b', title: 'B', url: 'https://b.example', path: '', dateAdded: NOW, dateLastUsed: NOW - 864e5 },
+        { id: 'c', title: 'C', url: 'https://c.example', path: '', dateAdded: NOW, dateLastUsed: 0 },
+      ];
+      const groups = groupByDay(sortTimeline(recentItems, 'recent'), NOW, (i) => i.dateLastUsed || 0);
+      assert.deepEqual(groups.map((g) => g.label), ['今天', '昨天', '未知时间']);
+    });
+
     ok('按天分组：今天 / 昨天 / 更早 / 未知时间', () => {
       const groups = groupByDay(newest, NOW);
       assert.equal(groups[0]!.label, '今天');
@@ -8348,7 +8379,397 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.deepEqual(filterTimeline(flat, '前端').map((i) => i.id), ['b2']);
       assert.equal(filterTimeline(flat, '   ').length, flat.length);
     });
+
+    ok('时间范围：今天 / 7 天 / 30 天 / 全部，未知时间只在全部里', () => {
+      assert.deepEqual(filterTimelineByRange(flat, 'today', NOW).map((i) => i.id), ['b2']);
+      assert.deepEqual(filterTimelineByRange(flat, '7d', NOW).map((i) => i.id).sort(), ['b1', 'b2']);
+      assert.deepEqual(filterTimelineByRange(flat, '30d', NOW).map((i) => i.id).sort(), ['b1', 'b2']);
+      assert.equal(filterTimelineByRange(flat, 'all', NOW).length, flat.length, '未知时间不能因为筛选被静默丢掉');
+    });
+
+    ok('按域名聚合：www 归一、按条数降序、组内保持时间顺序', () => {
+      const items = [
+        { id: 'x1', title: 'A', url: 'https://github.com/a', dateAdded: 3, path: '' },
+        { id: 'x2', title: 'B', url: 'https://www.github.com/b', dateAdded: 2, path: '' },
+        { id: 'x3', title: 'C', url: 'https://react.dev', dateAdded: 1, path: '' },
+        { id: 'x4', title: 'D', url: 'not-a-url', dateAdded: 0, path: '' },
+      ] as unknown as Parameters<typeof groupByDomain>[0];
+      const groups = groupByDomain(items);
+      assert.equal(groups[0]!.label, 'github.com', '条数最多的域名排第一');
+      assert.deepEqual(
+        groups.slice(1).map((g) => g.label).sort(),
+        ['react.dev', '其他站点'].sort(),
+        '同数量域名按名称排序（中文 locale 下「其他站点」排在 react 前是允许的）',
+      );
+      assert.deepEqual(groups[0]!.items.map((i) => i.id), ['x1', 'x2'], '组内保持时间顺序');
+      assert.equal(groups[0]!.total, 2);
+    });
+
+    ok('域名聚合打开全部：URL 去重、上限 25', () => {
+      const items = [
+        { id: 'a', title: 'A', url: 'https://github.com/a', path: '', dateAdded: 1 },
+        { id: 'b', title: 'B', url: 'https://github.com/a', path: '', dateAdded: 2 },
+        { id: 'c', title: 'C', url: 'https://github.com/c', path: '', dateAdded: 3 },
+      ] as unknown as Parameters<typeof uniqueUrls>[0];
+      assert.deepEqual(uniqueUrls(items), ['https://github.com/a', 'https://github.com/c']);
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      const src = readFileSync(resolve(srcDir, 'components/bookmark-list/timeline-panel.tsx'), 'utf8');
+      assert.ok(src.includes('打开全部'), '域名组头应有打开全部入口');
+      assert.match(src, /uniqueUrls\(/, '打开前必须去重');
+      assert.match(src, /slice\(0, 25\)/, '一次最多 25 个，防刷屏');
+    });
+
+    ok('时间线面板：范围切换与筛选接线都在', () => {
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      const src = readFileSync(resolve(srcDir, 'components/bookmark-list/timeline-panel.tsx'), 'utf8');
+      assert.match(src, /filterTimelineByRange\(/, '面板必须真的用上范围过滤');
+      for (const label of ['今天', '7 天', '30 天', '全部']) {
+        assert.ok(src.includes(label), `缺少时间范围选项「${label}」`);
+      }
+      assert.match(src, /groupByDomain\(/, '面板必须真的用上域名聚合');
+      assert.ok(src.includes('按域名'), '缺少域名聚合开关');
+      assert.ok(src.includes('最近打开'), '缺少最近打开排序');
+      assert.match(src, /dateLastUsed/, '最近打开必须用真实的使用时间');
+      assert.match(src, /groupByDay\(/, '按天分组要支持传入时间口径');
+    });
   }
+
+  /* ── T75B: 书签库洞察（概览页的数据层） ── */
+  console.log('\n[T75B] 书签库洞察');
+  {
+    const NOW = new Date('2026-11-09T15:00:00+08:00').getTime();
+    const d = new Date(NOW);
+    d.setHours(9, 0, 0, 0);
+    const todayAt9 = d.getTime();
+    const yesterdayAt9 = todayAt9 - 24 * 60 * 60 * 1000;
+    const tree = [
+      {
+        id: '1',
+        title: '书签栏',
+        children: [
+          {
+            id: 'f-tech', parentId: '1', title: '技术',
+            children: [
+              { id: 'b1', parentId: 'f-tech', title: 'MDN', url: 'https://developer.mozilla.org/a?utm_source=newsletter', dateAdded: todayAt9 },
+              { id: 'f-empty', parentId: 'f-tech', title: '空文件夹', children: [] },
+              {
+                id: 'f-front', parentId: 'f-tech', title: '前端',
+                children: [
+                  { id: 'b2', parentId: 'f-front', title: 'React', url: 'https://react.dev/b', dateAdded: todayAt9 },
+                  { id: 'b3', parentId: 'f-front', title: 'React（重复）', url: 'https://react.dev/b#top', dateAdded: yesterdayAt9 },
+                ],
+              },
+            ],
+          },
+          { id: 'b4', parentId: '1', title: 'Example', url: 'https://example.com/x', dateAdded: yesterdayAt9 },
+          { id: 'b5', parentId: '1', title: 'Example（重复）', url: 'https://example.com/x/?utm_campaign=1', dateAdded: yesterdayAt9 },
+        ],
+      },
+      { id: '2', title: '其他书签', children: [] },
+    ] as unknown as chrome.bookmarks.BookmarkTreeNode[];
+
+    const ins = analyzeLibrary(tree, NOW);
+    ok('洞察：总数 / 文件夹 / 空文件夹 / 深度', () => {
+      assert.equal(ins.total, 5, '根节点不是书签，不参与总数');
+      assert.equal(ins.folders, 3, '根节点不进"文件夹"计数（与健康检查同口径）');
+      assert.equal(ins.emptyFolders, 1, '只数真正的空文件夹，空的根不算');
+      assert.equal(ins.maxDepth, 2, '技术=1 / 前端=2');
+    });
+
+    ok('洞察：今天与最近 7 天新增', () => {
+      assert.equal(ins.addedToday, 2, '只有 dateAdded >= 今日 0 点的算今天');
+      assert.equal(ins.added7d, 5, '昨天仍在 7 天窗口内');
+      assert.equal(analyzeLibrary(tree, NOW + 8 * 24 * 3600 * 1000).added7d, 0, '8 天后全部滑出窗口');
+    });
+
+    ok('洞察：最近 7 天按日分桶（含 0 的日期，和按天相加等于 added7d）', () => {
+      assert.equal(ins.dailyAdded.length, 7);
+      assert.equal(ins.dailyAdded[6]!.count, ins.addedToday, '最后一格是今天');
+      assert.equal(ins.dailyAdded[5]!.count, 3, '昨天应有 3 条（b1/b3/b5 中在窗口内的）');
+      assert.equal(
+        ins.dailyAdded.reduce((n, d) => n + d.count, 0),
+        ins.added7d,
+        '日桶之和必须等于 7 天总数，不能漏计',
+      );
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      assert.match(
+        readFileSync(resolve(srcDir, 'components/bookmark-list/overview-panel.tsx'), 'utf8'),
+        /daily-trend/,
+        '概览缺少趋势图锚点',
+      );
+    });
+
+    ok('洞察：重复按 URL 归一化分组（锚点 / utm / 末尾斜杠不制造假重复）', () => {
+      assert.equal(ins.duplicateGroups, 2, 'react 一组 + example 一组；MDN 的 utm 只有一条');
+      assert.equal(ins.duplicateExtra, 2, '每组各多 1 条');
+      const react = ins.duplicates.find((g) => g.items.some((i) => i.id === 'b2'))!;
+      assert.deepEqual(react.items.map((i) => i.id).sort(), ['b2', 'b3']);
+      assert.equal(react.items[0]!.path, '书签栏 / 技术 / 前端', '路径要算到具体文件夹');
+    });
+
+    ok('洞察：深层嵌套只统计第 4 层及更深，样本带完整路径', () => {
+      const deepTree = [
+        {
+          id: '1',
+          title: '书签栏',
+          children: [
+            {
+              id: 'a', title: 'a', children: [
+                {
+                  id: 'b', title: 'b', children: [
+                    {
+                      id: 'c', title: 'c', children: [
+                        { id: 'deep', title: 'Deep', url: 'https://deep.example/', dateAdded: NOW },
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        },
+      ] as unknown as chrome.bookmarks.BookmarkTreeNode[];
+      const deep = analyzeLibrary(deepTree, NOW);
+      assert.equal(deep.deepBookmarks, 1);
+      assert.equal(deep.deepSamples[0]!.depth, 4, 'a=1 / b=2 / c=3 / 书签=4');
+      assert.equal(deep.deepSamples[0]!.path, '书签栏 / a / b / c');
+      assert.equal(analyzeLibrary(tree, NOW).deepBookmarks, 0, '2 层不算深层');
+    });
+
+    ok('体检对话框：深层嵌套、死链说明与一键修复计划', () => {
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      const src = readFileSync(resolve(srcDir, 'components/bookmark-list/library-insights-dialog.tsx'), 'utf8');
+      assert.ok(src.includes('深层嵌套'), '缺少深层嵌套小节');
+      assert.ok(src.includes('死链检查'), '缺少死链检查说明');
+      assert.match(src, /check_urls_bulk/, '死链检查要交给真实工具，不在本地假装');
+      assert.ok(src.includes('生成修复计划'), '缺少批量修复计划');
+      assert.match(src, /fixAllPrompt/, '计划要基于体检数字生成');
+      assert.match(src, /deadLimit/, '死链检查必须限制条数');
+      assert.ok(src.includes('只检查前'), '要说明检查范围');
+      assert.match(src, /deadLimit !== n|deadLimit === n/, '条数选项要可切换');
+    });
+
+    ok('重复合并策略：最早收藏 / 最近使用（无记录时退回收藏时间）', () => {
+      const items = [
+        { id: 'a', title: 'A', url: 'https://x', path: 'p', dateAdded: 1000 },
+        { id: 'b', title: 'B', url: 'https://x', path: 'p', dateAdded: 2000, dateLastUsed: 5000 },
+        { id: 'c', title: 'C', url: 'https://x', path: 'p', dateAdded: 3000 },
+      ];
+      assert.equal(pickDuplicateKeeper(items, 'oldest')!.id, 'a');
+      assert.equal(pickDuplicateKeeper(items, 'recent')!.id, 'b');
+      assert.equal(
+        pickDuplicateKeeper(items.map((i) => ({ ...i, dateLastUsed: 0 })), 'recent')!.id,
+        'c',
+        '都没有使用记录时保留收藏时间最新的',
+      );
+      assert.equal(pickDuplicateKeeper([], 'oldest'), null);
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      const src = readFileSync(resolve(srcDir, 'components/bookmark-list/library-insights-dialog.tsx'), 'utf8');
+      assert.ok(src.includes('保留最早收藏') && src.includes('保留最近使用'), '缺少策略切换');
+      assert.match(src, /pickDuplicateKeeper\(/, '条目上的「建议保留」必须来自纯函数');
+    });
+
+    ok('normalizeUrlForDup：只清无意义的部分，不误合并真实参数', () => {
+      assert.equal(normalizeUrlForDup('https://Example.COM/a/?utm_source=x#top'), 'https://example.com/a');
+      assert.equal(normalizeUrlForDup('https://example.com/a?utm_source=x'), normalizeUrlForDup('https://example.com/a'));
+      assert.notEqual(normalizeUrlForDup('https://example.com/a?page=2'), normalizeUrlForDup('https://example.com/a'));
+      assert.equal(normalizeUrlForDup(''), '');
+      assert.equal(normalizeUrlForDup('not a url'), 'not a url');
+    });
+
+    ok('每周回顾：从周一开始、统计本周整理/失败、与上次快照比变化', () => {
+      const start = weekStartOf(NOW);
+      const key = weekKeyOf(NOW);
+      assert.ok(start <= NOW, '周一 0 点必须在过去');
+      assert.equal(new Date(start).getDay(), 1, 'weekStartOf 必须落在周一');
+      const addedThisWeek = ins.dailyAdded
+        .filter((d) => d.date >= key)
+        .reduce((n, d) => n + d.count, 0);
+      const review = buildWeeklyReview(
+        ins,
+        [
+          { id: 'w1', at: NOW - 1000, action: 'moved' } as never,
+          { id: 'w2', at: NOW - 2000, action: 'failed' } as never,
+          { id: 'old', at: start - 1000, action: 'moved' } as never,
+        ],
+        { weekKey: 'last', total: 0, duplicates: 1, emptyFolders: 3, at: 0 },
+        NOW,
+      );
+      assert.equal(review.added, addedThisWeek);
+      assert.equal(review.organized, 1, '上周的记录不计入本周');
+      assert.equal(review.failed, 1);
+      assert.equal(review.duplicateDelta, ins.duplicateGroups - 1);
+      assert.equal(review.emptyDelta, ins.emptyFolders - 3);
+      const first = buildWeeklyReview(ins, [], null, NOW);
+      assert.equal(first.duplicateDelta, null, '没有上次快照时显示首次记录，不假装 0');
+
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      assert.match(
+        readFileSync(resolve(srcDir, 'components/bookmark-list/overview-panel.tsx'), 'utf8'),
+        /data-testid="weekly-review"/,
+        '概览缺少每周回顾卡',
+      );
+    });
+
+    ok('describeDuplicates：给 Agent 的清单有上限且带路径', () => {
+      const text = describeDuplicates(ins, 3);
+      assert.equal(text.split('\n').length, 3, '上限生效（4 条重复只取前 3 条）');
+      assert.match(text, /路径：书签栏/);
+    });
+  }
+
+  ok('标签存储：归一化 / 去重 / 上限 / 孤儿清理', () => {
+    assert.equal(normalizeTag('  #待读  '), '待读');
+    assert.equal(normalizeTag('a   b'), 'a b');
+    assert.equal(normalizeTag('x'.repeat(30)).length, 24, '超长截断');
+    assert.deepEqual(normalizeTagList(['Read', 'read', '  #Later ']), ['Read', 'Later']);
+    const many = normalizeTagList(Array.from({ length: 8 }, (_, i) => `t${i}`));
+    assert.equal(many.length, MAX_TAGS_PER_BOOKMARK);
+    assert.deepEqual(addTags(['A'], ['a', 'B']), ['A', 'B'], '大小写不敏感去重');
+    const map = { b1: ['Read', 'Later'], b2: ['read'], b3: ['Done'] };
+    assert.deepEqual(collectTagCounts(map)[0], { tag: 'read', count: 2 });
+    assert.deepEqual([...idsForTag(map, '#READ')], ['b1', 'b2']);
+    const pruned = pruneTagMap(map, new Set(['b1', 'b3']));
+    assert.deepEqual(Object.keys(pruned.next), ['b1', 'b3']);
+    assert.equal(pruned.removed, 1);
+
+    const renamed = renameTag(map, 'Read', 'Reading');
+    assert.deepEqual(renamed.b1, ['Reading', 'Later']);
+    assert.deepEqual(renamed.b2, ['Reading']);
+    const merged = renameTag(map, 'Done', 'read');
+    assert.deepEqual(merged.b3, ['read'], '重命名到已有标签 = 合并，不留两个大小写变体');
+    const removed = deleteTag(map, 'Later');
+    assert.deepEqual(removed.b1, ['Read']);
+    assert.ok(!('b3' in deleteTag({ b3: ['Done'] }, 'Done')), '删除最后一个标签后不留空条目');
+  });
+
+  ok('标签备份：导出可回读、导入跳过不存在的 id、颜色只保留仍在用的标签', () => {
+    const backup = buildTagBackup({ b1: ['Read', 'Later'], b2: ['Done'] }, { read: 'blue' }, 1000);
+    const parsed = parseTagBackup(JSON.parse(JSON.stringify(backup)));
+    assert.ok(parsed, '合法备份应能回读');
+    assert.deepEqual(parsed!.tags.b1, ['Read', 'Later']);
+    assert.equal(parsed!.colors.read, 'blue');
+    assert.equal(parseTagBackup({ version: 99, tags: {} }), null, '版本不符要拒绝');
+    assert.equal(parseTagBackup(null), null);
+
+    const merged = mergeTagBackup(
+      { b3: ['X'] },
+      {},
+      new Set(['b1', 'b3']),
+      backup,
+    );
+    assert.equal(merged.imported, 1, '只有 b1 在库里');
+    assert.equal(merged.skipped, 1, 'b2 不存在，应跳过');
+    assert.deepEqual(merged.tags.b1, ['Read', 'Later'], '合并保留原标签');
+    assert.equal(merged.colors.read, 'blue', '颜色随仍在用的标签保留');
+  });
+
+  ok('标签颜色：大小写不敏感、未设置回落默认、未知值归一', () => {
+    assert.equal(colorForTag({ read: 'blue' }, '#READ'), 'blue', '# 前缀不影响颜色查找');
+    assert.equal(colorForTag({}, 'anything'), 'default');
+    assert.equal(normalizeColorId('nope'), 'default');
+    assert.equal(normalizeColorId('rose'), 'rose');
+    assert.equal(colorVarOf('green'), 'var(--tag-green)');
+    assert.ok(TAG_COLORS.some((c) => c.id === 'amber'), '调色板缺少琥珀色');
+  });
+
+  ok('标签 UI 接线：对话框、筛选条、右键与批量入口都在', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const readSrc = (rel: string) => readFileSync(resolve(srcDir, rel), 'utf8');
+    assert.match(readSrc('components/bookmark-list/tags-dialog.tsx'), /testId="tags-dialog"/);
+    assert.match(readSrc('components/bookmark-list/tags-dialog.tsx'), /MAX_TAGS_PER_BOOKMARK/);
+    assert.match(readSrc('components/bookmark-list/tags-manager-dialog.tsx'), /testId="tags-manager"/);
+    assert.match(readSrc('components/bookmark-list/tags-manager-dialog.tsx'), /renameTag\(/);
+    assert.match(readSrc('components/bookmark-list/tags-manager-dialog.tsx'), /TAG_COLORS/, '标签管理缺少颜色选择');
+    assert.match(readSrc('components/bookmark-list/bookmark-list.tsx'), /tags-manager-open/);
+    assert.match(readSrc('components/bookmark-list/bookmark-list.tsx'), /colorVarOf/, '标签条应使用标签颜色');
+    assert.match(readSrc('components/bookmark-list/remove-tags-dialog.tsx'), /testId="remove-tags-dialog"/);
+    assert.ok(
+      readSrc('components/bookmark-list/bookmark-list.tsx').includes('移除标签…'),
+      '批量操作里缺少移除标签入口',
+    );
+    assert.match(readSrc('components/bookmark-list/bookmark-list.tsx'), /data-testid="row-tags"/, '书签行缺少标签提示');
+    assert.match(readSrc('components/bookmark-list/bookmark-list.tsx'), /tagSummary/, '行内标签需要名称提示');
+    assert.match(readSrc('components/bookmark-list/bookmark-list.tsx'), /onTagClick/, '行内标签应可点击筛选');
+    assert.match(readSrc('components/bookmark-list/bookmark-list.tsx'), /按标签/, '行内标签缺少 aria 名称');
+    assert.match(readSrc('components/bookmark-list/bookmark-list.tsx'), /collectTagCounts/);
+    assert.match(readSrc('components/bookmark-list/bookmark-list.tsx'), /activeTag/);
+    assert.match(readSrc('components/bookmark-list/bookmark-list.tsx'), /hashTag/, '搜索框应支持 #标签');
+    assert.match(readSrc('components/bookmark-list/bookmark-list.tsx'), /effectiveTag|hashTag/, '标签筛选要统一入口');
+    assert.ok(readSrc('components/sidebar/bookmark-tree.tsx').includes("kind: 'tags'"), '右键菜单缺少标签入口');
+  });
+
+  ok('放哪里预测：同域名条数优先，其次整理日志；都没信号返回 null', () => {
+    const tree = [
+      {
+        id: '1',
+        title: '书签栏',
+        children: [
+          {
+            id: 'tech',
+            title: '技术',
+            children: [
+              {
+                id: 'front',
+                title: '前端',
+                children: [
+                  { id: 'g1', title: 'GitHub', url: 'https://github.com/a' },
+                  { id: 'g2', title: 'GitHub 2', url: 'https://github.com/b' },
+                ],
+              },
+            ],
+          },
+          {
+            id: 'design',
+            title: '设计',
+            children: [{ id: 'g3', title: 'GitHub 设计', url: 'https://github.com/c' }],
+          },
+        ],
+      },
+    ] as unknown as chrome.bookmarks.BookmarkTreeNode[];
+    const hit = predictFolder(tree, 'https://github.com/new');
+    assert.equal(hit?.folderId, 'front', '同域名 2 条应压过 1 条');
+    assert.equal(hit?.path, '技术 / 前端');
+    assert.match(hit!.reason, /同一域名已有 2 条/);
+
+    const byLog = predictFolder(tree, 'https://news.ycombinator.com/x', [
+      { domain: 'news.ycombinator.com', target: '书签栏 / 技术 / 前端', action: 'moved' },
+    ]);
+    assert.equal(byLog?.folderId, 'front');
+    assert.match(byLog!.reason, /之前把 news\.ycombinator\.com 归到/);
+
+    assert.equal(predictFolder(tree, 'https://unknown.example/x'), null, '没有信号就不硬猜');
+  });
+
+  ok('popup 放哪里建议：只建议不自动执行，点一下才存到建议文件夹', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'entrypoints/popup/main.tsx'), 'utf8');
+    assert.match(src, /predictFolder\(/, '建议必须来自纯函数');
+    assert.match(src, /data-testid="save-suggestion"/, '缺少稳定锚点');
+    assert.match(src, /saveCurrentTab\(suggestion\.folderId\)/, '点建议才带上目标文件夹');
+    assert.ok(src.includes('建议存到'), '需要明确文案');
+  });
+
+  ok('概览是只读视图：动作交给 Agent，绝不直接写书签', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/bookmark-list/overview-panel.tsx'), 'utf8');
+    assert.doesNotMatch(
+      src,
+      /chrome\.bookmarks\.(create|move|remove|update|removeTree)/,
+      '概览不能绕过 Agent 的确认与撤销直接改书签',
+    );
+    assert.match(src, /useAIStore\.getState\(\)\.send\(prompt\)/, '动作必须变成一句发给 Agent 的具体指令');
+    assert.match(src, /analyzeLibrary\(roots\)/, '指标来自同一份纯函数洞察');
+  });
+
+  ok('问候用称呼与时间段，没填称呼时不编造', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/bookmark-list/overview-panel.tsx'), 'utf8');
+    assert.match(src, /addressName \? `\$\{greeting\}，\$\{addressName\}` : greeting/, '有称呼才拼接');
+    for (const word of ['早上好', '中午好', '下午好', '晚上好']) {
+      assert.ok(src.includes(word), `缺少时间段问候「${word}」`);
+    }
+  });
 
   /* ── T76: 新书签自动整理 ── */
   console.log('\n[T76] 新书签自动整理');
@@ -9502,6 +9923,13 @@ async function okA(name: string, fn: () => Promise<void> | void) {
     ok('导出：带上免打扰站点（排查时最容易被忽略的一层）', () => {
       assert.ok(md.includes('已停用自动整理的站点：github.com'), md);
     });
+    ok('整理记录对话框：列表按天分组，日期头吸顶', () => {
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      const src = readFileSync(resolve(srcDir, 'components/organize/organize-log-dialog.tsx'), 'utf8');
+      assert.match(src, /dayLabel\(e\.at\)/, '必须用真实时间生成日期头');
+      assert.match(src, /sticky top-0/, '日期头应吸顶，滚动时知道自己在哪一天');
+    });
+
     ok('导出：按天分组，每条含动作与去向', () => {
       assert.ok(md.includes('## 2026-10-25'), '缺少当天小节');
       assert.ok(md.includes('## 2026-10-24'), '缺少前一天小节');
@@ -10284,6 +10712,68 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       const groups = groupCommands(all);
       assert.deepEqual(groups.map((g) => g.kind), ['action', 'folder', 'bookmark']);
       assert.equal(searchCommands(items, '', 2).length, 2, 'limit 必须生效');
+    });
+
+    ok('面板分组：空查询 = 最近使用 → 常用动作 → 文件夹，最近项不重复出现在文件夹组', () => {
+      const all: CommandItem[] = [
+        { id: 'action:a', kind: 'action', title: '打开设置' },
+        { id: 'action:b', kind: 'action', title: '书签概览' },
+        { id: 'fd:f1', kind: 'folder', title: '技术' },
+        { id: 'fd:f2', kind: 'folder', title: '设计' },
+        { id: 'bm:1', kind: 'bookmark', title: 'GitHub', url: 'https://github.com/' },
+      ];
+      const recent: RecentEntry[] = [
+        { id: 'bm:1', kind: 'bookmark', title: 'GitHub', at: 2 },
+        { id: 'fd:f1', kind: 'folder', title: '技术', at: 1 },
+      ];
+      const groups = buildPaletteGroups(all, '', recent);
+      assert.deepEqual(groups.map((g) => g.kind), ['recent', 'action', 'folder']);
+      assert.deepEqual(groups[0]!.items.map((i) => i.id), ['bm:1', 'fd:f1'], '最近的顺序按 at 倒序');
+      assert.ok(!groups[2]!.items.some((i) => i.id === 'fd:f1'), '最近项不能在文件夹组里再出现一次');
+      assert.ok(!groups.some((g) => g.kind === 'bookmark'), '空查询不该甩出全部书签');
+    });
+
+    ok('面板分组：最近记录里的已删书签会被过滤掉', () => {
+      const all: CommandItem[] = [{ id: 'action:a', kind: 'action', title: '设置' }];
+      const groups = buildPaletteGroups(all, '', [{ id: 'bm:gone', kind: 'bookmark', title: '已删', at: 1 }]);
+      assert.deepEqual(groups.map((g) => g.kind), ['action']);
+    });
+
+    ok('搜索历史：去空白、大小写不敏感去重、最新在前、上限 5 条', () => {
+      assert.equal(normalizeSearchQuery('  react   hooks '), 'react hooks');
+      const list = reduceSearchHistory(['React', 'github', '设计'], 'react');
+      assert.deepEqual(list, ['react', 'github', '设计'], '大小写不同的同一条要合并，保留最新写法');
+      assert.deepEqual(reduceSearchHistory(['a'], '   '), ['a'], '空查询不写入');
+      const many = Array.from({ length: SEARCH_HISTORY_LIMIT + 3 }, (_, i) => `q${i}`);
+      assert.equal(reduceSearchHistory(many, 'new').length, SEARCH_HISTORY_LIMIT);
+      assert.equal(SEARCH_HISTORY_LIMIT, 5, '上限按产品约定是 5 条');
+    });
+
+    ok('主搜索：防抖 / 分组头 / 最近搜索接线都在', () => {
+      const dir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      const readSrc = (rel: string) => readFileSync(resolve(dir, rel), 'utf8');
+      const list = readSrc('components/bookmark-list/bookmark-list.tsx');
+      const workspace = readSrc('components/workspace/workspace.tsx');
+      assert.match(list, /\}, 250\);/, '搜索必须防抖（每次按键直接打 chrome.bookmarks.search 会卡）');
+      assert.match(list, /firstBookmarkResult/, '搜索结果需要按文件夹/书签分组');
+      assert.match(list, /recordSearch\(/, '打开搜索结果时应记住查询词');
+      assert.match(workspace, /readSearchHistory\(/, '顶栏搜索框应展示最近搜索');
+      assert.match(workspace, /data-testid="search-recent"/, '最近搜索缺少稳定锚点');
+    });
+
+    ok('最近使用：同 id 只留一条、最新在前、超过上限截断', () => {
+      const base: RecentEntry[] = [
+        { id: 'a', kind: 'bookmark', title: 'A', at: 1 },
+        { id: 'b', kind: 'folder', title: 'B', at: 2 },
+      ];
+      assert.deepEqual(reduceRecent(base, { id: 'a', kind: 'bookmark', title: 'A2', at: 3 }).map((e) => e.id), ['a', 'b']);
+      const over = Array.from({ length: RECENT_LIMIT + 3 }, (_, i) => ({
+        id: `x${i}`,
+        kind: 'bookmark' as const,
+        title: `X${i}`,
+        at: i,
+      }));
+      assert.equal(reduceRecent(over, { id: 'new', kind: 'bookmark', title: 'New', at: 99 }).length, RECENT_LIMIT);
     });
 
     ok('检索：查询过长时不放开模糊匹配（避免噪音）', () => {
@@ -11222,6 +11712,18 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       const node = nodeById(id);
       assert.ok(node, '书签没创建出来');
       assert.equal(node!.parentId, '1', `应进书签栏(id 1)，实际 ${node!.parentId}`);
+    });
+
+    await okA('saveTabToBar 支持显式目标文件夹（放哪里预测）', async () => {
+      const folder = await mockBookmarks.create({ parentId: '1', title: '技术' });
+      const res = await saveTabToBar({
+        title: '显式目标',
+        url: 'https://explicit-target.example/page',
+        parentId: folder.id,
+      });
+      assert.equal(res.ok, true, JSON.stringify(res));
+      assert.equal((res as { parentId: string }).parentId, folder.id);
+      await mockBookmarks.removeTree(folder.id).catch(() => {});
     });
 
     await okA('重复的网址不重复创建', async () => {
@@ -14453,18 +14955,30 @@ await okA('命令面板派发的自定义事件，都有人接', async () => {
    * 所以把「派发的」和「监听的」两组事件名对起来，差集必须为空。
    */
   const palette = read('src/components/command/command-palette.tsx');
-  const workspace = read('src/components/workspace/workspace.tsx');
+  const srcDir = resolve(root, 'src');
+  const { readdirSync } = await import('node:fs');
+  const walk = (dir: string): string[] =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? walk(resolve(dir, e.name)) : /\.[tj]sx?$/.test(e.name) ? [resolve(dir, e.name)] : [],
+    );
 
-  const dispatched = [...palette.matchAll(/new CustomEvent\('([^']+)'\)/g)].map((m) => m[1]!);
-  assert.ok(dispatched.length >= 3, `只派发了 ${dispatched.length} 个事件，正则可能失效了`);
+  const paletteDispatched = [...palette.matchAll(/new CustomEvent\('([^']+)'/g)].map((m) => m[1]!);
+  assert.ok(paletteDispatched.length >= 3, `只派发了 ${paletteDispatched.length} 个事件，正则可能失效了`);
 
-  const listened = [...workspace.matchAll(/addEventListener\('([^']+)'/g)].map((m) => m[1]!);
-  const missing = dispatched.filter((e) => !listened.includes(e));
+  // 监听方可能在列表 / 概览 / workspace 任意一处：按全仓库对账，避免"换个文件接收"就漏检
+  const sources = walk(srcDir).map((file) => readFileSync(file, 'utf8'));
+  const listened = sources.flatMap((src) =>
+    [...src.matchAll(/addEventListener\('([^']+)'/g)].map((m) => m[1]!),
+  );
+  const dispatchedEverywhere = sources.flatMap((src) =>
+    [...src.matchAll(/new CustomEvent\('([^']+)'/g)].map((m) => m[1]!),
+  );
+  const missing = paletteDispatched.filter((e) => !listened.includes(e));
   assert.deepEqual(missing, [], `命令面板派发了但没人监听的事件：${JSON.stringify(missing)}`);
 
-  // 反向：workspace 监听的 markai:* 事件，面板里至少要有一个在派发
-  const orphanListeners = listened.filter((e) => e.startsWith('markai:') && !dispatched.includes(e));
-  assert.deepEqual(orphanListeners, [], `workspace 监听了但没人派发的事件：${JSON.stringify(orphanListeners)}`);
+  // 反向：所有 markai:* 监听都必须真的有人派发
+  const orphanListeners = listened.filter((e) => e.startsWith('markai:') && !dispatchedEverywhere.includes(e));
+  assert.deepEqual(orphanListeners, [], `监听了但没人派发的事件：${JSON.stringify(orphanListeners)}`);
 });
 
 await okA('TOOL_DEFINITIONS 里声明的每个工具都有实现（不多不少）', async () => {
@@ -15787,28 +16301,55 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.match(describeFetchError(new Error('models.dev 返回 503')), /503/);
   });
 
-  // ── D1-B3：思考强度配置（白名单不许漏项） ──
-  console.log('\n[models] 思考强度配置 · 白名单完整性');
+  // ── D1-B3：思考强度配置（目录是建议，自定义值必须真的能发出去） ──
+  console.log('\n[models] 思考强度配置 · 目录建议与自定义');
 
-  ok('resolveConfig 保留思考强度，非法值回落 auto', () => {
+  ok('resolveConfig 保留思考强度（含目录里没有的自定义值）', () => {
     assert.equal(resolveConfig({}).reasoningEffort, 'auto', '没设置 = 跟随模型');
     assert.equal(resolveConfig({ reasoningEffort: 'high' }).reasoningEffort, 'high');
     assert.equal(resolveConfig({ reasoningEffort: 'HIGH' as ReasoningEffort }).reasoningEffort, 'high', '大小写要归一');
     assert.equal(resolveConfig({ reasoningEffort: '  max  ' as ReasoningEffort }).reasoningEffort, 'max', '首尾空白要吃掉');
     assert.equal(
       resolveConfig({ reasoningEffort: 'turbo' as ReasoningEffort }).reasoningEffort,
-      'auto',
-      '上游不认识的档位不能让请求发出去（400 或静默忽略都比跟随模型更糟）',
+      'turbo',
+      '目录里没有不等于端点不认：用户明确填的自定义档位不能被读配置时悄悄改成 auto',
+    );
+    assert.equal(
+      resolveConfig({ reasoningEffort: '  Ultra  ' as ReasoningEffort }).reasoningEffort,
+      'ultra',
+      '自定义值也要走同一道净化（去空白 + 小写），否则同一个值会有两种"形态"',
     );
   });
 
-  ok('normalizeReasoningEffort：只认白名单，其余一律 auto', () => {
+  ok('normalizeReasoningEffort：合法 token 原样保留，脏值才回落 auto', () => {
     assert.equal(normalizeReasoningEffort('xhigh'), 'xhigh');
     assert.equal(normalizeReasoningEffort('none'), 'none');
-    assert.equal(normalizeReasoningEffort('off'), 'auto', '关思考的约定值是 none，"off" 上游不认');
+    assert.equal(normalizeReasoningEffort('off'), 'off', '自定义档位不再被白名单拦下（能否识别由端点决定）');
+    assert.equal(normalizeReasoningEffort('3'), '3', '有些网关用数字表示档位');
     assert.equal(normalizeReasoningEffort(undefined), 'auto');
     assert.equal(normalizeReasoningEffort(''), 'auto');
     assert.equal(normalizeReasoningEffort('   '), 'auto');
+    assert.equal(normalizeReasoningEffort('bad value'), 'auto', '带空格的值不是档位，发出去只会得到难查的 400');
+    assert.equal(normalizeReasoningEffort('a;b'), 'auto', '分号等标点不是合法 token');
+    assert.equal(normalizeReasoningEffort('x'.repeat(25)), 'auto', '超长值会污染请求体');
+  });
+
+  ok('sanitizeEffort / effortInputIssue：与读写路径共用同一道规则', () => {
+    assert.equal(sanitizeEffort('  HIGH '), 'high');
+    assert.equal(sanitizeEffort('ultra-2048'), 'ultra-2048', '厂商自定义档位常常带连字符');
+    assert.equal(sanitizeEffort('bad value'), '');
+    assert.equal(sanitizeEffort('x'.repeat(25)), '');
+    assert.equal(effortInputIssue(''), null, '留空不是错误，调用方解释成"不发送"');
+    assert.match(effortInputIssue('bad value') ?? '', /空格|换行/, '输入框要给出能改的提示，而不是静默丢弃');
+    assert.match(effortInputIssue('x'.repeat(25)) ?? '', /最长 24/, '长度上限要写在提示里');
+  });
+
+  ok('describeEffortRequest：设置页的"实际发送"预览必须与请求体一致', () => {
+    assert.match(describeEffortRequest('deepseek', 'auto'), /不添加/);
+    assert.match(describeEffortRequest('deepseek', undefined), /不添加/);
+    assert.equal(describeEffortRequest('deepseek', 'ultra'), '"reasoning_effort": "ultra"');
+    assert.equal(describeEffortRequest('openai', 'xhigh'), '"reasoning": { "effort": "xhigh" }');
+    assert.match(describeEffortRequest('deepseek', 'bad value'), /不添加/, '脏值不会进请求体，预览也要如实');
   });
 
   ok('AIConfig 的每个字段都出现在 resolveConfig 返回值里（新增字段不许只存不读）', () => {
@@ -15887,6 +16428,15 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.equal(effortLabel('high'), '高');
     assert.equal(effortLabel('xhigh'), '很高');
     assert.equal(effortLabel('turbo'), 'turbo');
+  });
+
+  ok('设置页：自定义思考强度是真实入口（不是只读文案）', () => {
+    const rootDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+    const form = readFileSync(resolve(rootDir, 'src/components/options/config-form.tsx'), 'utf8');
+    assert.match(form, /aria-label="自定义思考强度"/, '自定义输入框要能被定位（键盘/屏幕阅读器都能用）');
+    assert.match(form, /reasoningEffort: v as ReasoningEffort/, '自定义值必须真的写回配置，而不是只画个输入框');
+    assert.match(form, /describeEffortRequest/, '要展示"实际发送"预览——界面说的必须和请求体一致');
+    assert.ok(!/pickEffort\(/.test(form), 'UI 不该再用 pickEffort 把用户选的值悄悄改写成"最近档位"');
   });
 
   // ── D1-B5：思考参数注入与思考流解析 ──
@@ -16272,6 +16822,34 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.doesNotMatch(toast, /bg-card/, '用了玻璃层就不该再叠 bg-card（会盖掉半透明）');
   });
 
+  ok('液态玻璃：只有带遮罩的对话框 / 命令面板用，且深浅色都有 token', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const css = readFileSync(resolve(srcDir, 'assets/main.css'), 'utf8');
+    const light = css.slice(0, css.indexOf('.dark {'));
+    const darkEnd = css.indexOf('@layer base');
+    const dark = css.slice(css.indexOf('.dark {'), darkEnd > 0 ? darkEnd : css.length);
+    for (const theme of [light, dark]) {
+      assert.ok(theme.includes('--liquid-tint'), '液态玻璃缺底色 token');
+      assert.ok(theme.includes('--liquid-rim-a'), '液态玻璃缺描边 token');
+    }
+    for (const file of ['components/ui/dialog.tsx', 'components/command/command-palette.tsx']) {
+      const txt = readFileSync(resolve(srcDir, file), 'utf8');
+      assert.match(txt, /markai-glass-liquid/, `${file} 没有挂液态玻璃类`);
+      assert.match(txt, /useLiquidGlass/, `${file} 没有调用 useLiquidGlass`);
+    }
+  });
+
+  ok('液态玻璃：折射必须有特性门，且回退分支不能只剩透底', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const css = readFileSync(resolve(srcDir, 'assets/main.css'), 'utf8');
+    assert.match(css, /\.markai-glass-liquid\[data-liquid='on'\]/, '折射必须在 data-liquid="on" 下才生效');
+    const fallback = css.slice(css.indexOf('@supports not ((backdrop-filter'));
+    assert.ok(fallback.includes('.markai-glass-liquid'), '降级分支漏了液态玻璃类');
+    const lib = readFileSync(resolve(srcDir, 'lib/ui/use-liquid-glass.ts'), 'utf8');
+    assert.match(lib, /supportsLiquidGlass\(\)/, 'hook 必须先做特性检测');
+    assert.match(lib, /data-liquid/, 'hook 必须写出可观测的降级标记');
+  });
+
   ok('组件里不许出现裸的 backdrop-filter（一律走 markai-glass）', () => {
     const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
     const files = readdirSync(resolve(srcDir, 'components'), { recursive: true, encoding: 'utf8' })
@@ -16465,269 +17043,6 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.ok(alpha >= 0.14, `深色玻璃边框只有 ${alpha}，浮层边界在近黑底上几乎看不见`);
   });
 
-  // ── D4-B1：宠物眼睛（多边形眼型 + 眨眼队列 + 视线） ──
-  console.log('\n[pet] 眼睛');
-
-  ok('多边形插值：中点、端点、点数不一致必须抛错', () => {
-    const a: [number, number][] = [[0, -1], [1, 0]];
-    const b: [number, number][] = [[0, -0.5], [0.5, 0]];
-    const mid = lerpPoly(a, b, 0.5);
-    assert.deepEqual(mid[0], [0, -0.75]);
-    assert.deepEqual(mid[1], [0.75, 0]);
-    assert.deepEqual(lerpPoly(a, b, 0), a);
-    assert.deepEqual(lerpPoly(a, b, 1), b);
-    // 截断点数会让形状静默变形（动画里表现为"眼睛抽搐"），所以必须硬失败
-    assert.throws(() => lerpPoly(a, [[0, 0]], 0.5), /点数不一致/);
-  });
-
-  ok('眼睑：闭合留一丝缝、过冲允许到 1.08、只压 y 不压 x', () => {
-    const poly = EYE_SHAPES['normal']!.poly;
-    // 用字面值而不是 LID_MIN 常量：断言跟着被测常量走的话，改常量测试也会跟着改，永远绿
-    assert.equal(LID_MIN, 0.04, '闭合下限是 0.04（留一条缝，不是把眼睛压没）');
-    const closed = applyLid(poly, 0);
-    const ys = closed.map(([, y]) => Math.abs(y));
-    assert.ok(Math.min(...ys) <= 0.05, '完全闭合时 y 应压到下限附近');
-    assert.ok(Math.max(...ys) <= 0.05, '闭合时所有 y 都该在下限（一条缝，不是消失）');
-    const over = applyLid(poly, 2);
-    assert.ok(Math.max(...over.map(([, y]) => Math.abs(y))) <= LID_MAX, '过冲要被钳到 1.08');
-    // 横向坐标不受影响：不然眨眼时眼睛会左右抽动
-    assert.deepEqual(applyLid(poly, 0.5).map(([x]) => x), poly.map(([x]) => x));
-  });
-
-  ok('眨眼队列：单眨四次事件，按时间消费出 0.05 → 0.05 → 1.08 → 1', () => {
-    const q: { at: number; v: number }[] = [];
-    queueBlink(q, 1000, () => 0.9); // 0.9 ≥ 0.14 → 不双眨
-    assert.equal(q.length, 4);
-    // 时间没到 → 不消费
-    assert.equal(consumeBlink(q, 999), null);
-    // 逐帧推进：同一帧里可连消费多条（掉帧时不积压）
-    assert.equal(consumeBlink(q, 1000), LID_MIN);
-    assert.equal(consumeBlink(q, 1070), LID_MIN);
-    assert.equal(consumeBlink(q, 1050), null, '时间倒退不该消费任何事件');
-    assert.equal(consumeBlink(q, 1150), 1.08);
-    assert.equal(consumeBlink(q, 1300), 1);
-    assert.equal(consumeBlink(q, 5000), null, '队列空了返回 null（保留上一次的值）');
-  });
-
-  ok('21% 概率分支：random 低于阈值时追加第二次眨眼（6 事件）', () => {
-    const q: { at: number; v: number }[] = [];
-    queueBlink(q, 0, () => 0.1);
-    assert.equal(q.length, 6, '双眨才是"活的"，每次单眨反而机械');
-  });
-
-  ok('视线：近处按比例、远处饱和、零距离不动', () => {
-    assert.deepEqual(gazeOffset([100, 100], [100, 100], 3), { x: 0, y: 0 });
-    const near = gazeOffset([110, 100], [100, 100], 3);
-    assert.ok(Math.abs(near.x - 2.8) < 1e-9, '近处 0.28 倍距离');
-    const far = gazeOffset([10000, 100], [100, 100], 3);
-    assert.ok(Math.abs(far.x - 3) < 1e-9, '远处饱和到 maxRadius（不把瞳孔甩出眼眶）');
-    assert.ok(Math.abs(far.y) < 1e-9);
-  });
-
-  ok('未知眼型名回落到 normal（拼错状态名不该让宠物崩溃）', () => {
-    assert.deepEqual(shapeOf('nope'), EYE_SHAPES['normal']!.poly);
-    assert.deepEqual(shapeOf('happy'), EYE_SHAPES['happy']!.poly);
-  });
-
-  // ── D4-B2：宠物渲染（状态参数 + SVG 守卫） ──
-  console.log('\n[pet] 渲染');
-
-  ok('状态参数：睡着不跟随指针、思考比待机眨眼更勤', () => {
-    const idle = lookOf('idle');
-    const sleeping = lookOf('sleeping');
-    const thinking = lookOf('thinking');
-    assert.equal(sleeping.gazeRange, 0, '睡着时跟随指针会立刻"醒"');
-    assert.ok(sleeping.lidBase < 0.2, '睡着时眼睛接近闭合');
-    assert.ok(thinking.blinkEveryMs < idle.blinkEveryMs, '思考时眨眼更频繁');
-    assert.ok(thinking.breathPeriodMs < idle.breathPeriodMs, '思考时呼吸更快');
-    assert.equal(lookOf('nope' as PetState).eye, 'normal', '未知状态回落 idle');
-  });
-
-  ok('呼吸：正弦周期，端点回到 1，半周期回到另一个端点', () => {
-    const period = 3200;
-    const amp = 0.02;
-    assert.ok(Math.abs(breathScale(0, period, amp) - 1) < 1e-9);
-    assert.ok(Math.abs(breathScale(period / 4, period, amp) - (1 + amp)) < 1e-9);
-    assert.ok(Math.abs(breathScale(period / 2, period, amp) - 1) < 1e-9);
-    assert.ok(Math.abs(breathScale(period * 0.75, period, amp) - (1 - amp)) < 1e-9);
-    assert.equal(breathScale(100, 0, amp), 1, '周期为 0 时不该除零');
-  });
-
-  ok('Agent 状态映射：工具在跑 > 本轮在跑 > 空闲', () => {
-    assert.equal(stateFromAgent(false, false), 'idle');
-    assert.equal(stateFromAgent(true, false), 'thinking');
-    assert.equal(stateFromAgent(true, true), 'working');
-    assert.equal(stateFromAgent(false, true), 'working', '工具在跑就是 working，即使本轮标记已结束');
-  });
-
-  ok('宠物组件：reduced-motion 下不跑 rAF，且不成为读屏噪音', () => {
-    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
-    const src = readFileSync(resolve(srcDir, 'components/pet/pet-face.tsx'), 'utf8');
-    assert.match(src, /prefers-reduced-motion: reduce/);
-    assert.match(src, /if \(reduced\)/, 'reduced-motion 必须提前返回，不进循环');
-    assert.match(src, /aria-hidden="true"/, '宠物是装饰：状态已有文字表达，不该重复给读屏');
-    assert.match(src, /data-testid="pet-face"/, '缺少稳定测试锚点');
-  });
-
-  ok('Agent 空态已换成宠物（不再用静态品牌图标）', () => {
-    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
-    const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
-    assert.match(src, /<PetFace/);
-  });
-
-  // ── D4-B3：宠物跟着 Agent 真实状态走 ──
-  console.log('\n[pet] 状态联动');
-
-  ok('工具在跑 → working；跑完 → 回到 idle（不是永远醒着）', () => {
-    const asst = (blocks: ChatMessage['blocks']): ChatMessage => ({ id: 'x', role: 'assistant', blocks, createdAt: 0 });
-    assert.equal(
-      hasRunningTool([asst([{ kind: 'tool', record: { id: 't', name: 'list_bookmarks', args: '{}', status: 'running' } }])]),
-      true,
-    );
-    assert.equal(
-      hasRunningTool([asst([{ kind: 'tool', record: { id: 't', name: 'list_bookmarks', args: '{}', status: 'done' } }])]),
-      false,
-      '跑完就该回到待机，否则宠物永远"在忙"',
-    );
-    assert.equal(hasRunningTool([{ id: 'u', role: 'user', blocks: [{ kind: 'text', text: 'hi' }], createdAt: 0 }]), false);
-    assert.equal(hasRunningTool([]), false);
-  });
-
-  ok('扫全部 assistant 消息而不是只看最后一条（取消/重发会留下挂着的旧块）', () => {
-    const oldRunning: ChatMessage = {
-      id: 'a1',
-      role: 'assistant',
-      createdAt: 0,
-      blocks: [{ kind: 'tool', record: { id: 't1', name: 'x', args: '{}', status: 'running' } }],
-    };
-    const latestIdle: ChatMessage = { id: 'a2', role: 'assistant', createdAt: 1, blocks: [{ kind: 'text', text: '好了' }] };
-    assert.equal(hasRunningTool([oldRunning, latestIdle]), true, '前面还有 running 块时不能被"最新一条"掩盖');
-  });
-
-  ok('空态：宠物状态由 Agent 真实状态推导，不许写死 idle', () => {
-    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
-    const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
-    // 状态推导集中在一处（头部与空态复用同一个值，否则会算出两个不同状态）
-    assert.match(
-      src,
-      /const toolRunning = useMemo\(\(\) => hasRunningTool\(messages\), \[messages\]\)/,
-      '工具扫描必须 memo 化（每次流式增量全量扫是没必要的开销）',
-    );
-    assert.match(
-      src,
-      /const petState: PetState = celebrate \? 'happy' : stateFromAgent\(streaming, toolRunning\)/,
-      '状态必须由真实 Agent 状态推导',
-    );
-    assert.match(src, /petState=\{petState\}/, '空态应复用同一个 petState');
-    assert.doesNotMatch(src, /<PetFace size=\{72\} state="idle"/, '不许再写死 idle');
-  });
-
-  // ── D4-B4：宠物的存在感（常驻 + 一次性开心） ──
-  console.log('\n[pet] 存在感');
-
-  ok('只有一轮正常结束才庆祝（失败不该面露喜色）', () => {
-    assert.equal(shouldCelebrate(true, false, false), true);
-    assert.equal(shouldCelebrate(true, false, true), false, '失败后面露喜色比不做表情更伤信任');
-    assert.equal(shouldCelebrate(false, true, false), false, '刚开始不该庆祝');
-    assert.equal(shouldCelebrate(false, false, false), false, '一直待机不该反复庆祝');
-  });
-
-  ok('宠物常驻 Agent 头部（不再是一个 Bot 图标）', () => {
-    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
-    const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
-    assert.match(src, /<PetFace size=\{26\} state=\{petState\} \/>/, '头部应常驻宠物');
-    // 空态与头部必须共用同一个推导值，不能各算一遍（会算出两个不同状态）
-    assert.match(src, /petState=\{petState\}/, '空态应复用同一个 petState');
-  });
-
-  // ── D4-B5：手感物理（弹簧 · 反弹 · 挤压） ──
-  console.log('\n[pet] 手感物理');
-
-  ok('阻尼弹簧会收敛到目标（不会永远抖）', () => {
-    let s = { pos: 0, vel: 0 };
-    for (let i = 0; i < 60; i++) s = springStep(s, 100, 16);
-    assert.ok(Math.abs(s.pos - 100) < 0.5, `60 帧后应贴近目标，实际 ${s.pos}`);
-    assert.ok(isResting(s, 100), '此时应判定为已静止');
-  });
-
-  ok('低阻尼会过冲一次（这是"Q 弹"的来源，不是 bug）', () => {
-    let s = { pos: 0, vel: 0 };
-    let maxPos = 0;
-    for (let i = 0; i < 40; i++) {
-      // damping 12 ≈ 阻尼比 0.40 → 过冲约 25%（100 → 125）
-      s = springStep(s, 100, 16, 220, 12);
-      maxPos = Math.max(maxPos, s.pos);
-    }
-    assert.ok(maxPos > 100, `低阻尼应冲过目标，实际峰值 ${maxPos}`);
-    assert.ok(maxPos < 140, `过冲要有节制（峰值 ${maxPos} 太夸张就像被踢飞）`);
-  });
-
-  ok('dt 跳变不发散（切回标签页时 rAF 时间戳可能跳几百毫秒）', () => {
-    const s = springStep({ pos: 0, vel: 0 }, 100, 1000);
-    assert.ok(Number.isFinite(s.pos) && Number.isFinite(s.vel), '必须仍然是有限数');
-    assert.ok(Math.abs(s.pos) < 500, `一帧跳变后位移应可控，实际 ${s.pos}`);
-  });
-
-  ok('边界反弹：位置钳回、速度反向且带损耗', () => {
-    const upper = bounceOff(120, 80, 0, 100);
-    assert.equal(upper.pos, 100, '越上界要钳回');
-    assert.ok(upper.vel < 0, '速度必须反向');
-    assert.ok(Math.abs(upper.vel) < 80, '反弹要损耗（否则永远弹下去）');
-    const lower = bounceOff(-10, -50, 0, 100);
-    assert.equal(lower.pos, 0);
-    assert.ok(lower.vel > 0);
-    // 界内原样返回
-    const inside = bounceOff(50, 10, 0, 100);
-    assert.deepEqual(inside, { pos: 50, vel: 10 });
-  });
-
-  ok('挤压：横向撑开、纵向压扁，面积近似守恒', () => {
-    assert.deepEqual(squash(0), { sx: 1, sy: 1 }, '没按压就不变形');
-    const pressed = squash(1);
-    assert.ok(pressed.sx > 1 && pressed.sy < 1, '按下应横撑纵压（两个都缩小看起来像"变小"）');
-    assert.ok(Math.abs(pressed.sx * pressed.sy - 1) < 0.05, '面积应近似守恒');
-  });
-
-  ok('拖拽倾斜限幅在 ±12°（再大就像要摔倒）', () => {
-    assert.equal(tiltDeg(0), 0);
-    assert.ok(Math.abs(tiltDeg(1000)) <= 12);
-    assert.ok(Math.abs(tiltDeg(-1000)) <= 12);
-    assert.ok(tiltDeg(10) > tiltDeg(5), '位移越大倾斜越大（未到限幅时）');
-  });
-
-  // ── D4-B6：拖拽甩抛接上宠物（D4 收口） ──
-  console.log('\n[pet] 拖拽手感');
-
-  ok('只有空态的大宠物可拖拽（头部 26px 的那个不开——太难点中）', () => {
-    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
-    const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
-    assert.match(src, /<PetFace size=\{72\} state=\{petState\} interactive \/>/, '空态大宠物应可拖拽');
-    assert.match(src, /<PetFace size=\{26\} state=\{petState\} \/>/, '头部小宠物不应可拖拽');
-  });
-
-  ok('拖拽物理接在 rAF 里，不是 CSS 过渡（甩抛需要惯性+回弹+回位三段）', () => {
-    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
-    const src = readFileSync(resolve(srcDir, 'components/pet/pet-face.tsx'), 'utf8');
-    assert.match(src, /springStep\(d\.sx, 0, dt\)/, '松手后要用弹簧回位');
-    assert.match(src, /bounceOff\(/, '撞边界要回弹');
-    assert.match(src, /tiltDeg\(dx\)/, '拖拽要带倾斜');
-    assert.doesNotMatch(src, /transition.*transform/, '位移不能用 CSS 过渡（那样没有惯性）');
-  });
-
-  ok('reduced-motion：拖拽退化为亮度脉冲（不做位移）', () => {
-    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
-    const src = readFileSync(resolve(srcDir, 'components/pet/pet-face.tsx'), 'utf8');
-    assert.match(src, /if \(reducedMotion\) \{/, '按下时要走替代分支');
-    assert.match(src, /filter: 'brightness/, '替代反馈必须是可见的（亮度脉冲）');
-  });
-
-  ok('松手后不许再给速度（上一次 move 的速度就是甩出去的速度）', () => {
-    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
-    const src = readFileSync(resolve(srcDir, 'components/pet/pet-face.tsx'), 'utf8');
-    const up = src.slice(src.indexOf('const onUp ='), src.indexOf('const eye ='));
-    assert.doesNotMatch(up, /vel\s*:/, 'onUp 里不该再设置速度（会把最后一段位移乘成 0）');
-  });
-
   // ── D5-B1：碎碎念的克制（四条硬规则） ──
   console.log('\n[pet] 碎碎念');
 
@@ -16848,6 +17163,34 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.match(src, /petFacts\(flattenForFacts\(roots\)\)/, '文案必须来自事实源，不许写死');
     assert.match(src, /data-testid="pet-line"/, '缺少稳定锚点');
     assert.match(src, /petLine && \(/, '没有可说的就不显示——绝不为了"活跃"编一句');
+  });
+
+  ok('斜杠命令：/ 开头才出现，过滤命令与描述，选中只填入不发送', () => {
+    assert.deepEqual(filterSlashCommands(''), []);
+    assert.deepEqual(filterSlashCommands('整理'), [], '没有斜杠不该弹菜单');
+    assert.equal(filterSlashCommands('/').length, SLASH_COMMANDS.length);
+    assert.equal(filterSlashCommands('/整')[0]!.cmd, '/整理');
+    assert.ok(filterSlashCommands('/重复').some((c) => c.cmd === '/清理'), '描述也要参与过滤');
+    assert.equal(SLASH_COMMANDS.find((c) => c.cmd === '/记住')!.prompt, '记住：');
+  });
+
+  ok('斜杠菜单接线：箭头选择、Enter 填入、不自动发送', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
+    assert.match(src, /data-testid="slash-menu"/, '缺少稳定锚点');
+    assert.match(src, /filterSlashCommands\(input\)/, '菜单必须由纯函数驱动');
+    assert.match(src, /chooseSlash\(slashMatches/, 'Enter 应该填入命令而不是发送');
+    assert.match(src, /setSlashIndex/, '需要键盘高亮索引');
+  });
+
+  ok('管家日报：只统计今天的整理，没有就整块不显示', () => {
+    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+    const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
+    assert.match(src, /readOrganizeLog\(\)/, '日报必须读真实的整理记录');
+    assert.match(src, /setHours\(0, 0, 0, 0\)/, '只统计本地自然日内的记录');
+    assert.match(src, /data-testid="agent-digest"/, '缺少稳定锚点');
+    assert.match(src, /digest && \(/, '今天没有整理就不显示（不要编一条"今天很安静"）');
+    assert.match(src, /markai:open-organize-log/, '日报要能点进整理记录');
   });
 
   // ── D5-B3：习惯提取（候选而非生效） ──
@@ -17065,13 +17408,6 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
   // ── D6-B2：常驻开销与思考折叠（回归复测发现的两点） ──
   console.log('\n[pet] 常驻开销');
 
-  ok('宠物 rAF 必须节流（常驻面板跑 60fps 是风扇级别的开销）', () => {
-    const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
-    const src = readFileSync(resolve(srcDir, 'components/pet/pet-face.tsx'), 'utf8');
-    assert.match(src, /now - lastPaint < 33/, '缺少 30fps 节流');
-    assert.match(src, /物理仍按真实 dt 积分/, '节流不该改变物理步进（只是降低重绘频率）');
-  });
-
   ok('历史消息里的思考是折叠的（只有流式中才展开）', () => {
     const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
     const src = readFileSync(resolve(srcDir, 'components/chat/message-view.tsx'), 'utf8');
@@ -17098,7 +17434,7 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
   ok('README 必须交代这一版的新能力（否则用户不知道有）', () => {
     const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
     const src = readFileSync(resolve(root, 'README.md'), 'utf8');
-    for (const key of ['小宠物', '思考强度可调', '模型目录自动匹配', '管家感']) {
+    for (const key of ['Agent 面板重做', '思考强度可调', '模型目录自动匹配', '管家感', '设置页重做']) {
       assert.ok(src.includes(key), `README 缺少「${key}」的说明`);
     }
   });

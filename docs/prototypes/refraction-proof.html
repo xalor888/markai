@@ -1,0 +1,60 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+ body{margin:0;background:#0e1116;color:#fff;font:13px -apple-system,"PingFang SC",sans-serif}
+ .stage{position:relative;width:460px;height:760px;overflow:hidden}
+ .bgr{position:absolute;inset:0;background:
+   repeating-linear-gradient(45deg,#ff3b30 0 14px,#ffcc00 14px 28px,#34c759 28px 42px,#0a84ff 42px 56px,#bf5af2 56px 70px);}
+ .bgr:after{content:'';position:absolute;inset:0;background:
+   repeating-linear-gradient(0deg,rgba(0,0,0,.35) 0 2px,transparent 2px 24px);}
+ .txt{position:absolute;inset:0;font:800 26px/30px -apple-system;color:#fff;mix-blend-mode:overlay;padding:24px;letter-spacing:-.02em}
+ .p{position:absolute;left:40px;width:380px;height:150px;border-radius:32px;isolation:isolate;overflow:hidden}
+ .tag{position:absolute;left:18px;bottom:14px;font:700 14px -apple-system;color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.5);z-index:3}
+ .a{top:90px;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.45);box-shadow:inset 0 1px 0 rgba(255,255,255,.7)}
+ .b{top:300px;background:rgba(255,255,255,.10);border:1px solid rgba(255,255,255,.45);
+   -webkit-backdrop-filter:blur(10px) saturate(1.4);backdrop-filter:blur(10px) saturate(1.4);
+   box-shadow:inset 0 1px 0 rgba(255,255,255,.7)}
+ .c{top:510px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.55);
+   box-shadow:inset 0 0 14px 2px rgba(255,255,255,.4),inset 0 -1px 0 rgba(255,255,255,.3)}
+ .sheen{position:absolute;inset:0;border-radius:inherit;pointer-events:none;
+   background:linear-gradient(135deg,rgba(255,255,255,.5),transparent 40%,transparent 62%,rgba(255,255,255,.22))}
+ #defs{position:absolute;width:0;height:0;overflow:hidden}
+</style></head><body>
+<svg id="defs" xmlns="http://www.w3.org/2000/svg"></svg>
+<div class="stage">
+ <div class="bgr"></div><div class="txt">LIQUID<br>GLASS<br>TEST</div>
+ <div class="p a"><span class="tag">A · tint only (no filter)</span></div>
+ <div class="p b"><span class="tag">B · blur 10px + saturate</span></div>
+ <div class="p c"><span class="tag">C · SVG refract + specular</span><div class="sheen"></div></div>
+</div>
+<script>
+function build(){
+ const el=document.querySelector('.c'); const w=el.offsetWidth,h=el.offsetHeight,r=32;
+ const c=document.createElement('canvas');c.width=w;c.height=h;const ctx=c.getContext('2d');
+ const img=ctx.createImageData(w,h);const d=img.data;const bez=46;
+ for(let y=0;y<h;y++)for(let x=0;x<w;x++){
+   const cx = x<r?x-r : x>=w-r?x-(w-2*r)-r : 0;
+   const cy = y<r?y-r : y>=h-r?y-(h-2*r)-r : 0;
+   const dist=Math.hypot(cx,cy); let dx=0,dy=0;
+   if(dist>0 && dist<=r && dist>r-bez){
+     const t=(dist-(r-bez))/bez; const k=t*t*(3-2*t);
+     dx=-(cx/dist)*k; dy=-(cy/dist)*k;
+   }
+   const i=(y*w+x)*4;
+   d[i]=Math.round(128+dx*127);d[i+1]=Math.round(128+dy*127);d[i+2]=128;d[i+3]=255;
+ }
+ ctx.putImageData(img,0,0);
+ const url=c.toDataURL();
+ document.getElementById('defs').innerHTML=
+  `<filter id="lg" x="0%" y="0%" width="100%" height="100%" color-interpolation-filters="sRGB">
+    <feGaussianBlur in="SourceGraphic" stdDeviation="0.6" result="b"/>
+    <feImage href="${url}" x="0" y="0" width="${w}" height="${h}" preserveAspectRatio="none" result="map"/>
+    <feDisplacementMap in="b" in2="map" scale="70" xChannelSelector="R" yChannelSelector="G" result="d"/>
+    <feColorMatrix in="d" type="saturate" values="1.6"/>
+  </filter>`;
+ el.style.backdropFilter='url(#lg)'; el.style.webkitBackdropFilter='url(#lg)';
+ const probe=document.createElement('div');
+ probe.style.backdropFilter='url(#lg)';
+ window.__probe = {cssSupports:CSS.supports('backdrop-filter','url(#lg)'), styleValue:probe.style.backdropFilter, computed:getComputedStyle(el).backdropFilter};
+ document.body.setAttribute('data-probe',JSON.stringify(window.__probe));
+}
+window.addEventListener('load',build);
+</script></body></html>

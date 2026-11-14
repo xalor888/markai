@@ -1,4 +1,4 @@
-import { BookmarkPlus, LayoutPanelLeft, Settings, Trash2, Wand2 } from 'lucide-react';
+import { BookmarkPlus, LayoutPanelLeft, MessageSquare, Settings, Sparkles, Trash2, Wand2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import ReactDOM from 'react-dom/client';
 import { ErrorBoundary } from '@/components/common/error-boundary';
@@ -12,6 +12,7 @@ import { openUrl } from '@/lib/open-url';
 import { ORGANIZE_LOG_KEY, readOrganizeLog, summarizeOrganizeLog, type OrganizeStats } from '@/lib/ai/organize-log';
 import { appVersion } from '@/lib/version';
 import { saveTabToBar } from '@/lib/bookmarks/save-tab';
+import { predictFolder, type FolderSuggestion } from '@/lib/bookmarks/predict';
 import { pendingCardCopy } from '@/lib/bookmarks/pending-copy';
 import { organizeCardCopy, type OrganizeLoadState } from '@/lib/bookmarks/organize-card-copy';
 import { BrandMark } from '@/components/theme/theme-provider';
@@ -31,6 +32,8 @@ function PopupApp() {
   const [activeTitle, setActiveTitle] = useState('');
   const [aiConfigured, setAiConfigured] = useState(true);
   const [canSave, setCanSave] = useState(false);
+  /** 收藏时的「放哪里」建议（没有可靠信号时为 null，不硬猜） */
+  const [suggestion, setSuggestion] = useState<FolderSuggestion | null>(null);
   /*
    * 待办数据的读取状态。
    *
@@ -55,6 +58,32 @@ function PopupApp() {
       .then(([tab]) => setCanSave(!!tab?.url && /^https?:\/\//i.test(tab.url)))
       .catch(() => {});
   }, []);
+
+  // 收藏建议：当前 URL + 书签树 + 整理日志 → 同域名 / 历史去向
+  useEffect(() => {
+    if (!canSave) {
+      setSuggestion(null);
+      return;
+    }
+    let alive = true;
+    void Promise.all([
+      chrome.tabs.query({ active: true, currentWindow: true }),
+      chrome.bookmarks.getTree(),
+      readOrganizeLog().catch(() => []),
+    ])
+      .then(([tabs, tree, log]) => {
+        if (!alive) return;
+        const url = tabs[0]?.url;
+        if (!url) return setSuggestion(null);
+        setSuggestion(predictFolder(tree[0]?.children ?? [], url, log));
+      })
+      .catch(() => {
+        if (alive) setSuggestion(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [canSave]);
 
   /** 读取待办数据（挂载时 + storage 变化时共用） */
   const refresh = (setConfigured = true) => {
@@ -172,7 +201,7 @@ function PopupApp() {
   /** 收藏当前活动标签页（重复检测，存入书签栏）；失败时保留 popup 并显示原因 */
   const organizeCopy = organizeCardCopy(organizeState, organizeStats);
 
-  const saveCurrentTab = async () => {
+  const saveCurrentTab = async (parentId?: string) => {
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     setSaveError('');
     /*
@@ -181,7 +210,7 @@ function PopupApp() {
      * 按钮提示写的却是「收藏到书签栏」，用户点完去书签栏找不到。
      * 实测：不传 parentId 创建出来的 parentId 是 "2"（其他书签）。
      */
-    const res = await saveTabToBar({ title: tab?.title, url: tab?.url });
+    const res = await saveTabToBar({ title: tab?.title, url: tab?.url, ...(parentId ? { parentId } : {}) });
     if (res.ok) {
       window.close();
       return;
@@ -193,17 +222,20 @@ function PopupApp() {
   return (
     <div className="w-[320px]">
       <ThemeProvider />
-      <div className="flex h-11 items-center gap-2 border-b border-border bg-card px-3">
+      <div className="flex h-12 items-center gap-2 border-b border-border bg-card px-3">
         <BrandMark />
-        <Badge variant="outline" className="ml-auto">
+        <span className="ml-auto text-2xs tabular-nums text-muted-foreground/70">
           <span data-testid="popup-version">v{appVersion()}</span>
-        </Badge>
+        </span>
+        <Button variant="ghost" size="icon-sm" onClick={openOptions} title="AI 设置" aria-label="AI 设置">
+          <Settings className="h-3.5 w-3.5" />
+        </Button>
       </div>
 
-      <div className="space-y-2.5 p-3">
+      <div className="space-y-2 p-3">
         {/* Agent 处理中提示 */}
         {taskRunning && (
-          <div className="flex items-center gap-2 rounded-lg border border-accent/30 bg-accent-muted px-3 py-2">
+          <div className="flex items-center gap-2 rounded-xl border border-accent/30 bg-accent-muted px-3 py-2">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
             <span className="text-2xs font-medium text-accent">Agent 正在处理中…</span>
           </div>
@@ -212,10 +244,12 @@ function PopupApp() {
         {/* 待办卡片 */}
         <div
           data-testid="popup-pending"
-          className="rounded-lg border border-border bg-card p-3.5 transition-colors hover:border-accent/30"
+          className="rounded-xl border border-border bg-card p-3 transition-colors hover:border-accent/30"
         >
           <div className="flex items-center gap-2">
-            <Trash2 className="h-3.5 w-3.5 text-destructive" />
+            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-destructive/10 text-destructive">
+              <Trash2 className="h-3 w-3" />
+            </span>
             <span className="text-xs font-medium text-foreground">待删除清单</span>
             {pendingCount > 0 && <Badge variant="destructive">{pendingCount} 项</Badge>}
           </div>
@@ -233,7 +267,12 @@ function PopupApp() {
             </div>
           )}
           {pendingCount > 0 && (
-            <Button size="sm" variant="destructive" className="mt-2 w-full" onClick={() => openFullPage('#deletions')}>
+            <Button
+              size="sm"
+              variant="destructive"
+              className="mt-2 w-full"
+              onClick={() => openFullPage('#deletions')}
+            >
               去处理（{pendingCount} 项）
             </Button>
           )}
@@ -244,11 +283,13 @@ function PopupApp() {
           type="button"
           data-testid="popup-organize"
           onClick={() => openFullPage('#organize')}
-          className="w-full rounded-lg border border-border bg-card p-3.5 text-left transition-colors hover:border-accent/30 hover:bg-muted"
+          className="w-full rounded-xl border border-border bg-card p-3 text-left transition-colors hover:border-accent/30 hover:bg-muted/30"
           title="查看整理记录（动了哪些书签、能否重试）"
         >
           <div className="flex items-center gap-2">
-            <Wand2 className="h-3.5 w-3.5 text-accent" />
+            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-accent-muted text-accent">
+              <Wand2 className="h-3 w-3" />
+            </span>
             <span className="text-xs font-medium text-foreground">自动整理</span>
             <Badge variant="outline" className="ml-auto" data-testid="popup-organize-badge">
               {organizeCopy.badge}
@@ -268,20 +309,25 @@ function PopupApp() {
         <button
           type="button"
           onClick={() => openFullPage()}
-          className="w-full rounded-lg border border-border bg-card p-3.5 text-left transition-colors hover:bg-muted"
+          className="w-full rounded-xl border border-border bg-card p-3 text-left transition-colors hover:border-accent/30 hover:bg-muted/30"
           title="打开完整管理页"
         >
-          <p className="truncate text-xs font-medium text-foreground">
-            {activeTitle ? `最近动态 · ${activeTitle}` : '最近 Agent 动态'}
-          </p>
-          <p className="mt-1.5 line-clamp-2 text-2xs leading-4 break-words text-muted-foreground">
+          <div className="flex items-center gap-2">
+            <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-muted text-muted-foreground">
+              <MessageSquare className="h-3 w-3" />
+            </span>
+            <span className="truncate text-xs font-medium text-foreground">
+              {activeTitle ? `最近动态 · ${activeTitle}` : '最近 Agent 动态'}
+            </span>
+          </div>
+          <p className="mt-2 line-clamp-2 text-2xs leading-4 break-words text-muted-foreground">
             {lastText || '还没有对话记录。打开管理页，开始与 Agent 对话吧。'}
           </p>
         </button>
 
         {/* 未配置提示 */}
         {!aiConfigured && (
-          <div className="rounded-lg border border-accent/30 bg-accent-muted p-3.5">
+          <div className="rounded-xl border border-accent/30 bg-accent-muted p-3">
             <p className="text-xs font-medium text-accent">AI 服务尚未配置</p>
             <p className="mt-1 text-2xs leading-4 text-muted-foreground">
               配置 API Key 与模型后，Agent 才能开始工作。
@@ -292,16 +338,34 @@ function PopupApp() {
           </div>
         )}
 
-        <Separator className="my-1" />
-
-        {/* 入口按钮 */}
-        <div className="grid grid-cols-1 gap-2">
+        {/* 入口按钮：主操作只有一个，其余收成次级 */}
+        <div className="space-y-2 pt-1">
           {/* 两个实心按钮会互相抢注意力：AI 未配置时真正的下一步是「去配置」 */}
-          <Button variant={aiConfigured ? 'default' : 'outline'} onClick={() => openFullPage()}>
+          <Button variant={aiConfigured ? 'default' : 'outline'} className="w-full" onClick={() => openFullPage()}>
             打开完整管理页
           </Button>
+          {suggestion && (
+            <button
+              type="button"
+              data-testid="save-suggestion"
+              onClick={() => void saveCurrentTab(suggestion.folderId)}
+              className="flex w-full items-start gap-2 rounded-xl border border-accent/30 bg-accent-muted px-3 py-2 text-left transition-colors hover:bg-accent/15"
+            >
+              <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0 text-accent" />
+              <span className="min-w-0 flex-1">
+                <span className="block text-2xs font-medium text-accent">
+                  建议存到「{suggestion.path}」
+                </span>
+                <span className="mt-0.5 block truncate text-2xs text-muted-foreground">
+                  {suggestion.reason}
+                </span>
+              </span>
+              <span className="shrink-0 text-2xs font-medium text-accent">存到这里 →</span>
+            </button>
+          )}
           <Button
             variant="outline"
+            className="w-full"
             disabled={!canSave}
             onClick={() => void saveCurrentTab()}
             title={canSave ? '收藏当前标签页到书签栏' : '当前页面无法收藏（支持网页与本地文件；浏览器自身页面不行）'}

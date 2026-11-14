@@ -220,6 +220,10 @@ export function findModel(catalog: ModelCatalog, modelId: string, localProviderI
  *  - `'toggle'` 只能开不能调 → 调用方发"开启思考"的开关
  *  - 具体字符串 → 就是 effort 值
  *
+ * ⚠️ 设置页**不再调用**它改写用户的选择（自定义档位必须原样发出去，见 models/effort.ts）。
+ * 保留它是为了兼容"给建议"的场景：目录里没有该档位时，应该提示"上游可能不认"，
+ * 而不是把用户选的 `ultra` 悄悄改成 `high`；界面上的"最近档位"只能出现在**说明文案**里。
+ *
  * 找不到精确匹配时回落到**最近的**档位（按 EFFORT_ORDER 距离），而不是静默返回 null：
  * 用户在"高压"模型上选了 `medium`、切到只支持 `low/high/max` 的模型后，
  * 静默关闭思考会让回答质量突然掉一档，而他不知道为什么。

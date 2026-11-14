@@ -1,6 +1,7 @@
 import { X } from 'lucide-react';
-import { useEffect, useRef, type KeyboardEvent, type ReactNode } from 'react';
+import { useEffect, type KeyboardEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
+import { useLiquidGlass } from '@/lib/ui/use-liquid-glass';
 import { cn } from '@/lib/utils';
 
 /**
@@ -28,7 +29,8 @@ export function Dialog({
   /** 稳定锚点：e2e 用它定位，不依赖文案（改文案不该让测试变红） */
   testId?: string;
 }) {
-  const panelRef = useRef<HTMLDivElement>(null);
+  /* 液态玻璃：尺寸稳定后生成位移图；不支持的环境只留下磨砂（data-liquid="off"） */
+  const panelRef = useLiquidGlass<HTMLDivElement>({ active: open, bezel: 7, scale: 6 });
 
   // Esc 关闭 + 锁定背景滚动 + 打开聚焦面板 + 关闭还原焦点（原生对话框行为）
   useEffect(() => {
@@ -87,30 +89,34 @@ export function Dialog({
         tabIndex={-1}
         onKeyDown={onPanelKeyDown}
         className={cn(
-          // 对话框是浮层：用玻璃层（下面压着书签列表，能糊出层次）
-          'markai-glass animate-scale-in relative max-h-[calc(100vh-32px)] max-w-[calc(100vw-32px)] overflow-y-auto rounded-lg p-4 outline-none',
+          // 对话框是浮层：用玻璃层（下面压着书签列表，能糊出层次）。
+          // 液态版额外做边缘折射；淡入而不是缩放——缩放会让背景滤镜每帧重采样。
+          // 面板本身不滚：滚动放在内层，液态玻璃的 ::before 高光边才不会跟着内容滚走。
+          'markai-glass markai-glass-liquid animate-fade-in relative max-w-[calc(100vw-32px)] overflow-hidden rounded-lg outline-none',
           width,
         )}
       >
-        <div className="mb-3.5 flex items-start justify-between gap-3">
-          <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-foreground">{title}</h2>
-            {description && (
-              /* 说明文字不截断：截断会把「为什么」藏起来，只能靠 title 悬浮才看得到 */
-              <p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p>
-            )}
+        <div className="max-h-[calc(100vh-32px)] overflow-y-auto p-4">
+          <div className="mb-3.5 flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h2 className="text-sm font-semibold text-foreground">{title}</h2>
+              {description && (
+                /* 说明文字不截断：截断会把「为什么」藏起来，只能靠 title 悬浮才看得到 */
+                <p className="mt-1 text-xs leading-5 text-muted-foreground">{description}</p>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => onOpenChange(false)}
+              className="-mt-0.5 -mr-0.5 shrink-0 rounded-sm p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              aria-label="关闭"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={() => onOpenChange(false)}
-            className="-mt-0.5 -mr-0.5 shrink-0 rounded-sm p-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            aria-label="关闭"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
+          {children}
+          {footer && <div className="mt-5 flex items-center justify-end gap-2">{footer}</div>}
         </div>
-        {children}
-        {footer && <div className="mt-5 flex items-center justify-end gap-2">{footer}</div>}
       </div>
     </div>,
     document.body,

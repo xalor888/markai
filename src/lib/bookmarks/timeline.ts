@@ -5,6 +5,8 @@
  * 这是「按时间翻找」视图的核心约束——列表里出现文件夹就失去了按时间排序的意义。
  */
 
+import { getHost } from '@/lib/format';
+
 type BNode = chrome.bookmarks.BookmarkTreeNode;
 
 export interface TimelineItem {
@@ -63,18 +65,25 @@ export function flattenBookmarks(roots: BNode[]): TimelineItem[] {
   return out;
 }
 
-export type TimelineOrder = 'newest' | 'oldest';
+export type TimelineOrder = 'newest' | 'oldest' | 'recent';
 
 /**
- * 纯按收藏时间排序。
+ * 排序：最新收藏 / 最早收藏 / 最近打开。
+ *
+ * 「最近打开」用 `dateLastUsed`（Chrome 只在书签被访问时更新它），与收藏时间正交：
+ * 一条三年前收藏、今天刚打开的页面，应该排在最近打开的最前面。
+ * 没有 dateLastUsed 的书签（从未打开或浏览器没记录）永远排在最后。
+ *
  * 同毫秒时用 id 作稳定的次级键（Chrome 的 id 单调递增，等价于创建顺序），
  * 保证多次渲染顺序完全一致，不会出现「每刷新一次行序都变」。
  */
 export function sortTimeline(items: TimelineItem[], order: TimelineOrder = 'newest'): TimelineItem[] {
-  const dir = order === 'newest' ? -1 : 1;
+  const dir = order === 'oldest' ? 1 : -1;
+  const keyOf = (item: TimelineItem) =>
+    order === 'recent' ? item.dateLastUsed || 0 : item.dateAdded || 0;
   return [...items].sort((a, b) => {
-    const ta = a.dateAdded || 0;
-    const tb = b.dateAdded || 0;
+    const ta = keyOf(a);
+    const tb = keyOf(b);
     // 未知时间永远排在最后，不因排序方向跑到最前面
     if (ta === 0 && tb !== 0) return 1;
     if (tb === 0 && ta !== 0) return -1;
@@ -116,15 +125,21 @@ export function dayLabel(ms: number, now = Date.now()): string {
 }
 
 /** 按时段分组（输入需已排序；同一天的相邻项归入一组） */
-export function groupByDay(items: TimelineItem[], now = Date.now()): TimelineDayGroup[] {
+export function groupByDay(
+  items: TimelineItem[],
+  now = Date.now(),
+  /** 用哪个时间分组：默认收藏时间；「最近打开」排序时传 dateLastUsed */
+  timeOf: (item: TimelineItem) => number = (item) => item.dateAdded || 0,
+): TimelineDayGroup[] {
   const groups: TimelineDayGroup[] = [];
   for (const item of items) {
-    const key = item.dateAdded ? dayKey(item.dateAdded) : 'unknown';
+    const time = timeOf(item);
+    const key = time ? dayKey(time) : 'unknown';
     const last = groups[groups.length - 1];
     if (last && last.key === key) {
       last.items.push(item);
       last.total += 1;
-    } else groups.push({ key, label: dayLabel(item.dateAdded, now), items: [item], total: 1 });
+    } else groups.push({ key, label: dayLabel(time, now), items: [item], total: 1 });
   }
   return groups;
 }
@@ -156,6 +171,66 @@ export function pageGroups(groups: TimelineDayGroup[], limit: number): TimelineD
     const items = group.items.slice(0, remain);
     out.push({ ...group, items });
     remain -= items.length;
+  }
+  return out;
+}
+
+
+/** 时间线的时间范围：今天 / 最近 7 天 / 最近 30 天 / 全部 */
+export type TimelineRange = 'today' | '7d' | '30d' | 'all';
+
+/**
+ * 按收藏时间过滤（纯函数）。
+ *
+ * 口径："今天"= 本地自然日 0 点起；"7 天"= 今天 + 前 6 天；"30 天"= 今天 + 前 29 天。
+ * 未知时间（dateAdded 缺失）只在 "all" 里出现——否则一个没有时间戳的书签
+ * 会因为"看起来像今天"而被误算进日更统计。
+ */
+export function filterTimelineByRange(
+  items: readonly TimelineItem[],
+  range: TimelineRange,
+  now: number = Date.now(),
+): TimelineItem[] {
+  if (range === 'all') return [...items];
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  const days = range === 'today' ? 1 : range === '7d' ? 7 : 30;
+  const since = start.getTime() - (days - 1) * 24 * 60 * 60 * 1000;
+  return items.filter((item) => item.dateAdded > 0 && item.dateAdded >= since);
+}
+
+
+/**
+ * 按域名聚合（时间线的第二种分组方式）。
+ *
+ * 输入已经是按时间排序的：组内保持时间顺序，组间按"这个站点收藏了多少条"降序，
+ * 同数量按域名排序。`www.` 已在 getHost 里剥掉，避免同一站点被拆成两组。
+ * 组结构与按天分组一致，因此可以直接复用 `pageGroups` 的分页逻辑。
+ */
+export function groupByDomain(items: readonly TimelineItem[]): TimelineDayGroup[] {
+  const byHost = new Map<string, TimelineDayGroup>();
+  for (const item of items) {
+    const host = getHost(item.url) || '其他站点';
+    const existing = byHost.get(host);
+    if (existing) {
+      existing.items.push(item);
+      existing.total += 1;
+    } else {
+      byHost.set(host, { key: `domain:${host}`, label: host, items: [item], total: 1 });
+    }
+  }
+  return [...byHost.values()].sort((a, b) => b.total - a.total || a.label.localeCompare(b.label));
+}
+
+
+/** 去重后的 URL 列表（同一站点聚合里可能有同一页面的多个副本） */
+export function uniqueUrls(items: readonly TimelineItem[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const item of items) {
+    if (!item.url || seen.has(item.url)) continue;
+    seen.add(item.url);
+    out.push(item.url);
   }
   return out;
 }

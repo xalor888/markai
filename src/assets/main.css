@@ -25,6 +25,11 @@
   --color-accent: #4f46e5;
   --color-accent-foreground: #ffffff;
   --color-accent-muted: #eef1ff;
+  --tag-blue: #1d4ed8;
+  --tag-green: #15803d;
+  --tag-amber: #b45309;
+  --tag-rose: #be123c;
+  --tag-violet: #6d28d9;
 
   /* 语义色：红色仅用于危险操作，绿色仅用于成功反馈 */
   --color-destructive: #b42318;
@@ -72,6 +77,20 @@
   --glass-blur: 12px;
   --glass-saturate: 1.4;
 
+  /* ── 液态玻璃 token（只给对话框 / 命令面板）──
+     底色与 --glass-surface 同值：折射会放大边缘的高频色块，底色再低就压不住 11px 小字。
+     rim 用「上亮下暗」双色描边——白底上单靠白色高光看不见边界。 */
+  --liquid-tint: rgb(255 255 255 / 0.72);
+  --liquid-blur: 8px;
+  --liquid-saturate: 1.45;
+  --liquid-rim-a: rgb(255 255 255 / 0.92);
+  --liquid-rim-b: rgb(255 255 255 / 0.12);
+  --liquid-sheen: rgb(255 255 255 / 0.34);
+  --liquid-hairline: rgb(16 24 40 / 0.06);
+  --liquid-edge-bottom: rgb(16 24 40 / 0.06);
+  /* 颗粒：叠在底色上做 overlay，只为了让大面积玻璃不出现色阶断带 */
+  --liquid-noise: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='110' height='110'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='110' height='110' filter='url(%23n)' opacity='.35'/%3E%3C/svg%3E");
+
   /* 字体：系统字体栈 */
   --font-sans:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
@@ -98,6 +117,11 @@
   --color-accent: #818cf8;
   --color-accent-foreground: #10131a;
   --color-accent-muted: #232a4d;
+  --tag-blue: #93c5fd;
+  --tag-green: #6ee7b7;
+  --tag-amber: #fcd34d;
+  --tag-rose: #fda4af;
+  --tag-violet: #c4b5fd;
   --color-destructive: #f97066;
   --color-success: #5fd08a;
 
@@ -106,6 +130,16 @@
   /* 深色下 10% 太弱：浮层边界在近黑底上几乎看不见，提到 16% 才分得出层次 */
   --glass-border: rgb(227 232 239 / 0.16);
   --glass-highlight: rgb(255 255 255 / 0.08);
+
+  /* 液态玻璃：深色下高光要更克制，否则整块发灰；色块透底也会更明显 */
+  --liquid-tint: rgb(21 26 33 / 0.72);
+  --liquid-rim-a: rgb(255 255 255 / 0.32);
+  --liquid-rim-b: rgb(255 255 255 / 0.05);
+  --liquid-sheen: rgb(255 255 255 / 0.14);
+  --liquid-hairline: rgb(255 255 255 / 0.1);
+  --liquid-edge-bottom: rgb(255 255 255 / 0.04);
+  /* 深色下 overlay 会把颗粒放大成噪点，纹理本身要更淡 */
+  --liquid-noise: url("data:image/svg+xml;utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='110' height='110'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='110' height='110' filter='url(%23n)' opacity='.16'/%3E%3C/svg%3E");
 }
 
 @layer base {
@@ -468,9 +502,72 @@
     var(--shadow-lg);
 }
 
+/* ── 液态玻璃层（markai-glass-liquid）──
+   只给带遮罩的对话框与命令面板用：位移滤镜要把背景弯折，必须先有「背景层次」。
+   基础层是各浏览器都能用的磨砂；只有 hook 检测到 `backdrop-filter: url()` 支持时
+   才会写入 data-liquid="on"，此时才叠加 SVG 折射。
+   注意：这一段必须在 .markai-glass 之后，否则盖不掉它的 background / box-shadow。 */
+.markai-glass-liquid {
+  position: relative;
+  isolation: isolate;
+  /* 保留 1px 边框占位（避免尺寸跳动），视觉边界交给 rim 与 hairline */
+  border: 1px solid transparent;
+  background-color: var(--liquid-tint);
+  background-image:
+    var(--liquid-noise),
+    radial-gradient(
+      120% 90% at var(--liquid-mx, 28%) var(--liquid-my, -25%),
+      color-mix(in srgb, var(--liquid-sheen) 100%, transparent),
+      transparent 62%
+    ),
+    linear-gradient(160deg, color-mix(in srgb, var(--liquid-sheen) 45%, transparent), transparent 48%);
+  background-repeat: repeat, no-repeat, no-repeat;
+  background-size: 110px 110px, auto, auto;
+  background-blend-mode: overlay, normal, normal;
+  -webkit-backdrop-filter: blur(var(--liquid-blur)) saturate(var(--liquid-saturate));
+  backdrop-filter: blur(var(--liquid-blur)) saturate(var(--liquid-saturate));
+  box-shadow:
+    inset 0 1px 0 var(--glass-highlight),
+    inset 0 -1px 0 var(--liquid-edge-bottom),
+    0 0 0 1px var(--liquid-hairline),
+    var(--shadow-lg);
+}
+
+/* 上亮下暗的 1px 描边：用 mask 把渐变裁成一条环，不占布局 */
+.markai-glass-liquid::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  border-radius: inherit;
+  padding: 1px;
+  pointer-events: none;
+  background: linear-gradient(
+    150deg,
+    var(--liquid-rim-a),
+    var(--liquid-rim-b) 38%,
+    var(--liquid-rim-b) 62%,
+    var(--liquid-rim-a)
+  );
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask:
+    linear-gradient(#000 0 0) content-box exclude,
+    linear-gradient(#000 0 0);
+}
+
+/* 折射：仅当 hook 写入 data-liquid="on"（Chromium）时生效。
+   var(--liquid-filter) 由 JS 指向该元素专属的 <filter> id。 */
+.markai-glass-liquid[data-liquid='on'] {
+  backdrop-filter: var(--liquid-filter) blur(var(--liquid-blur)) saturate(var(--liquid-saturate));
+}
+
 /* 不支持 backdrop-filter 时退回实心：宁可没有玻璃感，也不能让文字压在透底上 */
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .markai-glass {
+  .markai-glass,
+  .markai-glass-liquid {
     background: var(--color-card);
     box-shadow: var(--shadow-lg);
   }

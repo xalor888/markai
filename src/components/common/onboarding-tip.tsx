@@ -82,10 +82,10 @@ export function OnboardingTip({ onGoOrganize }: { onGoOrganize?: () => void }) {
       role="note"
       aria-label="新手提示"
       title={current.body}
-      className="animate-fade-in flex h-10 shrink-0 items-center gap-2 border-t border-border bg-accent-muted/50 px-3"
+      className="animate-fade-in flex h-10 shrink-0 items-center gap-2 border-t border-border bg-muted/40 px-3"
     >
       <Sparkles className="h-3.5 w-3.5 shrink-0 text-accent" aria-hidden="true" />
-      <p className="min-w-0 flex-1 truncate text-xs text-foreground">
+      <p className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
         {current.title}
         <span className="ml-1.5 text-2xs text-muted-foreground/70">
           {step + 1}/{STEPS.length}

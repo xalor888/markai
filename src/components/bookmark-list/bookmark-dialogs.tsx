@@ -7,6 +7,8 @@ import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { MovePicker } from '@/components/bookmark-list/move-picker';
+import { TagsDialog } from '@/components/bookmark-list/tags-dialog';
+import { RemoveTagsDialog } from '@/components/bookmark-list/remove-tags-dialog';
 import { isSavableUrl, prefillFromTab } from '@/lib/bookmarks/save-tab';
 
 /**
@@ -36,7 +38,9 @@ export function BookmarkDialogs() {
     dialog.kind !== 'create-folder' &&
     dialog.kind !== 'create-bookmark' &&
     dialog.kind !== 'move' &&
-    dialog.kind !== 'delete-many'
+    dialog.kind !== 'delete-many' &&
+    dialog.kind !== 'tags' &&
+    dialog.kind !== 'remove-tags'
       ? findNode(roots, dialog.bookmarkId)
       : null;
 
@@ -80,6 +84,8 @@ export function BookmarkDialogs() {
       dialog.kind !== 'create-bookmark' &&
       dialog.kind !== 'move' &&
       dialog.kind !== 'delete-many' &&
+      dialog.kind !== 'tags' &&
+      dialog.kind !== 'remove-tags' &&
       !node
     ) {
       closeDialog();
@@ -87,6 +93,12 @@ export function BookmarkDialogs() {
   }, [dialog, node, closeDialog]);
 
   if (!dialog) return null;
+  if (dialog.kind === 'tags') {
+    return <TagsDialog bookmarkIds={dialog.bookmarkIds} onClose={closeDialog} />;
+  }
+  if (dialog.kind === 'remove-tags') {
+    return <RemoveTagsDialog bookmarkIds={dialog.bookmarkIds} onClose={closeDialog} />;
+  }
 
   /** 新建文件夹 */
   const handleCreate = async () => {

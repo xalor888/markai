@@ -85,10 +85,27 @@ export interface ChatMessage {
 }
 
 /**
- * 思考强度的标准档位。`'auto'` 表示「不指定，按模型默认」。
- * 与 `lib/models/catalog.ts` 的 EFFORT_ORDER 同源（那边给 UI 排次序用）。
+ * 思考强度。`'auto'` 表示「不指定，按模型默认」。
+ *
+ * 标准档位在这里列出来，只为类型提示与文档；**运行时接受任何合法 token**
+ * （`ultra`、`3`、厂商新档位都可能被你的端点认识）。净化规则见
+ * `lib/models/effort.ts`：去空白、转小写、长度 ≤ 24、只允许字母数字与 `- _ . :`。
+ *
+ * 为什么不用枚举把值域钉死：目录（models.dev）只是"上游声称支持什么"的快照，
+ * 网关/中转/自建服务的能力经常超出这张表；把用户的选择限制在快照里，
+ * 就会变成"设置页能点、端点却不认"或"端点认、设置页却不让选"。
  */
-export type ReasoningEffort = 'auto' | 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+export type ReasoningEffort =
+  | 'auto'
+  | 'none'
+  | 'minimal'
+  | 'low'
+  | 'medium'
+  | 'high'
+  | 'xhigh'
+  | 'max'
+  // 任意合法自定义档位（保留字面量提示，同时允许自定义字符串）
+  | (string & {});
 
 /** AI 连接配置（options 页配置，chrome.storage.local 明文存储） */
 export interface AIConfig {

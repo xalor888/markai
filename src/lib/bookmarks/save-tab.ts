@@ -63,11 +63,16 @@ async function resolveBarId(): Promise<string | undefined> {
  * 重复检测按 **url 完全相等**判断：`chrome.bookmarks.search(url)` 是子串匹配，
  * 会把 `.../page2` 也算进 `.../page` 的结果里，所以必须再比一次 url。
  */
-export async function saveTabToBar(tab: { title?: string; url?: string }): Promise<SaveResult> {
+export async function saveTabToBar(tab: {
+  title?: string;
+  url?: string;
+  /** 指定目标文件夹；缺省时存入书签栏 */
+  parentId?: string;
+}): Promise<SaveResult> {
   const url = tab.url;
   if (!isSavableUrl(url)) return { ok: false, reason: 'unsupported-url' };
 
-  const parentId = await resolveBarId();
+  const parentId = tab.parentId ?? (await resolveBarId());
 
   try {
     const existing = await chrome.bookmarks.search(url).catch(() => [] as chrome.bookmarks.BookmarkTreeNode[]);

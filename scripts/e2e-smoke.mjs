@@ -616,6 +616,25 @@ async function run() {
     })()`);
     check('Ctrl/⌘+K 能打开命令面板', open);
 
+    /*
+     * 液态玻璃只在 Chromium 生效：位移滤镜必须真的挂上，
+     * 否则 data-liquid 会停在 off，面板看起来只是普通磨砂。
+     */
+    if (await ev(`CSS.supports('backdrop-filter', 'url(#x)')`)) {
+      const liquid = await waitFor(
+        async () =>
+          (await ev(`(() => {
+            const p = document.querySelector('[data-testid="command-palette"]');
+            return p
+              ? p.dataset.liquid === 'on' &&
+                  document.querySelectorAll('#markai-liquid-defs filter').length > 0
+              : false;
+          })()`)) === true,
+        4000,
+      );
+      check('命令面板的液态玻璃建好了位移滤镜', liquid === true, JSON.stringify({ liquid }));
+    }
+
     const search = await ev(`(async () => {
       const input = document.querySelector('[data-testid="command-palette"] input');
       if (!input) return { ok: false };
@@ -2429,6 +2448,20 @@ async function run() {
       return { count: tabs.length, activeId: tabs.find((t) => t.active)?.id ?? null };
     })()`);
 
+    /*
+     * 前面的用例可能留下了搜索词；不清掉的话列表只显示过滤后的行，
+     * 刚建的书签根本不在列表里，方向键走多少步都到不了（这条用例就红在这）。
+     */
+    await ev(`(() => {
+      const input = document.querySelector('[data-testid="search"]');
+      if (!input) return false;
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+      setter.call(input, '');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      return true;
+    })()`);
+    await sleep(400);
+
     // 高亮到那一行，再按 Shift+Enter
     await ev(`(() => { const el = document.querySelector('[data-testid="list"]'); if (el) el.focus(); return !!el; })()`);
     await sleep(200);
@@ -2439,7 +2472,7 @@ async function run() {
     })()`);
     await sleep(300);
     // 用方向键把高亮移到"后台打开靶"那一行
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 80; i++) {
       const on = await ev(`(() => {
         const r = document.querySelector('[data-testid="row"][data-active="true"]');
         return r ? (r.getAttribute('title') || '') : '';
@@ -2452,33 +2485,51 @@ async function run() {
       })()`);
       await sleep(120);
     }
+    const sel = await ev(`(() => ({
+      active: document.querySelector('[data-testid="row"][data-active="true"]')?.getAttribute('title') || null,
+      rows: document.querySelectorAll('[data-testid="row"]').length,
+      hasTarget: [...document.querySelectorAll('[data-testid="row"]')].some((r) => (r.getAttribute('title') || '').includes('后台打开靶')),
+      folder: [...document.querySelectorAll('[role="treeitem"]')].find((r) => r.getAttribute('aria-selected') === 'true')?.textContent?.trim() || null,
+      search: document.querySelector('[data-testid="search"]')?.value ?? null,
+    }))()`);
     await ev(`(() => {
       const el = document.querySelector('[data-testid="list"]');
       el?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', shiftKey: true, bubbles: true, cancelable: true }));
       return true;
     })()`);
 
+    /*
+     * headless Chrome 会创建后台标签，但不会给未激活标签立刻提交 URL
+     * （实测 tabs.query 里 url 还是空串，进前台才加载）。所以判据拆成两层：
+     *  1. 多出一个标签，且它是非激活的，当前标签没被换掉 —— 这是产品承诺；
+     *  2. 若该标签已经拿到 URL，再钉住它确实是 BG_URL。
+     */
     const after = await waitFor(
       async () =>
         (await ev(`(async () => {
           const tabs = await chrome.tabs.query({ currentWindow: true });
-          return tabs.some((t) => t.url === ${JSON.stringify(BG_URL)});
+          return tabs.length > ${before.count} && tabs.some((t) => !t.active && t.id !== ${before.activeId});
         })()`)) === true,
       8000,
     );
     const info = await ev(`(async () => {
       const tabs = await chrome.tabs.query({ currentWindow: true });
-      const bg = tabs.find((t) => t.url === ${JSON.stringify(BG_URL)});
+      const bg = tabs.find((t) => t.url === ${JSON.stringify(BG_URL)})
+        ?? tabs.find((t) => !t.active && t.id !== ${before.activeId});
       return {
         count: tabs.length,
         bgActive: bg ? bg.active : null,
+        bgUrl: bg ? bg.url : null,
         currentActiveId: tabs.find((t) => t.active)?.id ?? null,
       };
     })()`);
     check(
       'Shift+Enter 在新标签页打开，且不抢走当前页面',
-      after === true && info.bgActive === false,
-      JSON.stringify({ after, info, before }),
+      after === true &&
+        info.bgActive === false &&
+        info.currentActiveId === before.activeId &&
+        (info.bgUrl === '' || info.bgUrl === 'about:blank' || info.bgUrl === BG_URL),
+      JSON.stringify({ after, info, before, sel }),
     );
 
     // 清理：关掉那个后台标签页

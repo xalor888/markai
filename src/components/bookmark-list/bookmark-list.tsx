@@ -1,5 +1,5 @@
-import { AlertCircle, RefreshCw, Loader2, ChevronDown, Clock, ArrowDownUp, BookmarkPlus, Copy, ExternalLink, Folder, FolderInput, FolderOpen, FolderPlus, Link2, Search, Sparkles, Trash2, X } from 'lucide-react';
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
+import { AlertCircle, RefreshCw, Loader2, ChevronDown, Clock, ArrowDownUp, BookmarkPlus, Copy, ExternalLink, Folder, FolderInput, FolderOpen, FolderPlus, LayoutDashboard, LayoutList, Link2, LocateFixed, MoreHorizontal, Search, Settings2, Sparkles, Tag, Trash2, X } from 'lucide-react';
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
 import { useAIStore } from '@/stores/aiStore';
 import { useBookmarkStore, copyNodeDeep, findNode, buildFolderChildCounts, resolveTitlePath, type TreeContextMenu } from '@/stores/bookmarkStore';
 import { useUIStore } from '@/stores/uiStore';
@@ -11,12 +11,26 @@ import { pushToast } from '@/lib/toast';
 import { openUrl, openUrls } from '@/lib/open-url';
 import { describeBulk } from '@/lib/bookmarks/bulk';
 import { TimelinePanel } from '@/components/bookmark-list/timeline-panel';
+import { OverviewPanel } from '@/components/bookmark-list/overview-panel';
 import { cn } from '@/lib/utils';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import { Favicon } from '@/components/common/favicon';
 import { Input } from '@/components/ui/input';
 import { ORGANIZE_LABEL } from '@/lib/ui/labels';
+import { recordSearch } from '@/lib/search/history';
+import { flattenBookmarks } from '@/lib/bookmarks/timeline';
+import { TagsManagerDialog } from './tags-manager-dialog';
+import { colorForTag, colorVarOf, readTagColors, type TagColorMap } from '@/lib/bookmarks/tag-colors';
+import {
+  collectTagCounts,
+  idsForTag,
+  normalizeTag,
+  pruneTagMap,
+  readTagMap,
+  saveTagMap,
+  type TagMap,
+} from '@/lib/bookmarks/tags';
 
 type BNode = chrome.bookmarks.BookmarkTreeNode;
 
@@ -89,10 +103,86 @@ export function BookmarkList({ className, compact = false }: { className?: strin
    * 重做前列表自己维护一份 state、树再维护一份，两边各搜一半——用户永远搜不全。
    */
   const query = useBookmarkStore((s) => s.searchQuery);
+  /** 输入 `#标签` 走本地标签表（搜索框优先于标签条） */
+  const hashTag = query.trim().startsWith('#') ? normalizeTag(query.trim().slice(1)) : '';
   const setQuery = useBookmarkStore((s) => s.setSearchQuery);
   const [sortBy, setSortBy] = useState<SortKey>('manual');
+  /** 概览：第三视图（书签库状态 + 管家建议），不写书签 */
+  const [overview, setOverview] = useState(false);
+
+  // 进入某个文件夹或搜索结果时自动回到列表：概览是"库级"视图，不该盖住具体上下文
+  useEffect(() => {
+    if (!overview) return;
+    if (selectedFolderId || query) setOverview(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedFolderId, query]);
+
+  /** 概览 → 全部列表 */
+  const showLibraryList = () => {
+    setOverview(false);
+    useBookmarkStore.getState().selectFolder(null);
+  };
+  /** 概览 → 按添加时间看整个库（"今天新增"点进来必须有东西） */
+  const showToday = () => {
+    setOverview(false);
+    useBookmarkStore.getState().selectFolder(null);
+    setSortBy('dateAdded');
+  };
+
+  /*
+   * 命令面板的「视图」动作通过自定义事件切过来：面板与列表不在同一棵子树里，
+   * 把 setState 传进去会让面板每次渲染重建整个结果集（400+ 条书签的扁平化）。
+   */
+  useEffect(() => {
+    const onView = (e: Event) => {
+      const mode = (e as CustomEvent<string>).detail;
+      if (mode === 'overview') setOverview(true);
+      else if (mode === 'list') {
+        setOverview(false);
+        setSortBy('manual');
+      } else if (mode === 'timeline') {
+        setOverview(false);
+        setSortBy('time');
+      }
+    };
+    document.addEventListener('markai:view', onView as EventListener);
+    return () => document.removeEventListener('markai:view', onView as EventListener);
+  }, []);
+
+  /*
+   * ⌘/Ctrl + 1/2/3 直接切视图（概览 / 列表 / 时间线）。
+   * 只在非输入态生效：用户正在搜索框里敲字时，⌘1 不该把视图切走。
+   * 与工具栏的三个分段是同一组语义，键盘用户不必去点按钮。
+   */
+  useEffect(() => {
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.closest('select'))) return;
+      if (e.key !== '1' && e.key !== '2' && e.key !== '3') return;
+      e.preventDefault();
+      if (e.key === '1') setOverview(true);
+      if (e.key === '2') {
+        setOverview(false);
+        setSortBy('manual');
+      }
+      if (e.key === '3') {
+        setOverview(false);
+        setSortBy('time');
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
   const [activeIndex, setActiveIndex] = useState(-1);
   const [anchorIndex, setAnchorIndex] = useState<number | null>(null);
+  /** 多选操作条的「更多」弹出菜单 */
+  const [selectionMenuOpen, setSelectionMenuOpen] = useState(false);
+  /** 标签：id -> tags；activeTag 为 null 表示不筛选 */
+  const [tagMap, setTagMap] = useState<TagMap>({});
+  const [tagColors, setTagColors] = useState<TagColorMap>({});
+  const [activeTag, setActiveTag] = useState<string | null>(null);
+  const [tagsManagerOpen, setTagsManagerOpen] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
 
   // 加载当前文件夹子项（roots 变化 = 书签结构变更 → 重新拉取；切回浏览模式时也重拉）
@@ -145,6 +235,12 @@ export function BookmarkList({ className, compact = false }: { className?: strin
       setSearchResults(null);
       return;
     }
+    // `#标签` 走本地标签表，不去 chrome.bookmarks.search 里搜一个带 # 的字符串
+    if (hashTag) {
+      setSearchResults(null);
+      setSearchErr(null);
+      return;
+    }
     let cancelled = false;
     setSearchErr(null);
     const timer = setTimeout(() => {
@@ -166,7 +262,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [query, searchTick]);
+  }, [query, searchTick, hashTag]);
 
   /*
    * 「按收藏时间」是**跨文件夹的全部书签**。此时用户点树里某个文件夹，
@@ -182,11 +278,32 @@ export function BookmarkList({ className, compact = false }: { className?: strin
   useEffect(() => {
     if (folderSelectTick === 0) return; // 首次挂载 / 恢复上次选中不算用户操作
     setSortBy((cur) => (cur === 'time' ? 'manual' : cur));
+    // 点文件夹 = 想看那个文件夹；标签筛选是全局视图，继续留着会让人以为"点了没反应"
+    setActiveTag(null);
   }, [folderSelectTick]);
 
-  const browsing = !query.trim();
-  const rawItems = browsing ? children : searchResults;
+  const tagCounts = useMemo(() => collectTagCounts(tagMap), [tagMap]);
 
+  useEffect(() => {
+    if (!activeTag) return;
+    if (!tagCounts.some((t) => t.tag === activeTag.toLowerCase())) setActiveTag(null);
+  }, [activeTag, tagCounts]);
+  const effectiveTag = hashTag || activeTag;
+  const taggedNodes = useMemo(() => {
+    if (!effectiveTag) return null;
+    const ids = idsForTag(tagMap, effectiveTag);
+    if (ids.size === 0) return [];
+    const out: NonNullable<typeof children> = [];
+    for (const item of flattenBookmarks(roots)) {
+      if (!ids.has(item.id)) continue;
+      const node = findNode(roots, item.id);
+      if (node) out.push(node);
+    }
+    return out;
+  }, [effectiveTag, tagMap, roots]);
+
+  const browsing = !query.trim();
+  const rawItems = effectiveTag ? taggedNodes : browsing ? children : searchResults;
   // 排序（搜索模式下保持原生相关度顺序；文件夹始终置顶）
   const items = useMemo(() => {
     if (!rawItems) return null;
@@ -216,8 +333,22 @@ export function BookmarkList({ className, compact = false }: { className?: strin
     return list;
   }, [rawItems, sortBy, browsing]);
 
+  /** 搜索结果分组：索引必须与应用排序后的 `items` 对齐，否则组头会插在错误的行前 */
+  const folderResultCount = useMemo(
+    () => (browsing ? 0 : (items ?? []).filter((n) => !n.url).length),
+    [browsing, items],
+  );
+  const firstBookmarkResult = useMemo(
+    () => (browsing ? -1 : (items ?? []).findIndex((n) => !!n.url)),
+    [browsing, items],
+  );
+
   // 未选中文件夹时不显示加载态（展示引导文案），避免无限「加载中…」
-  const loading = browsing ? children === null && !!selectedFolderId : searchResults === null;
+  const loading = browsing
+    ? children === null && !!selectedFolderId
+    : hashTag
+      ? false
+      : searchResults === null;
 
   // 文件夹子项数：中栏的行来自 getChildren()（浏览）或 search()（搜索），这两种返回的节点
   // **都不带 children**——只有 getTree()/getSubTree() 会填充（详见 buildFolderChildCounts）。
@@ -228,6 +359,45 @@ export function BookmarkList({ className, compact = false }: { className?: strin
     () => selectedIds.map((id) => findNode(roots, id)).filter((n): n is BNode => !!n),
     [selectedIds, roots],
   );
+
+  useEffect(() => {
+    if (selectedIds.length === 0) setSelectionMenuOpen(false);
+  }, [selectedIds.length]);
+
+  // 标签读取 + 变更刷新 + 删除书签后的孤儿清理
+  useEffect(() => {
+    let alive = true;
+    const refresh = () => {
+      void readTagMap().then((m) => {
+        if (alive) setTagMap(m);
+      });
+      void readTagColors().then((c) => {
+        if (alive) setTagColors(c);
+      });
+    };
+    refresh();
+    const onChanged = () => refresh();
+    document.addEventListener('markai:tags-changed', onChanged);
+    return () => {
+      alive = false;
+      document.removeEventListener('markai:tags-changed', onChanged);
+    };
+  }, []);
+
+  useEffect(() => {
+    void readTagMap().then((map) => {
+      const valid = new Set(flattenBookmarks(roots).map((item) => item.id));
+      const { next, removed } = pruneTagMap(map, valid);
+      if (removed > 0) {
+        void saveTagMap(next).then(() => setTagMap(next));
+      } else setTagMap(map);
+    });
+  }, [roots]);
+
+  // 输入搜索时退出标签筛选，避免"搜了却没反应"
+  useEffect(() => {
+    if (query.trim()) setActiveTag(null);
+  }, [query]);
 
   // 键盘导航：高亮项滚动到可视区
   useEffect(() => {
@@ -509,6 +679,13 @@ export function BookmarkList({ className, compact = false }: { className?: strin
   const handleToggleRow = useCallback((i: number, shiftKey: boolean) => toggleRange(i, shiftKey), [toggleRange]);
   const handleToggleClickRow = useCallback((i: number) => toggleRange(i, false), [toggleRange]);
   const handleActivateRow = useCallback((i: number) => setActiveIndex(i), []);
+  /** 行内标签点击：走与标签条同一条筛选路径（清搜索、清多选） */
+  const handleTagFilter = useCallback((tag: string) => {
+    useBookmarkStore.getState().clearSelection();
+    useBookmarkStore.getState().setSearchQuery('');
+    setActiveTag(tag);
+  }, []);
+
   const handleOpenRow = useCallback(
     (i: number, shiftKey: boolean) => {
       const n = items?.[i];
@@ -517,6 +694,9 @@ export function BookmarkList({ className, compact = false }: { className?: strin
         toggleRange(i, true);
         return;
       }
+      // 从搜索结果里真正打开了一项：这次查询值得记住（概览/下次搜索都能复用）
+      const q = useBookmarkStore.getState().searchQuery;
+      if (q.trim()) recordSearch(q);
       if (n.url) void openUrl(n.url);
       else useBookmarkStore.getState().selectFolder(n.id);
     },
@@ -726,6 +906,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
       const first = (searchResults ?? items ?? [])[0];
       if (!first) return;
       e.preventDefault();
+      recordSearch(useBookmarkStore.getState().searchQuery);
       if (first.url) void openUrl(first.url);
       else useBookmarkStore.getState().selectFolder(first.id);
     };
@@ -735,54 +916,89 @@ export function BookmarkList({ className, compact = false }: { className?: strin
 
 
   return (
-    <div className={cn('animate-fade-in flex h-full min-h-0 min-w-0 flex-col bg-background', className)}>
-      {/* 工具栏：面包屑 + 排序 + 搜索 */}
-      <div className="flex h-10 shrink-0 items-center gap-2 border-b border-border px-3">
-        {browsing ? (
-          <div className="flex min-w-0 items-center gap-1">
-            <button
-              type="button"
-              onClick={() => useBookmarkStore.getState().selectFolder(null)}
-              className="shrink-0 rounded-sm px-1.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-            >
-              全部
-            </button>
-            {selectedFolderId && <BreadcrumbTrail roots={roots} folderId={selectedFolderId} />}
-            {children && (
-              <span className="shrink-0 text-2xs text-muted-foreground/60">{children.length} 项</span>
-            )}
-          </div>
-        ) : (
-          <div className="flex min-w-0 items-center gap-1 text-xs text-muted-foreground">
-            <Search className="h-3 w-3 shrink-0" />
-            <span className="truncate">搜索「{query}」</span>
-            {searchResults && !searchErr && (
-              <span className="shrink-0 text-2xs text-muted-foreground/70" data-testid="search-count">
-                · {searchResults.length}{searchResults.length >= 100 ? '+' : ''} 条
+    <div className={cn('animate-fade-in relative flex h-full min-h-0 min-w-0 flex-col bg-background', className)}>
+      {/* 工具栏：左边"你在看什么"，右边"怎么排、怎么整理" */}
+      <div className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-background px-4">
+        <div className="min-w-0 flex-1">
+          {overview ? (
+            <div className="flex min-w-0 items-center gap-1.5">
+              <LayoutDashboard className="h-3.5 w-3.5 shrink-0 text-accent" />
+              <span className="truncate text-sm font-semibold text-foreground">书签概览</span>
+              {!compact && (
+                <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-2xs text-muted-foreground">
+                  整个书签库
+                </span>
+              )}
+            </div>
+          ) : effectiveTag ? (
+            <div className="flex min-w-0 items-center gap-1.5">
+              <Tag className="h-3.5 w-3.5 shrink-0 text-accent" />
+              <span className="truncate text-sm font-semibold text-foreground">标签 #{effectiveTag}</span>
+              <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-2xs tabular-nums text-muted-foreground">
+                {items?.length ?? 0} 项
               </span>
-            )}
-            {searchErr && (
-              <span className="shrink-0 text-2xs text-destructive" data-testid="search-error">
-                · 搜索失败
-              </span>
-            )}
-          </div>
-        )}
-
-        <div className="ml-auto flex shrink-0 items-center gap-1.5">
-          {/* 一键让 Agent 整理当前文件夹（完整页带文字，侧边栏窄布局用图标） */}
-          {browsing && selectedFolderId && (
-            <Button
-              size={compact ? 'icon' : 'sm'}
-              variant="secondary"
-              onClick={organizeFolder}
-              title="让 MarkAI 整理当前文件夹"
-              className={compact ? 'h-7 w-7' : 'h-7'}
-            >
-              <Sparkles className="h-3 w-3" />
-              {!compact && '整理'}
-            </Button>
+            </div>
+          ) : browsing ? (
+            <div className="flex min-w-0 items-center gap-1.5">
+              {!compact && (
+                <button
+                  type="button"
+                  onClick={() => useBookmarkStore.getState().selectFolder(null)}
+                  className="shrink-0 rounded-md px-1.5 py-0.5 text-sm font-semibold text-foreground transition-colors hover:bg-muted"
+                >
+                  {selectedFolderId ? '全部' : '全部书签'}
+                </button>
+              )}
+              {selectedFolderId ? (
+                <BreadcrumbTrail roots={roots} folderId={selectedFolderId} />
+              ) : compact ? (
+                <span className="truncate text-sm font-semibold text-foreground">全部书签</span>
+              ) : null}
+              {children && (
+                <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-2xs tabular-nums text-muted-foreground">
+                  {children.length} 项
+                </span>
+              )}
+            </div>
+          ) : (
+            <div className="flex min-w-0 items-center gap-1.5">
+              <Search className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+              <span className="truncate text-sm font-semibold text-foreground">搜索「{query}」</span>
+              {searchResults && !searchErr && (
+                <span
+                  className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-2xs tabular-nums text-muted-foreground"
+                  data-testid="search-count"
+                >
+                  {searchResults.length}
+                  {searchResults.length >= 100 ? '+' : ''} 条
+                </span>
+              )}
+              {searchErr && (
+                <span className="shrink-0 text-2xs text-destructive" data-testid="search-error">
+                  搜索失败
+                </span>
+              )}
+            </div>
           )}
+          {!compact && !overview && (
+            <p className="mt-0.5 truncate text-2xs text-muted-foreground">
+              {effectiveTag
+                ? '标签筛选 · 覆盖整个书签库'
+                : browsing
+                  ? selectedFolderId
+                    ? '当前文件夹 · 支持多选、拖拽与右键'
+                    : '书签栏与全部文件夹'
+                  : '在全部书签中搜索'}
+            </p>
+          )}
+          {!compact && overview && (
+            <p className="mt-0.5 truncate text-2xs text-muted-foreground">
+              你的书签库一眼看清 · 所有动作都走确认与撤销
+            </p>
+          )}
+        </div>
+
+        <div className="flex shrink-0 items-center gap-1.5">
           {/* 搜索模式打开全部结果（去重，最多 25 个；侧边栏窄布局用图标） */}
           {!browsing && (searchResults?.length ?? 0) > 0 && (
             <Button
@@ -790,41 +1006,80 @@ export function BookmarkList({ className, compact = false }: { className?: strin
               variant="secondary"
               onClick={openSearchResults}
               title="打开全部搜索结果"
-              className={compact ? 'h-7 w-7' : 'h-7'}
+              className={compact ? 'h-8 w-8' : 'h-8'}
             >
               <ExternalLink className="h-3.5 w-3.5" />
               {!compact && '打开全部'}
             </Button>
           )}
+
           {/*
-           * 时间线：一个**带文字**的明确入口。
-           * 排序下拉里虽然也有「按收藏时间」，但那是一个下拉选项，
-           * 用户找不到"我怎么去时间线"这个动作——这里给它一个按钮，
-           * 进去之后同一个位置变成「返回文件夹」，随时能回来。
+           * 视图切换：概览 / 列表 / 时间线 三个状态一眼可见。
+           * 「概览」是库级视图（问候 + 指标 + 建议），不写书签；点进具体文件夹会自动回到列表。
            */}
-          <Button
-            size={compact ? 'icon' : 'sm'}
-            variant={sortBy === 'time' ? 'default' : 'outline'}
-            onClick={() => setSortBy(sortBy === 'time' ? 'manual' : 'time')}
-            title={sortBy === 'time' ? '返回文件夹列表' : '时间线：按收藏时间看全部书签'}
-            data-testid="timeline-toggle"
-            className="h-7 shrink-0"
-          >
-            <Clock className="h-3 w-3" />
-            {!compact && (sortBy === 'time' ? '返回文件夹' : '时间线')}
-          </Button>
+          <div className="flex items-center rounded-lg bg-muted p-0.5" role="group" aria-label="视图">
+            <button
+              type="button"
+              data-testid="overview-toggle"
+              aria-pressed={overview}
+              aria-label="书签概览"
+              onClick={() => setOverview(true)}
+              title="书签概览：库的状态与管家建议"
+              className={cn(
+                'flex h-7 items-center gap-1 rounded-md px-2 text-2xs transition-colors',
+                overview ? 'bg-card font-medium text-foreground' : 'text-muted-foreground hover:text-foreground',
+              )}
+            >
+              <LayoutDashboard className="h-3 w-3" />
+              {!compact && '概览'}
+            </button>
+            <button
+              type="button"
+              aria-pressed={!overview && sortBy !== 'time'}
+              aria-label="列表视图"
+              onClick={() => {
+                setOverview(false);
+                setSortBy('manual');
+              }}
+              title="文件夹列表"
+              className={cn(
+                'flex h-7 items-center gap-1 rounded-md px-2 text-2xs transition-colors',
+                !overview && sortBy !== 'time'
+                  ? 'bg-card font-medium text-foreground'
+                  : 'text-muted-foreground hover:text-foreground',
+              )}
+            >
+              <LayoutList className="h-3 w-3" />
+              {!compact && '列表'}
+            </button>
+            <button
+              type="button"
+              data-testid="timeline-toggle"
+              aria-pressed={!overview && sortBy === 'time'}
+              aria-label="时间线视图"
+              onClick={() => {
+                setOverview(false);
+                setSortBy(sortBy === 'time' ? 'manual' : 'time');
+              }}
+              title="时间线：按收藏时间看全部书签"
+              className={cn(
+                'flex h-7 items-center gap-1 rounded-md px-2 text-2xs transition-colors',
+                !overview && sortBy === 'time'
+                  ? 'bg-card font-medium text-foreground'
+                  : 'text-muted-foreground hover:text-foreground',
+              )}
+            >
+              <Clock className="h-3 w-3" />
+              {!compact && '时间线'}
+            </button>
+          </div>
+
           {/*
-           * 排序：**紧凑布局也要有**。
-           * 重做前这里写着 `!compact`，于是侧边栏（最常用的形态）根本没有排序下拉——
-           * 而「按收藏时间」正是时间线的入口，等于窄屏下完全进不去时间线。
+           * 排序：宽度按"最长的选项"来定（12px 字号下 5 个汉字 = 60px，
+           * 加上左侧图标与右侧箭头 112px 刚好放得下「按添加时间」而不被截断）。
            */}
-          {/*
-           * 宽度按"最长的选项"来定，不是拍一个数：
-           * 12px 字号下 5 个汉字 = 60px，加上左侧排序图标(pl-6=24)与右侧箭头(pr-6=24)，
-           * 112px 刚好放得下「按添加时间」而不被截成「按添加…」。
-           */}
-          {(
-            <div className={cn('relative shrink-0', compact ? 'w-28' : 'w-[132px]')} title="排序">
+          {!overview && (
+            <div className={cn('relative shrink-0', compact ? 'w-28' : 'w-[124px]')} title="排序">
               <ArrowDownUp className="pointer-events-none absolute top-1/2 left-1.5 h-3 w-3 -translate-y-1/2 text-muted-foreground" />
               <select
                 data-testid="sort"
@@ -835,12 +1090,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
                   setAnchorIndex(null);
                   setActiveIndex(-1); // 排序后行序变化，保留高亮会指向另一个书签（Enter/Delete 错对象）
                 }}
-                /*
-                 * `w-full` 而不是写死宽度：早先外层是 84px、select 写死 104px，
-                 * 溢出 20px 被视口裁掉，侧边栏里连下拉的打勾都点不到。
-                 * `pr-6` 给右侧的 chevron 留位置。
-                 */
-                className="h-7 w-full appearance-none truncate rounded-sm border border-input bg-card pl-6 pr-6 text-xs text-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+                className="h-8 w-full appearance-none truncate rounded-lg border border-border bg-card pl-6 pr-6 text-2xs text-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/20 disabled:opacity-50"
               >
                 {SORT_OPTIONS.map((o) => (
                   <option key={o.value} value={o.value}>
@@ -848,96 +1098,81 @@ export function BookmarkList({ className, compact = false }: { className?: strin
                   </option>
                 ))}
               </select>
-              {/* appearance-none 会把原生箭头一起去掉：不画一个，用户看不出这是下拉 */}
               <ChevronDown
                 className="pointer-events-none absolute top-1/2 right-1.5 h-3 w-3 -translate-y-1/2 text-muted-foreground"
                 aria-hidden="true"
               />
             </div>
           )}
+
+          {/* 一键让 Agent 整理当前文件夹（主操作，不再和排序按钮同色同权重） */}
+          {!overview && !effectiveTag && browsing && selectedFolderId && (
+            <Button
+              size={compact ? 'icon' : 'sm'}
+              variant="default"
+              onClick={organizeFolder}
+              aria-label={ORGANIZE_LABEL.folder}
+              title="让 MarkAI 整理当前文件夹"
+              className={compact ? 'h-8 w-8' : 'h-8'}
+            >
+              <Sparkles className="h-3 w-3" />
+              {!compact && '整理'}
+            </Button>
+          )}
         </div>
       </div>
 
-      {/* 多选操作条（compact 窄布局下用图标按钮，避免溢出） */}
-      {selectedIds.length > 0 && (
-        <div className="flex h-9 shrink-0 items-center gap-2 border-b border-border bg-accent-muted/60 px-3">
-          <span className="text-2xs font-medium text-accent">
-            {compact ? selectedIds.length : `已选 ${selectedIds.length} 项`}
-          </span>
-          <div className="ml-auto flex items-center gap-1.5">
-            {compact ? (
-              <>
-                <Button size="icon" onClick={organizeSelected} title={ORGANIZE_LABEL.selection(selectedIds.length)} className="h-6 w-6">
-                  <Sparkles className="h-3 w-3" />
-                </Button>
-                <Button size="icon" variant="secondary" onClick={openSelected} title="打开所选" className="h-6 w-6">
-                  <ExternalLink className="h-3.5 w-3.5" />
-                </Button>
-                <Button size="icon" variant="secondary" onClick={copySelectedUrls} title="复制网址" className="h-6 w-6">
-                  <Copy className="h-3 w-3" />
-                </Button>
-                <Button
-                  size="icon"
-                  variant="secondary"
-                  onClick={() => openDialog({ kind: 'move', bookmarkIds: selectedIds })}
-                  title="移动到…"
-                  className="h-6 w-6"
-                >
-                  <FolderInput className="h-3 w-3" />
-                </Button>
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  onClick={() => openDialog({ kind: 'delete-many', bookmarkIds: selectedIds })}
-                  title="删除所选"
-                  className="h-6 w-6 text-destructive hover:bg-destructive/10"
-                >
-                  <Trash2 className="h-3 w-3" />
-                </Button>
-              </>
-            ) : (
-              <>
-                <Button size="sm" onClick={organizeSelected} className="h-6">
-                  <Sparkles className="h-3 w-3" />
-                  让 MarkAI 整理
-                </Button>
-                <Button size="sm" variant="secondary" onClick={openSelected} className="h-6">
-                  <ExternalLink className="h-3.5 w-3.5" />
-                  打开
-                </Button>
-                <Button size="sm" variant="secondary" onClick={copySelectedUrls} className="h-6">
-                  <Copy className="h-3 w-3" />
-                  复制
-                </Button>
-                <Button size="sm" variant="secondary" onClick={copySelectedMarkdown} className="h-6">
-                  <Link2 className="h-3 w-3" />
-                  Markdown
-                </Button>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={() => openDialog({ kind: 'move', bookmarkIds: selectedIds })}
-                  className="h-6"
-                >
-                  <FolderInput className="h-3 w-3" />
-                  移动
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => openDialog({ kind: 'delete-many', bookmarkIds: selectedIds })}
-                  className="h-6 text-destructive hover:bg-destructive/10"
-                >
-                  <Trash2 className="h-3 w-3" />
-                  删除
-                </Button>
-                <Button size="sm" variant="ghost" onClick={clearSelection} className="h-6">
-                  <X className="h-3 w-3" />
-                  清除
-                </Button>
-              </>
+      {/* 标签筛选条：有标签时才出现，不占没有标签用户的像素 */}
+      {!overview && tagCounts.length > 0 && (
+        <div className="flex h-9 shrink-0 items-center gap-1 overflow-x-auto border-b border-border bg-background px-3">
+          <span className="shrink-0 pr-1 text-2xs text-muted-foreground/70">标签</span>
+          {tagCounts.slice(0, 12).map(({ tag, count }) => (
+            <button
+              key={tag}
+              type="button"
+              aria-pressed={effectiveTag?.toLowerCase() === tag.toLowerCase()}
+              onClick={() => {
+                useBookmarkStore.getState().clearSelection();
+                setActiveTag((cur) => (cur?.toLowerCase() === tag.toLowerCase() ? null : tag));
+              }}
+              style={{ color: colorVarOf(colorForTag(tagColors, tag)) }}
+              className={cn(
+                'flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-2xs transition-colors',
+                effectiveTag?.toLowerCase() === tag.toLowerCase()
+                  ? 'bg-accent-muted font-medium'
+                  : 'hover:bg-muted',
+              )}
+            >
+              #{tag}
+              <span className="tabular-nums text-muted-foreground/50">{count}</span>
+            </button>
+          ))}
+          {activeTag && (
+            <button
+              type="button"
+              onClick={() => {
+                setActiveTag(null);
+                if (hashTag) onQueryChange('');
+              }}
+              className="ml-auto shrink-0 rounded-md px-1.5 py-1 text-2xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            >
+              清除筛选
+            </button>
+          )}
+          <button
+            type="button"
+            data-testid="tags-manager-open"
+            onClick={() => setTagsManagerOpen(true)}
+            aria-label="管理标签"
+            title="管理标签（重命名 / 合并 / 删除）"
+            className={cn(
+              'flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-2xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground',
+              !activeTag && 'ml-auto',
             )}
-          </div>
+          >
+            <Settings2 className="h-3 w-3" />
+            <span className="hidden sm:inline">管理</span>
+          </button>
         </div>
       )}
 
@@ -969,7 +1204,9 @@ export function BookmarkList({ className, compact = false }: { className?: strin
           </Button>
         </div>
       )}
-      {sortBy === 'time' ? (
+      {overview ? (
+        <OverviewPanel onShowList={showLibraryList} onShowToday={showToday} />
+      ) : sortBy === 'time' ? (
         <TimelinePanel className="min-w-0 flex-1" />
       ) : (
       /* 列表（键盘可导航 + 接收树拖放） */
@@ -1029,26 +1266,50 @@ export function BookmarkList({ className, compact = false }: { className?: strin
           <p className="px-2 py-4 text-center text-xs text-muted-foreground">加载中…</p>
         ) : items && items.length > 0 ? (
           items.map((node, i) => (
-            <BookmarkRow
-              key={node.id}
-              node={node}
-              index={i}
-              active={i === activeIndex}
-              selected={selectedSet.has(node.id)}
-              dropTarget={dropTarget}
-              query={query}
-              searching={!browsing}
-              folderCount={folderCounts[node.id]}
-              onRename={handleRenameRow}
-              onToggle={handleToggleRow}
-              onToggleClick={handleToggleClickRow}
-              onActivate={handleActivateRow}
-              onOpen={handleOpenRow}
-              onContextMenu={handleContextMenuRow}
-              onDragOverRow={handleRowDragOver}
-              onDragLeaveRow={handleRowDragLeave}
-              onDropRow={handleRowDrop}
-            />
+            <Fragment key={node.id}>
+              {/* 搜索结果分组头：文件夹与书签不再混成一条流水账 */}
+              {!browsing && i === 0 && folderResultCount > 0 && (
+                <div className="px-3 pt-3 pb-1 text-2xs font-medium text-muted-foreground">
+                  文件夹 <span className="tabular-nums text-muted-foreground/50">{folderResultCount}</span>
+                </div>
+              )}
+              {!browsing && i === firstBookmarkResult && firstBookmarkResult >= 0 && (
+                <div className="px-3 pt-3 pb-1 text-2xs font-medium text-muted-foreground">
+                  书签{' '}
+                  <span className="tabular-nums text-muted-foreground/50">
+                    {items.length - folderResultCount}
+                  </span>
+                </div>
+              )}
+              <BookmarkRow
+                node={node}
+                index={i}
+                active={i === activeIndex}
+                selected={selectedSet.has(node.id)}
+                dropTarget={dropTarget}
+                query={query}
+                searching={!browsing}
+                folderCount={folderCounts[node.id]}
+                {...(tagMap[node.id]?.length
+                  ? {
+                      tagCount: tagMap[node.id]!.length,
+                      tagSummary: tagMap[node.id]!.join(' · '),
+                      tagColor: colorVarOf(colorForTag(tagColors, tagMap[node.id]![0]!)),
+                      tagFirst: tagMap[node.id]![0]!,
+                      onTagClick: handleTagFilter,
+                    }
+                  : {})}
+                onRename={handleRenameRow}
+                onToggle={handleToggleRow}
+                onToggleClick={handleToggleClickRow}
+                onActivate={handleActivateRow}
+                onOpen={handleOpenRow}
+                onContextMenu={handleContextMenuRow}
+                onDragOverRow={handleRowDragOver}
+                onDragLeaveRow={handleRowDragLeave}
+                onDropRow={handleRowDrop}
+              />
+            </Fragment>
           ))
         ) : (
           <div
@@ -1087,7 +1348,13 @@ export function BookmarkList({ className, compact = false }: { className?: strin
             <p className="text-xs text-muted-foreground">
               {/* 三种空状态统一成「一句状态 + 一个动作」：之前第一句是祈使句（「在左侧选择…」），
                   另外两句是状态描述，读起来像两套东西。 */}
-              {!selectedFolderId ? '还没有选择文件夹' : browsing ? '此文件夹为空' : '没有匹配的书签'}
+              {effectiveTag
+                ? '这个标签下还没有书签'
+                : !selectedFolderId
+                  ? '还没有选择文件夹'
+                  : browsing
+                    ? '此文件夹为空'
+                    : '没有匹配的书签'}
             </p>
             {!selectedFolderId && roots[0] && (
               <Button
@@ -1121,7 +1388,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
              * 一个还带着「或按 Ctrl+D」的空行——看着像渲染出错。
              * 现在合成一处：两个按钮 + 一行提示。
              */}
-            {browsing && selectedFolderId && (
+            {!overview && !effectiveTag && browsing && selectedFolderId && (
               <>
                 <div className="mt-2.5 flex items-center gap-2">
                   <Button size="sm" variant="outline" onClick={() => openDialog({ kind: 'create-bookmark', parentId: selectedFolderId })}>
@@ -1142,6 +1409,116 @@ export function BookmarkList({ className, compact = false }: { className?: strin
         )}
       </div>
       )}
+
+      {/*
+       * 多选操作条：浮在列表底部而不是占一行高度。
+       * 三个高频动作（整理 / 移动 / 删除）一键可达，其余收进「更多」，
+       * 窄屏也不会把按钮挤成一排图标猜谜。
+       */}
+      {selectedIds.length > 0 && !overview && (
+        <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center px-3">
+          <div className="markai-glass pointer-events-auto animate-slide-up flex items-center gap-1 rounded-xl p-1">
+            <span className="px-2 text-2xs font-medium text-foreground">
+              已选 <span className="tabular-nums text-accent">{selectedIds.length}</span> 项
+            </span>
+            <span className="mx-0.5 h-4 w-px bg-border" aria-hidden="true" />
+            <Button
+              size="sm"
+              onClick={organizeSelected}
+              className="h-7 gap-1"
+              aria-label={ORGANIZE_LABEL.selection(selectedIds.length)}
+              title={ORGANIZE_LABEL.selection(selectedIds.length)}
+            >
+              <Sparkles className="h-3 w-3" />
+              {!compact && '让 MarkAI 整理'}
+            </Button>
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => openDialog({ kind: 'move', bookmarkIds: selectedIds })}
+              className="h-7 gap-1"
+              title="移动到…"
+            >
+              <FolderInput className="h-3 w-3" />
+              {!compact && '移动'}
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => openDialog({ kind: 'delete-many', bookmarkIds: selectedIds })}
+              className="h-7 gap-1 text-destructive hover:bg-destructive/10"
+              title="删除所选"
+            >
+              <Trash2 className="h-3 w-3" />
+              {!compact && '删除'}
+            </Button>
+            <div className="relative">
+              <Button
+                size="icon"
+                variant="ghost"
+                className="h-7 w-7"
+                title="更多操作"
+                aria-label="更多操作"
+                onClick={() => setSelectionMenuOpen((v) => !v)}
+              >
+                <MoreHorizontal className="h-3.5 w-3.5" />
+              </Button>
+              {selectionMenuOpen && (
+                <>
+                  <div
+                    className="fixed inset-0 z-10"
+                    onClick={() => setSelectionMenuOpen(false)}
+                    aria-hidden="true"
+                  />
+                  <div className="markai-glass animate-slide-up absolute right-0 bottom-full z-20 mb-2 w-44 rounded-lg p-1">
+                    {[
+                      { icon: ExternalLink, label: '打开所选', run: openSelected },
+                      { icon: Copy, label: '复制网址', run: copySelectedUrls },
+                      { icon: Link2, label: '复制 Markdown', run: copySelectedMarkdown },
+                      {
+                        icon: Tag,
+                        label: '添加标签…',
+                        run: () => openDialog({ kind: 'tags', bookmarkIds: [...selectedIds] }),
+                      },
+                      {
+                        icon: Tag,
+                        label: '移除标签…',
+                        run: () => openDialog({ kind: 'remove-tags', bookmarkIds: [...selectedIds] }),
+                      },
+                      {
+                        icon: X,
+                        label: '清除选择',
+                        run: () => {
+                          useBookmarkStore.getState().clearSelection();
+                        },
+                      },
+                    ].map((action) => (
+                      <button
+                        key={action.label}
+                        type="button"
+                        onClick={() => {
+                          setSelectionMenuOpen(false);
+                          action.run();
+                        }}
+                        className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs text-foreground transition-colors hover:bg-muted"
+                      >
+                        <action.icon className="h-3.5 w-3.5 text-muted-foreground" />
+                        {action.label}
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+      <TagsManagerDialog
+        open={tagsManagerOpen}
+        onClose={() => setTagsManagerOpen(false)}
+        map={tagMap}
+        onChange={(next) => setTagMap(next)}
+      />
     </div>
   );
 }
@@ -1217,6 +1594,11 @@ const BookmarkRow = memo(function BookmarkRow({
   query,
   searching,
   folderCount,
+  tagCount,
+  tagSummary,
+  tagColor,
+  tagFirst,
+  onTagClick,
   onToggle,
   onToggleClick,
   onActivate,
@@ -1237,6 +1619,13 @@ const BookmarkRow = memo(function BookmarkRow({
   searching: boolean;
   /** 该文件夹的真实子项数（由树 store 推导；未取到时不显示，绝不显示假的 0） */
   folderCount?: number;
+  /** 标签数 / 标签名 / 首个标签颜色（只在 hover / 聚焦时展示，避免常态噪音） */
+  tagCount?: number;
+  tagSummary?: string;
+  tagColor?: string;
+  /** 首个标签（点击行内提示时按它筛选） */
+  tagFirst?: string;
+  onTagClick?: (tag: string) => void;
   /** 双击标题快速重命名 */
   onRename: (id: string) => void;
   /** 行间拖放指示（本行上方/下方显示定位条） */
@@ -1324,13 +1713,13 @@ const BookmarkRow = memo(function BookmarkRow({
       onMouseEnter={() => onActivate(index)}
       onContextMenu={(e) => onContextMenu(e, node.id)}
       className={cn(
-        'group relative flex h-10 cursor-pointer items-center gap-2 rounded-sm px-2.5 transition-colors hover:bg-muted',
+        'group relative flex h-11 cursor-pointer items-center gap-2.5 rounded-lg px-3 transition-colors hover:bg-muted',
         // 选中（多选/当前文件夹）与键盘高亮互斥：选中态用 accent 底，键盘高亮用描边
         selected ? 'bg-accent-muted' : active && 'bg-muted',
       )}
     >
-      {/* 选中左指示条 */}
-      {selected && <span className="pointer-events-none absolute top-2 bottom-2 left-0 w-[3px] rounded-full bg-accent" />}
+      {/* 选中左标记 */}
+      {selected && <span className="pointer-events-none absolute top-2.5 bottom-2.5 left-0 w-[3px] rounded-full bg-accent" />}
       {/* 行间拖放定位条（与选中指示条区分：半透明） */}
       {isDropTarget && dropTarget!.position === 'above' && (
         <span className="pointer-events-none absolute -top-0.5 right-1 left-1 h-0.5 rounded-full bg-accent/60" />
@@ -1338,23 +1727,39 @@ const BookmarkRow = memo(function BookmarkRow({
       {isDropTarget && dropTarget!.position === 'below' && (
         <span className="pointer-events-none absolute -bottom-0.5 right-1 left-1 h-0.5 rounded-full bg-accent/60" />
       )}
-      <Checkbox checked={selected} onCheckedChange={(_c, shift) => onToggle(index, !!shift)} aria-label={`选择 ${node.title}`} />
-      {isFolder ? (
-        <Folder className="h-4 w-4 shrink-0 text-accent/70" />
-      ) : (
-        <Favicon url={node.url} size={16} />
-      )}
+      {/*
+       * 复选框平时收起、hover/聚焦/选中时出现：
+       * 一列始终显示的空方框会让列表看起来像"待办清单"，
+       * 而多选仍然可发现（悬停即见），键盘用户 Tab 到它时也会显现。
+       */}
+      <span
+        className={cn(
+          'shrink-0 transition-opacity',
+          selected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100',
+        )}
+      >
+        <Checkbox checked={selected} onCheckedChange={(_c, shift) => onToggle(index, !!shift)} aria-label={`选择 ${node.title}`} />
+      </span>
+      <span
+        className={cn(
+          'flex h-7 w-7 shrink-0 items-center justify-center rounded-md',
+          isFolder ? 'bg-accent-muted text-accent' : 'bg-muted',
+        )}
+        aria-hidden="true"
+      >
+        {isFolder ? <Folder className="h-4 w-4" /> : <Favicon url={node.url} size={15} />}
+      </span>
       <div className="min-w-0 flex-1">
-        {/* 这里刻意不用 text-md：列表行固定 40px 高，18px 行高才排得下两行而不撑开行距 */}
-        <p className="truncate text-[13px] leading-[18px] text-foreground" onDoubleClick={() => onRename(node.id)}>
+        {/* 行高 48px：标题 13px + 元信息 11px 两行排得下，又留出点击余量 */}
+        <p className="truncate text-md font-medium text-foreground" onDoubleClick={() => onRename(node.id)}>
           {highlightText(node.title || '(未命名)', query)}
         </p>
         {isFolder ? (
-          <p className="text-2xs text-muted-foreground">
+          <p className="mt-0.5 text-2xs text-muted-foreground">
             {folderCount === undefined ? '文件夹' : `文件夹 · ${folderCount} 项`}
           </p>
         ) : (
-          <p className="truncate text-2xs text-muted-foreground">
+          <p className="mt-0.5 truncate text-2xs text-muted-foreground">
             {searching ? (
               // 搜索模式：显示来源文件夹路径（可点击定位），浏览模式显示域名与时间
               node.parentId ? (
@@ -1379,14 +1784,55 @@ const BookmarkRow = memo(function BookmarkRow({
           </p>
         )}
       </div>
-      {!isFolder && node.url && (
-        <span
-          className="shrink-0 rounded-sm p-1 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100"
-          title="在新标签页打开"
+      {/*
+       * 行内快捷操作：hover / 键盘聚焦才出现，不打断"单击打开"的主路径。
+       * 打开与定位都 stopPropagation：否则点图标会同时触发整行的打开动作。
+       */}
+      <span className="flex shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100 group-focus-within:opacity-100">
+        {tagCount && tagFirst ? (
+          <button
+            type="button"
+            data-testid="row-tags"
+            title={`按「${tagFirst}」筛选 · ${tagSummary || `${tagCount} 个标签`}`}
+            aria-label={`按标签 ${tagFirst} 筛选`}
+            onClick={(e) => {
+              e.stopPropagation();
+              onTagClick?.(tagFirst);
+            }}
+            className="flex items-center gap-0.5 rounded-md bg-muted px-1 py-0.5 text-2xs tabular-nums transition-colors hover:bg-accent-muted"
+            style={tagColor ? { color: tagColor } : undefined}
+          >
+            <Tag className="h-3 w-3" />
+            {tagCount}
+          </button>
+        ) : null}
+        {!isFolder && node.url && (
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              if (node.url) void openUrl(node.url);
+            }}
+            aria-label="在新标签页打开"
+            title="在新标签页打开"
+            className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-card hover:text-foreground"
+          >
+            <ExternalLink className="h-3.5 w-3.5" />
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            useBookmarkStore.getState().revealInTree(node.id);
+          }}
+          aria-label="在树中定位"
+          title="在树中定位"
+          className="rounded-md p-1 text-muted-foreground transition-colors hover:bg-card hover:text-foreground"
         >
-          <ExternalLink className="h-3.5 w-3.5" />
-        </span>
-      )}
+          <LocateFixed className="h-3.5 w-3.5" />
+        </button>
+      </span>
     </div>
   );
 });

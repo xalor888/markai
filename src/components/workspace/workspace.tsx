@@ -1,4 +1,4 @@
-import { PanelLeftOpen, Search } from 'lucide-react';
+import { Clock, PanelLeftOpen, Search, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useAIStore } from '@/stores/aiStore';
 import { resolveTitlePath, useBookmarkStore } from '@/stores/bookmarkStore';
@@ -22,6 +22,10 @@ import { ShortcutsDialog } from '@/components/common/shortcuts-dialog';
 import { ErrorBoundary } from '@/components/common/error-boundary';
 import { useUIStore } from '@/stores/uiStore';
 import { CHAT_WIDTH_MAX, CHAT_WIDTH_MAX_COMPACT, clampChatWidth } from '@/lib/chat-width';
+import {
+  clearSearchHistory,
+  readSearchHistory,
+} from '@/lib/search/history';
 
 /**
  * 工作区根组件（侧边栏 / 完整页共用）：
@@ -103,6 +107,15 @@ export function Workspace({
   // 顶栏唯一搜索框：树与列表都读它
   const searchQuery = useBookmarkStore((s) => s.searchQuery);
   const setSearchQuery = useBookmarkStore((s) => s.setSearchQuery);
+  /** 搜索框聚焦态 + 最近搜索（仅本地，展示 5 条） */
+  const [searchFocused, setSearchFocused] = useState(false);
+  const [recentSearches, setRecentSearches] = useState<string[]>([]);
+
+  // 查询被清空而输入框仍聚焦时，也要刷新最近搜索（只靠 onFocus 会漏掉"清空后继续看"）
+  useEffect(() => {
+    if (!searchFocused || searchQuery.trim()) return;
+    setRecentSearches(readSearchHistory());
+  }, [searchFocused, searchQuery]);
   const streaming = useAIStore((s) => s.streaming);
   const messages = useAIStore((s) => s.messages);
   const activeId = useAIStore((s) => s.activeId);
@@ -198,6 +211,14 @@ export function Workspace({
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setCommandOpen((v) => !v);
+        return;
+      }
+      // ?：快捷键速查（输入框内不劫持，因为问号本身是合法输入）
+      if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        const el = e.target as HTMLElement | null;
+        if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return;
+        e.preventDefault();
+        setShortcutsOpen(true);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -313,6 +334,14 @@ export function Workspace({
     }
   };
 
+  // 命令面板的「收藏当前页面」：用事件转交，避免把 async 动作塞进面板数据层
+  useEffect(() => {
+    const onSave = () => void saveCurrentTab();
+    document.addEventListener('markai:save-current-tab', onSave);
+    return () => document.removeEventListener('markai:save-current-tab', onSave);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
     <div className="flex h-full min-h-0 flex-col">
       {/* 顶栏 */}
@@ -321,18 +350,19 @@ export function Workspace({
        * 整条顶栏一起滚动时，「整理 / AI 设置」会被推出去、必须横向滑动才够得到；
        * 而这两个是最常用的入口。所以把右侧按钮组拆出来 shrink-0，让它永远在视口内。
        */}
-      <header data-testid="topbar" className="relative flex h-11 min-w-0 shrink-0 items-center gap-2 border-b border-border bg-card px-3">
-        {/* 顶栏底部：品牌色淡出分隔线 */}
-        <span className="pointer-events-none absolute inset-x-0 bottom-0 h-px bg-gradient-to-r from-accent/40 via-border to-transparent" />
+      <header
+        data-testid="topbar"
+        className="flex h-14 min-w-0 shrink-0 items-center gap-3 border-b border-border bg-card px-4"
+      >
         <BrandMark />
         {/*
          * 唯一的搜索框：同时过滤书签树与列表。
          * 重做前这里有两个（树的「过滤树…」与列表的「搜索书签…」），用户不知道该用哪个，
          * 而且两个框各管一半，搜出来的结果永远不完整。
          */}
-        <div className="relative min-w-0 flex-1">
+        <div className="relative mx-auto w-full max-w-[520px] min-w-0 flex-1">
           <Search
-            className="pointer-events-none absolute top-1/2 left-2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
+            className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground"
             aria-hidden="true"
           />
           <input
@@ -351,39 +381,105 @@ export function Workspace({
             placeholder="搜索书签与文件夹…"
             aria-label="搜索书签与文件夹"
             spellCheck={false}
-            /*
-             * `outline-none` + 只改边框颜色，等于**聚焦了看不出来**——
-             * 实测 getComputedStyle 里 outline 与 box-shadow 都是 none，只有 1px 边框变色。
-             * 项目里其它控件（排序下拉、树过滤）都用 `ring-1`，这里补齐，保持一致。
-             */
-            className="h-7 w-full rounded-sm border border-transparent bg-muted/60 pr-2 pl-8 text-xs text-foreground outline-none placeholder:text-muted-foreground focus:border-ring focus:bg-card focus-visible:ring-1 focus-visible:ring-ring [&::-webkit-search-cancel-button]:hidden"
+            onFocus={() => {
+              setSearchFocused(true);
+              setRecentSearches(readSearchHistory());
+            }}
+            onBlur={() => {
+              // 给"点最近搜索"留出 mousedown→click 的时间；直接失焦会先卸载面板
+              window.setTimeout(() => setSearchFocused(false), 120);
+            }}
+            className="h-9 w-full rounded-lg border border-border bg-background pr-16 pl-9 text-xs text-foreground outline-none transition-colors placeholder:text-muted-foreground/70 hover:border-input focus:border-ring focus:bg-card focus-visible:ring-2 focus-visible:ring-ring/20 [&::-webkit-search-cancel-button]:hidden"
+          />
+          {!searchQuery && (
+            <kbd className="pointer-events-none absolute top-1/2 right-2.5 hidden -translate-y-1/2 items-center gap-0.5 rounded-xs border border-border bg-muted/60 px-1.5 py-0.5 font-sans text-2xs text-muted-foreground/70 sm:flex">
+              ⌘K
+            </kbd>
+          )}
+          {/* 最近搜索：只在聚焦且输入为空时出现；点一条即填回搜索框 */}
+          {searchFocused && !searchQuery && recentSearches.length > 0 && (
+            <div
+              data-testid="search-recent"
+              className="markai-glass animate-fade-in absolute top-full right-0 left-0 z-30 mt-1 rounded-lg p-1"
+            >
+              <div className="flex items-center justify-between px-2 py-1">
+                <span className="flex items-center gap-1 text-2xs text-muted-foreground">
+                  <Clock className="h-3 w-3" />
+                  最近搜索
+                </span>
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    clearSearchHistory();
+                    setRecentSearches([]);
+                  }}
+                  className="rounded-xs px-1 py-0.5 text-2xs text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  清除
+                </button>
+              </div>
+              {recentSearches.map((q) => (
+                <button
+                  key={q}
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => {
+                    setSearchQuery(q);
+                    setSearchFocused(false);
+                  }}
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-foreground transition-colors hover:bg-muted"
+                >
+                  <Search className="h-3 w-3 shrink-0 text-muted-foreground" />
+                  <span className="truncate">{q}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+        <div className="ml-auto flex shrink-0 items-center gap-1.5">
+          {/*
+            待处理数量放在顶栏：抽屉与「更多」菜单里都藏着它，
+            用户只有主动去找才知道"有 3 条等你确认"。
+          */}
+          {pendingCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setDeletionsOpen(true)}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg border border-destructive/30 bg-destructive/10 px-2.5 py-1.5 text-2xs font-medium text-destructive transition-colors hover:bg-destructive/15"
+              title="查看待删除清单"
+            >
+              <Trash2 className="h-3 w-3" />
+              <span className="hidden sm:inline">待处理</span>
+              {pendingCount}
+            </button>
+          )}
+          {/* 其余入口全收进「更多」：有待删/整理异常时触发按钮上带红点，收起来不等于藏起来 */}
+          <MoreMenu
+            pendingCount={pendingCount}
+            organizeAlert={organizeAlert}
+            chatOpen={chatOpen}
+            mode={mode}
+            onToggleChat={() => setChatOpen((v) => !v)}
+            onDeletions={() => setDeletionsOpen(true)}
+            onOrganize={() => {
+              setOrganizeLogOpen(true);
+              setOrganizeAlert(false);
+            }}
+            onSettings={() => void chrome.runtime.openOptionsPage()}
+            onShortcuts={() => setShortcutsOpen(true)}
+            onHealth={() =>
+              void chrome.tabs.create({ url: chrome.runtime.getURL('options.html#health') }).catch(() => {
+                void chrome.runtime.openOptionsPage();
+              })
+            }
+            onSwitchContainer={() => {
+              if (mode === 'full') void openSidePanel();
+              else openFullPage();
+            }}
+            onSaveCurrentTab={() => void saveCurrentTab()}
           />
         </div>
-        {/* 其余入口全收进「更多」：有待删/整理异常时触发按钮上带红点，收起来不等于藏起来 */}
-        <MoreMenu
-          pendingCount={pendingCount}
-          organizeAlert={organizeAlert}
-          chatOpen={chatOpen}
-          mode={mode}
-          onToggleChat={() => setChatOpen((v) => !v)}
-          onDeletions={() => setDeletionsOpen(true)}
-          onOrganize={() => {
-            setOrganizeLogOpen(true);
-            setOrganizeAlert(false);
-          }}
-          onSettings={() => void chrome.runtime.openOptionsPage()}
-          onShortcuts={() => setShortcutsOpen(true)}
-          onHealth={() =>
-            void chrome.tabs.create({ url: chrome.runtime.getURL('options.html#health') }).catch(() => {
-              void chrome.runtime.openOptionsPage();
-            })
-          }
-          onSwitchContainer={() => {
-            if (mode === 'full') void openSidePanel();
-            else openFullPage();
-          }}
-          onSaveCurrentTab={() => void saveCurrentTab()}
-        />
       </header>
 
       {/*

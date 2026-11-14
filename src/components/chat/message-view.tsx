@@ -134,11 +134,11 @@ const ToolChip = memo(function ToolChip({ record }: { record: ToolCallRecord }) 
   const meta = TOOL_META[record.name];
 
   return (
-    <div className="mt-1.5 overflow-hidden rounded-sm border border-border bg-card">
+    <div className="mt-1.5 overflow-hidden rounded-lg border border-border bg-card">
       <button
         type="button"
         onClick={() => setExpanded(!expanded)}
-        className="flex w-full items-center gap-2 px-2.5 py-2 text-left transition-colors hover:bg-muted"
+        className="flex w-full items-center gap-2 px-3 py-2.5 text-left transition-colors hover:bg-muted"
       >
         {record.status === 'running' ? (
           <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-accent" />
@@ -171,7 +171,7 @@ const ToolChip = memo(function ToolChip({ record }: { record: ToolCallRecord }) 
             <button
               type="button"
               onClick={() => void copyText(record.result ?? record.error ?? (record.status === 'canceled' ? '已停止生成' : ''), '工具结果已复制')}
-              className="flex items-center gap-1 rounded-sm p-1 text-2xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              className="flex items-center gap-1 rounded-md p-1 text-2xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               title="复制结果"
               aria-label="复制结果"
             >
@@ -238,7 +238,7 @@ export const MessageView = memo(function MessageView({
               <span className="truncate">{contextPath}</span>
             </button>
           )}
-          <div className="select-text rounded-md rounded-br-xs bg-accent px-3 py-2 text-md whitespace-pre-wrap text-accent-foreground">
+          <div className="select-text rounded-lg rounded-br-sm border border-accent/25 bg-accent-muted px-3 py-2 text-md whitespace-pre-wrap text-foreground">
             {text}
           </div>
         </div>

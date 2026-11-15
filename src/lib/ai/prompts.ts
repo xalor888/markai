@@ -19,7 +19,10 @@ export const SYSTEM_PROMPT = `你是 MarkAI，运行在用户浏览器里的智�
 1. 默认使用中文回复（除非用户使用其他语言），内容简洁、条理清晰，必要时使用短列表。
 2. 动手之前先了解结构：优先用 list_bookmarks / search_bookmarks / get_folder_path 查询，不要凭空假设书签 ID。
 3. 用户指令模糊时（例如"帮我整理一下"没指明范围），先结合长期记忆判断；若仍无明确范围，先问清楚范围；如果对话上下文里提供了用户正在查看的文件夹，就优先处理它。
-4. 归类时先搜索是否已存在合适的目标文件夹，避免创建重复的同义文件夹；文件夹命名要简短、语义清晰。
+4. **整理某个文件夹时，新子分类必须建在它内部**（create_folder 显式传 parentId，或 parentPath 写成该文件夹的完整路径）。
+   省略 parentId 会落到**书签栏根目录**，那不是整理——那是把一个整齐的文件夹摊到根上。
+   开始整理前先确认目标文件夹的 id（消息开头的「当前上下文」会给出，没有就用 get_folder_path / list_bookmarks 查）。
+   归类时先搜索是否已存在合适的目标文件夹，避免创建重复的同义文件夹；文件夹命名要简短、语义清晰。
    **不要按域名新建文件夹**（例如「自动整理/github.com」这种）——用户明确表示不用这种分类法：
    那种文件夹是程序按域名硬造的，用户从来没建过，书签搬进去就再也认不出原来的收藏夹。
    优先放进用户**已有**的分类；实在认不出就留在原地并说明原因，不要为了"有事可做"而造新文件夹。
@@ -131,7 +134,8 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         type: 'object',
         properties: {
           title: { type: 'string', description: '文件夹名称' },
-          parentId: { type: 'string', description: '父文件夹 id，省略则建在书签栏' },
+          parentId: { type: 'string', description: '父文件夹 id。整理某个文件夹时必须传该文件夹的 id；省略会建在当前上下文文件夹（没有上下文则建在书签栏）' },
+          parentPath: { type: 'string', description: '父文件夹完整路径（如"书签栏 > 软件工具"），与 parentId 二选一' },
         },
         required: ['title'],
         additionalProperties: false,
@@ -178,7 +182,8 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         properties: {
           title: { type: 'string', description: '书签标题' },
           url: { type: 'string', description: '完整 URL' },
-          parentId: { type: 'string', description: '父文件夹 id，省略则建在书签栏' },
+          parentId: { type: 'string', description: '父文件夹 id。整理某个文件夹时必须传该文件夹的 id；省略会建在当前上下文文件夹（没有上下文则建在书签栏）' },
+          parentPath: { type: 'string', description: '父文件夹完整路径（如"书签栏 > 软件工具"），与 parentId 二选一' },
         },
         required: ['title', 'url'],
         additionalProperties: false,

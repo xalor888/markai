@@ -1175,7 +1175,12 @@ export function ContextMenuOverlay() {
             // 不说清楚的话，用户点完以为卡住了。
             const n = countFolderContents(node);
             const run = () =>
-              sendChat(`请整理书签文件夹「${node?.title || '(未命名)'}」：浏览其全部书签，创建合适的子分类并归类移动。`, node?.id);
+              sendChat(
+                `请整理书签文件夹「${node?.title || '(未命名)'}」（folderId = "${node?.id ?? ''}"）：` +
+                  `浏览其全部书签，在**这个文件夹内部**创建合适的子分类（create_folder 必须传 parentId="${node?.id ?? ''}"）并归类移动；` +
+                  `不要把子分类建到书签栏根目录。`,
+                node?.id,
+              );
             if (n > 100) {
               useUIStore.getState().requestConfirm({
                 title: '这个文件夹比较大',

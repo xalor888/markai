@@ -106,17 +106,42 @@ async function resolvePaths(ids: string[]): Promise<Map<string, string>> {
   return out;
 }
 
-/** 校验父文件夹存在且确实是文件夹 */
-export async function assertFolder(parentId?: string): Promise<string> {
-  const pid = parentId ?? '1'; // 默认书签栏（root id 通常为 "1"，动态兜底见下）
+/**
+ * 一次工具调用携带的上下文。
+ *
+ * 为什么需要它：`create_folder` / `create_bookmark` 的 `parentId` 是可选参数，
+ * 模型省略时过去一律落到**书签栏根**。对「收藏当前页」这类场景这是对的默认，
+ * 但对「整理某个文件夹」是灾难——用户让 Agent 整理「软件工具」，
+ * 它会把这批新子分类全部建到书签栏下，把原本整齐的库拆成一片。
+ * 所以把「用户此刻正在看哪个文件夹」当成兜底父级传进来：
+ * 模型忘了写 parentId 时，至少落在用户眼前那个文件夹里。
+ */
+export interface ToolContext {
+  /** 本轮对话聚焦的文件夹 id（用户选中/正在查看的那个） */
+  focusFolderId?: string;
+}
+
+/** 未指定父级时的兜底顺序：本轮聚焦文件夹 → 书签栏根 */
+export async function assertFolder(parentId?: string, focusFolderId?: string): Promise<string> {
   if (parentId) {
-    const nodes = await chrome.bookmarks.get(pid).catch(() => []);
+    const nodes = await chrome.bookmarks.get(parentId).catch(() => []);
     const node = nodes[0];
-    if (!node) throw new Error(`父文件夹不存在（id: ${pid}）`);
-    if (node.url) throw new Error(`目标 ${pid} 不是文件夹，无法作为父级`);
-    return pid;
+    if (!node) throw new Error(`父文件夹不存在（id: ${parentId}）`);
+    if (node.url) throw new Error(`目标 ${parentId} 不是文件夹，无法作为父级`);
+    return parentId;
   }
-  // 未指定 parentId 时使用书签栏根
+  /*
+   * 未指定 parentId：优先落在本轮聚焦的文件夹。
+   *
+   * 聚焦文件夹可能已经被删（另一窗口删掉、或上一轮清空）：此时不能报错——
+   * 模型并没有指定父级，报错只会让它重试同一个动作。静默回落到书签栏，
+   * 由 create_* 的返回值把真实落点写进 path，模型和用户都能看到。
+   */
+  if (focusFolderId) {
+    const nodes = await chrome.bookmarks.get(focusFolderId).catch(() => []);
+    const node = nodes[0];
+    if (node && !node.url) return focusFolderId;
+  }
   const tree = await chrome.bookmarks.getTree();
   const bar = tree[0]?.children?.find((c) => c.id === '1') ?? tree[0]?.children?.[0];
   if (!bar) throw new Error('无法定位书签栏');
@@ -163,7 +188,12 @@ const listBookmarksSchema = z.object({
   offset: z.number().int().min(0).optional(),
 });
 
-async function listBookmarks(args: unknown): Promise<ToolOutput> {
+async function listBookmarks(
+  args: unknown,
+  _onProgress?: (t: string) => void,
+  _s?: AbortSignal,
+  ctx?: ToolContext,
+): Promise<ToolOutput> {
   const { parentId, folderPath, limit, offset = 0 } = listBookmarksSchema.parse(args);
   let pid = parentId;
   if (!pid && folderPath) {
@@ -172,7 +202,14 @@ async function listBookmarks(args: unknown): Promise<ToolOutput> {
   }
   const defaultLimit = await getToolLimit();
   const useLimit = limit ?? Math.min(defaultLimit, 2000);
-  pid = pid ? await assertFolder(pid) : await assertFolder(undefined);
+  /*
+   * 不传目标时读**用户眼前那个文件夹**，而不是书签栏。
+   *
+   * 这条比创建类更隐蔽：模型整理「软件工具」前先 list_bookmarks 摸清结构，
+   * 如果它读到的是书签栏（3 个文件夹），它会基于一份错误的清单去整理，
+   * 然后按错误的清单创建/移动。范围读错，后面做什么都错。
+   */
+  pid = pid ? await assertFolder(pid) : await assertFolder(undefined, ctx?.focusFolderId);
   const children = await chrome.bookmarks.getChildren(pid);
   const items = children.slice(offset, offset + useLimit);
   const folderName = (await resolvePath(pid)).split(' > ').pop() ?? pid;
@@ -279,13 +316,46 @@ async function getFolderPath(args: unknown): Promise<ToolOutput> {
  * (未命名) 看起来正常，实际数据已经脏了；纯空格更糟——它是真值，渲染成几个空格，
  * 那一行既不像书签也不像 (未命名)，用户找不到也点不中。
  */
-const createFolderSchema = z.object({ title: z.string().trim().min(1).max(100), parentId: z.string().optional() });
+const createFolderSchema = z.object({
+  title: z.string().trim().min(1).max(100),
+  parentId: z.string().optional(),
+  /** 路径定位（如"书签栏 > 软件工具"），与 parentId 二选一 */
+  parentPath: z.string().optional(),
+});
 
-async function createFolder(args: unknown): Promise<ToolOutput> {
-  const { title, parentId } = createFolderSchema.parse(args);
-  const pid = await assertFolder(parentId);
+async function createFolder(args: unknown, _onProgress?: (t: string) => void, _s?: AbortSignal, ctx?: ToolContext): Promise<ToolOutput> {
+  const { title, parentId, parentPath } = createFolderSchema.parse(args);
+  let explicit = parentId;
+  if (!explicit && parentPath) {
+    explicit = await findFolderByPath(parentPath);
+    if (!explicit) throw new Error(`找不到文件夹：${parentPath}，可用 list_all_folders 查看现有路径`);
+  }
+  const pid = await assertFolder(explicit, ctx?.focusFolderId);
   const node = await jCreate({ parentId: pid, title });
-  return { result: JSON.stringify({ created: serializeBookmark(node), path: await resolvePath(node.id) }) };
+  const path = await resolvePath(node.id);
+  /*
+   * 真实落点必须回传给模型。
+   *
+   * 这是 0.2.170 修的核心缺陷：整理某个文件夹时模型不传 parentId，
+   * 新子分类全落到书签栏根，而它以为"已经整理好了"——因为返回里没写它建在哪。
+   * 现在 path 一定带上完整路径；若落点来自兜底（既没 parentId 也没 parentPath），
+   * 额外给一句 warning，模型有机会自查。
+   */
+  const usedFallback = !explicit;
+  return {
+    result: JSON.stringify({
+      created: serializeBookmark(node),
+      path,
+      ...(usedFallback
+        ? {
+            warning:
+              '本次没有指定 parentId，文件夹建在了「' +
+              path +
+              '」。如果这是"整理某个文件夹"的操作，新子分类应当建在被整理的那个文件夹内部——请先把它移动到位，或删掉重建并显式传 parentId。',
+          }
+        : {}),
+    }),
+  };
 }
 
 const createBookmarkSchema = z.object({
@@ -295,7 +365,7 @@ const createBookmarkSchema = z.object({
   parentId: z.string().optional(),
 });
 
-async function createBookmark(args: unknown): Promise<ToolOutput> {
+async function createBookmark(args: unknown, _onProgress?: (t: string) => void, _s?: AbortSignal, ctx?: ToolContext): Promise<ToolOutput> {
   const { title, url, parentId } = createBookmarkSchema.parse(args);
   let finalUrl = url.trim();
   try {
@@ -303,7 +373,7 @@ async function createBookmark(args: unknown): Promise<ToolOutput> {
   } catch {
     throw new Error(`URL 格式无效：${url}`);
   }
-  const pid = await assertFolder(parentId);
+  const pid = await assertFolder(parentId, ctx?.focusFolderId);
   const node = await jCreate({ parentId: pid, title, url: finalUrl });
   return { result: JSON.stringify({ created: serializeBookmark(node), path: await resolvePath(node.id) }) };
 }
@@ -319,7 +389,12 @@ const createBookmarksSchema = z.object({
 });
 
 /** 批量创建书签（一次最多 50 条；支持 parentId 或 parentPath 定位目标文件夹；非法项单独失败） */
-async function createBookmarks(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
+async function createBookmarks(
+  args: unknown,
+  onProgress?: (text: string) => void,
+  signal?: AbortSignal,
+  ctx?: ToolContext,
+): Promise<ToolOutput> {
   const throwIfAborted = makeAbortCheck(signal);
   // 入口先检查一次：早退分支都在主循环之前，不在这里查就等于那些分支里取消无效。
   throwIfAborted();
@@ -329,7 +404,7 @@ async function createBookmarks(args: unknown, onProgress?: (text: string) => voi
     pid = await findFolderByPath(parentPath);
     if (!pid) throw new Error(`找不到文件夹：${parentPath}，可用 list_all_folders 查看现有路径`);
   }
-  pid = pid ? await assertFolder(pid) : await assertFolder(undefined);
+  pid = pid ? await assertFolder(pid) : await assertFolder(undefined, ctx?.focusFolderId);
   const created: { title: string; url: string; id: string }[] = [];
   const failures: { title: string; error: string }[] = [];
   let createdCount = 0;
@@ -637,6 +712,7 @@ async function autoCategorize(
   args: unknown,
   onProgress?: (text: string) => void,
   signal?: AbortSignal,
+  ctx?: ToolContext,
 ): Promise<ToolOutput> {
   const throwIfAborted = makeAbortCheck(signal);
   // 入口先检查一次：早退分支都在主循环之前，不在这里查就等于那些分支里取消无效。
@@ -645,7 +721,7 @@ async function autoCategorize(
     autoCategorizeSchema.parse(args);
   await ensureRoots();
 
-  // 定位目标文件夹（folderId 优先，其次 folderPath，默认书签栏）
+  // 定位目标文件夹（folderId 优先，其次 folderPath，再其次本轮聚焦文件夹，最后书签栏）
   let pid: string | undefined;
   if (folderId) {
     pid = await assertFolder(folderId);
@@ -653,7 +729,9 @@ async function autoCategorize(
     pid = await findFolderByPath(folderPath);
     if (!pid) throw new Error(`找不到文件夹：${folderPath}，可用 list_all_folders 查看现有路径`);
   } else {
-    pid = await assertFolder(undefined);
+    // 不传目标时落到用户眼前那个文件夹，而不是书签栏根：
+    // 在根上按域名建一堆文件夹，正是"整理完反而更乱"的来源。
+    pid = await assertFolder(undefined, ctx?.focusFolderId);
   }
   const children = await chrome.bookmarks.getChildren(pid);
   // 只处理直接子书签（URL 节点）；已有子文件夹跳过，避免破坏既有结构
@@ -831,7 +909,13 @@ async function cleanupSweep(
   } = cleanupSweepSchema.parse(args);
   await ensureRoots();
 
-  // 定位目标文件夹
+  /*
+   * 定位目标文件夹。
+   *
+   * 这里刻意**不**用 focusFolderId 兜底：cleanup_sweep 只扫描、不建东西，
+   * 而"扫描整个书签库"是用户点「智能扫描清理」时的明确预期。
+   * 把默认范围悄悄收窄成"当前文件夹"反而会漏掉真正该清的条目。
+   */
   let pid: string | undefined;
   if (folderId) {
     pid = await assertFolder(folderId);
@@ -2139,7 +2223,12 @@ async function forgetMemoryTool(args: unknown): Promise<ToolOutput> {
 
 interface ToolEntry {
   name: string;
-  handler: (args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal) => Promise<ToolOutput>;
+  handler: (
+    args: unknown,
+    onProgress?: (text: string) => void,
+    signal?: AbortSignal,
+    ctx?: ToolContext,
+  ) => Promise<ToolOutput>;
 }
 
 const TOOL_MAP: Record<string, ToolEntry> = {
@@ -2237,6 +2326,7 @@ export async function executeTool(
   argsJson: string,
   onProgress?: (text: string) => void,
   signal?: AbortSignal,
+  ctx?: ToolContext,
 ): Promise<ToolOutput> {
   const entry = TOOL_MAP[name];
   if (!entry) throw new Error(`未知工具：${name}`);
@@ -2283,6 +2373,7 @@ export async function executeTool(
         onProgress?.(text);
       },
       ctrl.signal,
+      ctx,
     );
     const result = await Promise.race([running, idle]);
     return result;

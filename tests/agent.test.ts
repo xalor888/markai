@@ -17785,6 +17785,189 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     });
   }
 
+  // ── T30: 整理时新子分类不许落到书签栏根 ──
+  console.log('\n[organize] 新子分类的落点');
+
+  {
+    const { assertFolder, executeTool } = await import('../src/lib/ai/tools');
+
+    /** 造一个可复现的小结构：书签栏 > 软件工具 > {系统与镜像, 两条书签} */
+    const seedTree = async () => {
+      const roots = await chrome.bookmarks.getTree();
+      const bar = roots[0]!.children!.find((c) => c.id === '1')!;
+      const tool = await chrome.bookmarks.create({ parentId: bar.id, title: '软件工具' });
+      const sub = await chrome.bookmarks.create({ parentId: tool.id, title: '系统与镜像' });
+      await chrome.bookmarks.create({ parentId: tool.id, title: 'A', url: 'https://a.example.com/' });
+      await chrome.bookmarks.create({ parentId: tool.id, title: 'B', url: 'https://b.example.com/' });
+      return { barId: bar.id, toolId: tool.id, subId: sub.id };
+    };
+
+    const { barId, toolId } = await seedTree();
+
+    await okA('assertFolder 不传 parentId 时仍回落书签栏（收藏场景的既有默认不变）', async () => {
+      assert.equal(await assertFolder(undefined), barId);
+    });
+
+    await okA('assertFolder 有聚焦文件夹时，不传 parentId 落在聚焦文件夹（不是书签栏）', async () => {
+      assert.equal(await assertFolder(undefined, toolId), toolId);
+      // 显式 parentId 永远优先于聚焦文件夹
+      assert.equal(await assertFolder(barId, toolId), barId);
+    });
+
+    await okA('聚焦文件夹已被删除时静默回落书签栏（不报错，模型不会因兜底而重试）', async () => {
+      assert.equal(await assertFolder(undefined, 'not-exist-id'), barId);
+    });
+
+    /** 取某个节点真实的父级（serializeBookmark 不带 parentId，只能回查） */
+    const parentOf = async (id: string) => (await chrome.bookmarks.get(id))[0]?.parentId;
+
+    await okA('create_folder 不传 parentId + 有聚焦文件夹 → 建在聚焦文件夹内部，并回传真实路径', async () => {
+      const out = await executeTool(
+        'create_folder',
+        JSON.stringify({ title: '开发工具' }),
+        undefined,
+        undefined,
+        { focusFolderId: toolId },
+      );
+      const data = JSON.parse(out.result) as { path: string; warning?: string; created: { id: string } };
+      const real = await parentOf(data.created.id);
+      assert.equal(real, toolId, `应建在聚焦文件夹 ${toolId}，实际 ${real}`);
+      assert.match(data.path, /软件工具/, `path 必须写出真实落点，实际 ${data.path}`);
+      assert.match(data.path, /开发工具/);
+      // 走兜底时必须给 warning：模型才有机会自查"这真的是我想去的地方吗"
+      assert.ok(data.warning, '未显式指定 parentId 时应带 warning');
+    });
+
+    await okA('create_folder 显式 parentId 时不带 warning（不该无谓地吓模型）', async () => {
+      const out = await executeTool(
+        'create_folder',
+        JSON.stringify({ title: '显式分类', parentId: toolId }),
+        undefined,
+        undefined,
+        { focusFolderId: barId },
+      );
+      const data = JSON.parse(out.result) as { warning?: string; created: { id: string } };
+      assert.equal(await parentOf(data.created.id), toolId);
+      assert.equal(data.warning, undefined);
+    });
+
+    await okA('create_folder 支持 parentPath 定位（与 create_bookmarks / list_bookmarks 同一口径）', async () => {
+      const out = await executeTool(
+        'create_folder',
+        JSON.stringify({ title: '按路径', parentPath: '书签栏 > 软件工具' }),
+        undefined,
+        undefined,
+        { focusFolderId: barId },
+      );
+      const data = JSON.parse(out.result) as { created: { id: string } };
+      assert.equal(await parentOf(data.created.id), toolId, 'parentPath 应优先于聚焦文件夹兜底');
+    });
+
+    await okA('create_bookmark 不传 parentId + 有聚焦文件夹 → 也落在聚焦文件夹内', async () => {
+      const out = await executeTool(
+        'create_bookmark',
+        JSON.stringify({ title: 'C', url: 'https://c.example.com/' }),
+        undefined,
+        undefined,
+        { focusFolderId: toolId },
+      );
+      const data = JSON.parse(out.result) as { created: { id: string } };
+      assert.equal(await parentOf(data.created.id), toolId);
+    });
+
+    await okA('没有聚焦文件夹时，create_folder 仍落到书签栏（向后兼容）', async () => {
+      const out = await executeTool('create_folder', JSON.stringify({ title: '无上下文' }));
+      const data = JSON.parse(out.result) as { created: { id: string } };
+      assert.equal(await parentOf(data.created.id), barId);
+    });
+
+    // ── 指令层：光有兜底不够，模型得先拿到 id 和"建在内部"的要求 ──
+    await okA('list_bookmarks 不传目标时读聚焦文件夹（范围读错，后面做什么都错）', async () => {
+      const out = await executeTool('list_bookmarks', '{}', undefined, undefined, { focusFolderId: toolId });
+      const data = JSON.parse(out.result) as { folder?: string; path?: string; items?: { title: string }[] };
+      const titles = (data.items ?? []).map((i) => i.title);
+      // 聚焦在「软件工具」：应当看到它自己的子项（A / B / 系统与镜像 …），而不是书签栏的兄弟文件夹
+      assert.equal(data.folder, '软件工具', `应读聚焦文件夹，实际 ${data.folder}`);
+      assert.match(data.path ?? '', /软件工具/, `path 应指向聚焦文件夹，实际 ${data.path}`);
+      assert.ok(titles.includes('A') && titles.includes('B'), `应返回聚焦文件夹内的书签，实际 ${titles.join(',')}`);
+      assert.ok(!titles.includes('下载与影音'), '不得返回书签栏的其它子文件夹');
+    });
+
+    await okA('auto_categorize 不传目标时也用聚焦文件夹兜底（否则会在根上按域名铺一堆）', async () => {
+      const before = (await chrome.bookmarks.getChildren(barId)).length;
+      const out = await executeTool(
+        'auto_categorize',
+        JSON.stringify({ minGroupSize: 1, dryRun: true }),
+        undefined,
+        undefined,
+        { focusFolderId: toolId },
+      );
+      const data = JSON.parse(out.result) as { total?: number; note?: string };
+      // dryRun 下不建东西，但统计口径必须是「聚焦文件夹里的书签」，不是整个书签栏
+      assert.ok(typeof data.total === 'number', `应返回统计，实际 ${out.result.slice(0, 120)}`);
+      assert.equal((await chrome.bookmarks.getChildren(barId)).length, before, 'dryRun 不得改动书签栏');
+    });
+
+    await okA('上下文注入文案：带 id、要求建在内部、点明省略 parentId 的后果', async () => {
+      const { folderContextNote, MISSING_FOLDER_NOTE } = await import('../src/lib/ai/context-note');
+      const note = folderContextNote({ id: '777', title: '软件工具' });
+      assert.match(note, /folderId = "777"/, '必须给出 id，否则模型只能猜');
+      assert.match(note, /软件工具/, '必须给出标题，模型才知道在整理什么');
+      assert.match(note, /必须建在它\*\*内部\*\*/, '必须写明父级要求');
+      assert.match(note, /省略 parentId 会落到书签栏根目录/, '必须点明后果');
+      assert.match(note, /parentId="777"/, '要给出可直接抄的调用形状');
+      // 文件夹被删时给的是"没有上下文"，不能伪造一个 id
+      assert.equal(folderContextNote(null), MISSING_FOLDER_NOTE);
+      assert.ok(!folderContextNote(null).includes('folderId'));
+      // 空标题也不能拼出「」这种空壳
+      assert.match(folderContextNote({ id: '1', title: '' }), /「\(未命名\)」/);
+    });
+
+    ok('「整理此文件夹」的起手指令必须带 folderId（只给标题等于让模型猜）', () => {
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      const chat = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
+      assert.match(chat, /folderId = "\$\{selectedFolderId\}"/, '整理指令必须把 folderId 写进去');
+      assert.match(chat, /create_folder 必须传 parentId/, '整理指令必须明确要求子分类建在内部');
+    });
+
+    ok('后台装配：用同一个文案构造器，并把 focusFolderId 一路交给 runAgentTurn', () => {
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      const bg = readFileSync(resolve(srcDir, 'entrypoints/background.ts'), 'utf8');
+      assert.match(bg, /folderContextNote\(\{ id: folder\.id/, '上下文必须走文案构造器（不再手拼字符串）');
+      assert.match(bg, /focusFolderId = folder\.id/, '必须记住聚焦文件夹');
+      assert.match(bg, /focusFolderId \? \{ focusFolderId \}/, '必须把 focusFolderId 交给 runAgentTurn');
+    });
+
+    ok('书签树右键「让 MarkAI 整理」的指令同样带 folderId 并要求建在内部', () => {
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      const tree = readFileSync(resolve(srcDir, 'components/sidebar/bookmark-tree.tsx'), 'utf8');
+      assert.match(tree, /folderId = "\$\{node\?\.id/, '右键整理指令必须带 folderId');
+      assert.match(tree, /在\*\*这个文件夹内部\*\*创建合适的子分类/, '右键整理指令必须写明建在内部');
+    });
+
+    ok('系统提示必须把「整理不许建到根目录」写成硬规则', () => {
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      const prompts = readFileSync(resolve(srcDir, 'lib/ai/prompts.ts'), 'utf8');
+      assert.match(prompts, /整理某个文件夹时，新子分类必须建在它内部/, '缺少这条硬规则');
+      assert.match(prompts, /省略 parentId 会落到\*\*书签栏根目录\*\*/, '必须点明省略 parentId 的后果');
+      // create_folder 的参数说明也要跟着改，否则模型只看工具 schema 时还是会省略 parentId
+      assert.match(prompts, /整理某个文件夹时必须传该文件夹的 id/, 'create_folder 的 parentId 说明必须写清');
+    });
+
+    ok('/整理 斜杠命令也要说清父级（它是静态文本，只能靠上下文）', () => {
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      const slash = readFileSync(resolve(srcDir, 'lib/chat/slash.ts'), 'utf8');
+      assert.match(slash, /新子分类必须建在这个文件夹\*\*内部\*\*/, '/整理 必须写明建在内部');
+      assert.match(slash, /不要建到书签栏根目录/, '/整理 必须明确禁止建到根目录');
+    });
+
+    // 清理：把本次造的树删掉，避免影响后面的用例
+    for (const n of (await chrome.bookmarks.getChildren(toolId)).slice()) {
+      await chrome.bookmarks.removeTree(n.id).catch(() => {});
+    }
+    await chrome.bookmarks.removeTree(toolId).catch(() => {});
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

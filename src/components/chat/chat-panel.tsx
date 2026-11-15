@@ -353,7 +353,17 @@ export function ChatPanel({
       icon: FolderTree,
       disabled: !selectedFolderId,
       title: selectedFolderId ? undefined : '先在左侧选择一个文件夹',
-      prompt: `请整理书签文件夹「${folderTitle}」：浏览其全部书签，创建合适的子分类，并把书签归类移动到位。`,
+      /*
+       * prompt 里必须带 folderId。
+       *
+       * 上一版只给了标题（「软件工具」）：模型知道要整理它，却拿不到 id，
+       * create_folder 时 parentId 只能省略 → 落到书签栏根目录，
+       * 用户看到的就是"整理完，书签栏下面凭空多了一堆分类文件夹"。
+       * 现在把 id 与"必须建在它内部"一起写进去，并明确禁止建到根目录。
+       */
+      prompt: selectedFolderId
+        ? `请整理书签文件夹「${folderTitle}」（folderId = "${selectedFolderId}"）：浏览其全部书签，在**这个文件夹内部**创建合适的子分类（create_folder 必须传 parentId="${selectedFolderId}"），并把书签归类移动到位。不要把子分类建到书签栏或其他根目录下。`
+        : `请整理书签文件夹「${folderTitle}」：浏览其全部书签，在**这个文件夹内部**创建合适的子分类，并把书签归类移动到位。`,
     },
     {
       label: '智能扫描清理',

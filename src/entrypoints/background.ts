@@ -7,6 +7,7 @@
  */
 
 import { runAgentTurn } from '@/lib/ai/agent';
+import { folderContextNote } from '@/lib/ai/context-note';
 import { ChatError, testConnection } from '@/lib/ai/client';
 import { ensureRoots } from '@/lib/ai/tools';
 import { recoverInterruptedTransaction } from '@/lib/undo/recorder';
@@ -918,16 +919,25 @@ async function handleChatSend(
     return;
   }
 
-  // 解析当前上下文文件夹标题，让 Agent 更聪明地处理"整理"类指令
+  /*
+   * 上下文注入：**必须带上 folderId**（文案见 lib/ai/context-note.ts）。
+   *
+   * 以前这里只给标题（「软件工具」），模型知道"用户在看书签工具"，
+   * 但不知道它的 id——于是 create_folder 时 parentId 只能省略，
+   * 落到工具默认值（书签栏根），新子分类全建到根目录，把用户的库拆散。
+   * 同时把 contextFolderId 作为 focusFolderId 交给 runAgentTurn：
+   * 模型万一还是漏传 parentId，至少落在用户眼前那个文件夹里，而不是根目录。
+   */
   let text = msg.text;
+  let focusFolderId: string | undefined;
   if (msg.contextFolderId) {
     const nodes = await chrome.bookmarks.get(msg.contextFolderId).catch(() => []);
     const folder = nodes[0];
-    if (folder) {
-      text = `（当前上下文：用户正在查看书签文件夹「${folder.title || '(未命名)'}」）\n${text}`;
+    if (folder && !folder.url) {
+      focusFolderId = folder.id;
+      text = folderContextNote({ id: folder.id, title: folder.title ?? '' }) + text;
     } else {
-      // 上下文文件夹已不存在（被删/移动）：明确告知 Agent，避免它误以为有上下文视野
-      text = `（注：用户此前查看的上下文文件夹已不存在，请按全部书签处理）\n${text}`;
+      text = folderContextNote(null) + text;
     }
   }
 
@@ -938,6 +948,7 @@ async function handleChatSend(
       history: msg.history,
       text,
       signal,
+      ...(focusFolderId ? { focusFolderId } : {}),
       /*
        * 每个事件既推给 UI，也在后台侧留下痕迹。
        *

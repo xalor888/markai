@@ -24,7 +24,10 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     cmd: '/整理',
     label: '整理当前文件夹',
     description: '先给计划，确认后再移动与合并',
-    prompt: '请整理当前文件夹：先列出你打算怎么分类和移动，等我确认后再执行。',
+    prompt:
+      '请整理当前文件夹（就是消息开头「当前上下文」里给出的那个 folderId）：' +
+      '新子分类必须建在这个文件夹**内部**（create_folder 显式传 parentId），不要建到书签栏根目录。' +
+      '先列出你打算怎么分类和移动，等我确认后再执行。',
   },
   {
     cmd: '/清理',

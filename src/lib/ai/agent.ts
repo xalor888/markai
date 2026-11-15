@@ -58,6 +58,14 @@ export interface AgentTurnParams {
   requestPlanApproval?: (plan: PlannedStep[], messageId: string) => Promise<boolean>;
   /** 长期记忆项（可选，未传时自动从存储中读取） */
   memories?: MemoryItem[];
+  /**
+   * 本轮聚焦的文件夹（用户在界面里选中的那个）。
+   *
+   * 它只做一件事：`create_folder` / `create_bookmark` 这类**没写 parentId** 的调用，
+   * 兜底落在这里而不是书签栏根。整理某个子文件夹时，模型漏传 parentId 是常事，
+   * 而落到根目录会把用户的库拆散（0.2.170 修的缺陷）。
+   */
+  focusFolderId?: string;
 }
 
 /**
@@ -540,7 +548,7 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
             // 长任务进度：转发为 tool_progress 事件（工具块实时显示，同时构成 SW 活跃信号）
             safePost(onEvent, { type: 'chat:tool_progress', messageId, recordId: tc.id, text });
             if (signal.aborted) throw new Error('已取消，任务中断');
-          }, signal),
+          }, signal, { ...(params.focusFolderId ? { focusFolderId: params.focusFolderId } : {}) }),
         };
         } finally {
           setRecordingOwner(null);

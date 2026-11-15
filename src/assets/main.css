@@ -344,6 +344,543 @@
   animation: markai-blink 1s step-end infinite;
 }
 
+/* ══════════════════════════════════════════════════════════════════
+   ── 书签精灵「墨点」──
+   ══════════════════════════════════════════════════════════════════
+
+   造型：深色圆角体 + 两颗大白眼（白眼 + 深瞳 + 高光 + 眼皮裁切）+ 克制的眉毛。
+   配色只有两档：身体两套主题都是深色（这是造型前提），差别在边缘——
+   浅色底靠高光与投影分开，深色底再加一圈极淡 rim 才不糊进背景。
+
+   动画分三层，互不覆盖：
+     · 生命层（呼吸 / 摇摆 / 跳 / 眨眼 / 视线游移）＝ CSS keyframes → 合成器，主线程 0 帧
+     · 反应层（压扁 / 倾斜 / 眼皮 / 瞳孔跟随 / 回弹）＝ 弹簧 + 单 rAF → 判稳即停
+     · 表情层（换心情的一次性姿态）＝ 反应层目标值的重设
+
+   ⚠️ 三层的 transform 必须落在**不同节点**上：CSS 的 transform 会整段覆盖 inline transform，
+   所以"眼睛横向张度（JS）"、"瞳孔位移（JS）"、"视线游移（CSS）"、"眨眼（CSS）"各占一层。
+   ── */
+
+.pet-shell {
+  --pet-body-top: #15181f;
+  --pet-body-bottom: #2b3242;
+  --pet-rim: rgb(255 255 255 / 0.1);
+  --pet-sheen: rgb(255 255 255 / 0.1);
+  --pet-eye: #fbfcfe;
+  --pet-pupil: #0a0c11;
+  --pet-catch: #ffffff;
+  --pet-mouth: #fbfcfe;
+  --pet-brow: #fbfcfe;
+  --pet-blush: rgb(129 140 248 / 0.5);
+  --pet-fx: #4f46e5;
+  --pet-alert: #e5484d;
+  --pet-ring: rgb(79 70 229 / 0.4);
+  --pet-shadow: rgb(16 24 40 / 0.16);
+}
+.dark .pet-shell {
+  --pet-body-top: #1a1f2a;
+  --pet-body-bottom: #333c4e;
+  --pet-rim: rgb(255 255 255 / 0.16);
+  --pet-sheen: rgb(255 255 255 / 0.13);
+  --pet-mouth: #f7f9fd;
+  --pet-brow: #f7f9fd;
+  --pet-blush: rgb(165 180 252 / 0.45);
+  --pet-fx: #a5b4fc;
+  --pet-alert: #fda29b;
+  --pet-ring: rgb(165 180 252 / 0.45);
+  --pet-shadow: rgb(0 0 0 / 0.55);
+}
+
+.pet-svg {
+  display: block;
+  overflow: visible;
+  will-change: transform;
+}
+.pet-svg * {
+  pointer-events: none; /* 点击交给外层按钮 */
+}
+
+/* 渐变端点：用 stop-color 变量控制，两套主题换色不用改组件 */
+.pet-body-top {
+  stop-color: var(--pet-body-top);
+}
+.pet-body-bottom {
+  stop-color: var(--pet-body-bottom);
+}
+.pet-rim {
+  fill: none;
+  stroke: var(--pet-rim);
+  stroke-width: 1;
+}
+.pet-sheen {
+  fill: var(--pet-sheen);
+}
+.pet-eye {
+  fill: var(--pet-eye);
+}
+.pet-pupil {
+  fill: var(--pet-pupil);
+}
+.pet-catch {
+  fill: var(--pet-catch);
+}
+.pet-lid {
+  /* 填充是身体的同一个渐变（组件里传入），所以眼皮合上时看不出接缝 */
+}
+.pet-closed-line {
+  fill: none;
+  stroke: var(--pet-mouth);
+  stroke-width: 2.6;
+  stroke-linecap: round;
+}
+.pet-brow {
+  fill: none;
+  stroke: var(--pet-brow);
+  stroke-width: 2.6;
+  stroke-linecap: round;
+}
+.pet-lash {
+  fill: #000;
+}
+.pet-blush {
+  fill: var(--pet-blush);
+}
+.pet-shadow {
+  fill: var(--pet-shadow);
+}
+.pet-mouth {
+  color: var(--pet-mouth); /* 实心嘴形用 currentColor，于是只需改一处颜色 */
+  stroke: var(--pet-mouth);
+  stroke-width: 3;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pet-mouth-in 180ms cubic-bezier(0.34, 1.4, 0.64, 1);
+}
+@keyframes pet-mouth-in {
+  from {
+    transform: scale(0.6);
+    opacity: 0.4;
+  }
+  to {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+/* ── 环境层：呼吸（只改 Y 与轻微竖向缩放，永远不碰旋转） ── */
+.pet-breath {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+}
+.pet-breath-calm {
+  animation: pet-bob 4.8s ease-in-out infinite;
+}
+.pet-breath-fast {
+  animation: pet-bob 2.3s ease-in-out infinite;
+}
+.pet-breath-slow {
+  animation: pet-sleep-bob 6.4s ease-in-out infinite;
+}
+.pet-breath-still {
+  animation: none;
+}
+@keyframes pet-bob {
+  0%,
+  100% {
+    transform: translateY(0) scaleY(1);
+  }
+  50% {
+    transform: translateY(-1.3) scaleY(1.012);
+  }
+}
+@keyframes pet-sleep-bob {
+  0%,
+  100% {
+    transform: translateY(0) scaleY(1);
+  }
+  50% {
+    transform: translateY(0.9) scaleY(0.985);
+  }
+}
+
+/* ── 生命层：摇摆 / 跳 / 抖 / 前倾（按心情选一条，全部合成器动画） ── */
+.pet-life {
+  transform-box: fill-box;
+  transform-origin: 50% 100%;
+}
+.pet-life-idle {
+  animation: pet-sway 6.8s ease-in-out infinite;
+}
+.pet-life-listening {
+  animation: pet-sway 9s ease-in-out infinite;
+}
+.pet-life-talking {
+  animation: pet-hop-soft 2.6s ease-in-out infinite;
+}
+.pet-life-thinking {
+  animation: pet-tilt-slow 8s ease-in-out infinite;
+}
+.pet-life-working {
+  animation: pet-bob-fast 1.4s ease-in-out infinite;
+}
+.pet-life-happy {
+  animation: pet-hop 1.05s ease-in-out infinite;
+}
+.pet-life-proud {
+  animation: pet-sway-slow 3.6s ease-in-out infinite;
+}
+.pet-life-curious {
+  animation: pet-lean 3.4s ease-in-out infinite;
+}
+.pet-life-worried {
+  animation: pet-tremble 0.42s ease-in-out infinite;
+}
+.pet-life-error {
+  animation: pet-shake 0.5s ease-out 1;
+}
+.pet-life-sleeping {
+  animation: none;
+}
+@keyframes pet-sway {
+  0%,
+  100% {
+    transform: rotate(-1.5deg);
+  }
+  50% {
+    transform: rotate(1.5deg);
+  }
+}
+@keyframes pet-sway-slow {
+  0%,
+  100% {
+    transform: rotate(-2.6deg) translateY(0);
+  }
+  50% {
+    transform: rotate(-0.4deg) translateY(-1);
+  }
+}
+@keyframes pet-tilt-slow {
+  0%,
+  100% {
+    transform: rotate(1.4deg);
+  }
+  50% {
+    transform: rotate(-1.4deg);
+  }
+}
+@keyframes pet-bob-fast {
+  0%,
+  100% {
+    transform: translateY(0) scaleY(1);
+  }
+  50% {
+    transform: translateY(-1.6) scaleY(0.985);
+  }
+}
+@keyframes pet-hop {
+  0%,
+  100% {
+    transform: translateY(0) scale(1, 1);
+  }
+  35% {
+    transform: translateY(-3.4) scale(0.97, 1.04);
+  }
+  70% {
+    transform: translateY(0) scale(1.03, 0.97);
+  }
+}
+@keyframes pet-hop-soft {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-0.9);
+  }
+}
+@keyframes pet-lean {
+  0%,
+  100% {
+    transform: rotate(3.4deg);
+  }
+  50% {
+    transform: rotate(1.6deg);
+  }
+}
+@keyframes pet-tremble {
+  0%,
+  100% {
+    transform: rotate(-0.9deg);
+  }
+  50% {
+    transform: rotate(0.9deg);
+  }
+}
+@keyframes pet-shake {
+  0% {
+    transform: rotate(0);
+  }
+  25% {
+    transform: rotate(-3.2deg);
+  }
+  55% {
+    transform: rotate(2.6deg);
+  }
+  80% {
+    transform: rotate(-1.2deg);
+  }
+  100% {
+    transform: rotate(0);
+  }
+}
+
+/* ── 眨眼：整颗眼球（白眼 + 瞳孔）一起压扁；周期由心情给（--pet-blink） ── */
+.pet-blink-on {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pet-eye-close var(--pet-blink, 5.6s) linear infinite;
+}
+@keyframes pet-eye-close {
+  0%,
+  86%,
+  100% {
+    transform: scaleY(1);
+  }
+  88%,
+  90% {
+    transform: scaleY(0.06);
+  }
+  92%,
+  95% {
+    transform: scaleY(1);
+  }
+  96.5%,
+  98% {
+    transform: scaleY(0.06);
+  }
+  99% {
+    transform: scaleY(1);
+  }
+}
+
+/* ── 视线游移（CSS）：自己看东看西，不占一帧 JS ── */
+.pet-gaze {
+  transform-box: fill-box;
+  transform-origin: center;
+}
+.pet-gaze-idle,
+.pet-gaze-listening,
+.pet-gaze-talking,
+.pet-gaze-curious,
+.pet-gaze-happy,
+.pet-gaze-proud {
+  animation: pet-gaze-swim 7.4s ease-in-out infinite;
+}
+.pet-gaze-working {
+  animation: pet-gaze-work 2.6s ease-in-out infinite;
+}
+.pet-gaze-thinking {
+  animation: pet-gaze-think 5.2s ease-in-out infinite;
+}
+@keyframes pet-gaze-swim {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  12%,
+  26% {
+    transform: translateX(-2.2);
+  }
+  42%,
+  56% {
+    transform: translateX(2.1);
+  }
+  74%,
+  84% {
+    transform: translateX(0);
+  }
+}
+@keyframes pet-gaze-work {
+  0%,
+  100% {
+    transform: translate(-1.2, 0.6);
+  }
+  50% {
+    transform: translate(1.4, 1);
+  }
+}
+@keyframes pet-gaze-think {
+  0%,
+  100% {
+    transform: translate(0, -0.6);
+  }
+  50% {
+    transform: translate(1.2, -1.2);
+  }
+}
+
+/* ── 特效：全部 CSS，只做位移与透明度 ── */
+.pet-fx-layer {
+  pointer-events: none;
+}
+.pet-fx {
+  fill: var(--pet-fx);
+  opacity: 0;
+}
+.pet-fx.sparkle {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pet-twinkle 1.4s ease-in-out infinite;
+}
+@keyframes pet-twinkle {
+  0%,
+  100% {
+    opacity: 0.2;
+    transform: scale(0.65) rotate(0deg);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.05) rotate(18deg);
+  }
+}
+.pet-fx.zz {
+  fill: none;
+  stroke: var(--pet-fx);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pet-zfloat 3.6s ease-in-out infinite;
+}
+@keyframes pet-zfloat {
+  0% {
+    opacity: 0;
+    transform: translateY(3) scale(0.7);
+  }
+  30% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(-9) scale(1.15);
+  }
+}
+.pet-fx.sweat {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pet-drop 2.8s ease-in-out infinite;
+}
+@keyframes pet-drop {
+  0%,
+  100% {
+    opacity: 0.85;
+    transform: translateY(0);
+  }
+  70% {
+    opacity: 0.55;
+    transform: translateY(2.4);
+  }
+}
+.pet-fx.question {
+  fill: none;
+  stroke: var(--pet-fx);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  animation: pet-wobble 2.2s ease-in-out infinite;
+}
+.pet-fx.question circle {
+  fill: var(--pet-fx);
+  stroke: none;
+}
+@keyframes pet-wobble {
+  0%,
+  100% {
+    opacity: 0.85;
+    transform: rotate(-4deg);
+  }
+  50% {
+    opacity: 1;
+    transform: rotate(5deg);
+  }
+}
+.pet-fx.ring {
+  fill: none;
+  stroke: var(--pet-ring);
+  stroke-width: 1.8;
+  stroke-dasharray: 5 9;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: pet-spin 3.4s linear infinite;
+}
+@keyframes pet-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+.pet-fx.bang {
+  fill: var(--pet-alert);
+  animation: pet-alert 1.6s ease-in-out infinite;
+}
+@keyframes pet-alert {
+  0%,
+  100% {
+    opacity: 0.9;
+    transform: translateX(0);
+  }
+  20%,
+  60% {
+    transform: translateX(-1.2);
+  }
+  40%,
+  80% {
+    transform: translateX(1.2);
+  }
+}
+.pet-fx.dot {
+  fill: var(--pet-fx);
+  animation: pet-dot 1.6s ease-in-out infinite;
+}
+@keyframes pet-dot {
+  0%,
+  100% {
+    opacity: 0.25;
+    transform: translateY(0);
+  }
+  50% {
+    opacity: 1;
+    transform: translateY(-1.6);
+  }
+}
+
+/* ── 说话气泡：与 toast 同一套玻璃语言（浮层专用） ── */
+.pet-bubble {
+  max-width: 190px;
+  animation: markai-slide-up 220ms ease-out;
+}
+/* 指向宠物的尖角：12×12 旋转 45°，只露下半张脸；边框接缝用 clip 掉 */
+.pet-bubble-caret {
+  position: absolute;
+  bottom: -5px;
+  left: 14px;
+  width: 10px;
+  height: 10px;
+  transform: rotate(45deg);
+  border-right: 1px solid rgb(16 24 40 / 0.1);
+  border-bottom: 1px solid rgb(16 24 40 / 0.1);
+  background: rgb(255 255 255 / 0.72);
+  border-bottom-right-radius: 3px;
+}
+.dark .pet-bubble-caret {
+  background: rgb(255 255 255 / 0.1);
+  border-color: rgb(255 255 255 / 0.12);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-fade-in,
   .animate-scale-in,

@@ -28,6 +28,7 @@ import { useMemoryStore, initMemorySync } from '@/stores/memoryStore';
 import { CATEGORY_LABELS, type MemoryCategory } from '@/lib/ai/memory';
 import { clearUndoPoints } from '@/lib/undo/recorder';
 import { countTree, toJsonExport, toNetscapeHtml } from '@/lib/bookmarks/export-file';
+import { PetSettingsSection } from '@/components/options/pet-settings';
 import { useThemeStore, type Theme } from '@/stores/themeStore';
 import {
   PROVIDERS,
@@ -1322,6 +1323,11 @@ export function ConfigForm() {
             </Select>
           </SettingRow>
         </SettingsSection>
+      </ErrorBoundary>
+
+      {/* ── 宠物 ── */}
+      <ErrorBoundary area="宠物">
+        <PetSettingsSection />
       </ErrorBoundary>
 
       {/* ── 外观 ── */}

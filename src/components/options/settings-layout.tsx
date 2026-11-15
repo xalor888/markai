@@ -31,6 +31,7 @@ import {
   X,
   Zap,
   Keyboard,
+  Cat,
 } from 'lucide-react';
 import { BrandMark } from '@/components/theme/theme-provider';
 import { useConfigStore } from '@/stores/configStore';
@@ -56,6 +57,7 @@ export const SETTINGS_SECTIONS: SettingsSectionMeta[] = [
   { id: 'memory', label: '长期记忆', icon: Brain, group: 'agent' },
   { id: 'personalize', label: '个性化', icon: Sparkles, group: 'agent' },
   { id: 'appearance', label: '外观', icon: Palette, group: 'personal' },
+  { id: 'pet', label: '宠物', icon: Cat, group: 'personal' },
   { id: 'data', label: '数据管理', icon: Database, group: 'personal' },
 ];
 

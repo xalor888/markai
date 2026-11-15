@@ -17534,6 +17534,257 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     assert.match(tree, /className="truncate"/, '标题必须 truncate，否则长标题会把行撑成横向长条');
   });
 
+  // ── T29: 书签精灵（弹簧内核 / 心情裁决 / 造型不变量） ──
+  console.log('\n[pet] 书签精灵');
+
+  {
+    const { Spring, createTicker, stepAll } = await import('../src/lib/pet/motion');
+    const { EXPRESSIONS, PetDirector, expressionOf, resolvePetState } = await import('../src/lib/pet/mood');
+    const { pickPokeLine } = await import('../src/lib/pet/lines');
+
+    ok('弹簧：给目标就能收敛到目标，并且判稳后停止', () => {
+      const s = new Spring(0, { stiffness: 120, dampingRatio: 0.8 }).to(1);
+      let frames = 0;
+      while (s.step(1 / 60) && frames < 600) frames += 1;
+      assert.ok(frames > 0 && frames < 90, `收敛用了 ${frames} 帧（应在 1 帧~1.5 秒之间）`);
+      assert.ok(Math.abs(s.value - 1) < 1e-3, `收敛值 ${s.value} 应贴近 1`);
+      assert.equal(s.settled, true);
+      // 判稳之后再 step 必须返回 false：否则调用方会永远续帧（空闲常驻就是灾难）
+      assert.equal(s.step(1 / 60), false, '判稳后不得再返回"还在动"');
+    });
+
+    ok('弹簧：欠阻尼真的会过冲（不是换了条名字的缓动曲线）', () => {
+      const s = new Spring(0, { stiffness: 200, dampingRatio: 0.4 }).to(1);
+      let peak = 0;
+      for (let i = 0; i < 200; i += 1) {
+        s.step(1 / 60);
+        peak = Math.max(peak, s.value);
+      }
+      assert.ok(peak > 1.02, `峰值 ${peak} 应超过目标（欠阻尼才有"弹"的手感）`);
+      assert.equal(s.settled, true);
+    });
+
+    ok('弹簧：临界阻尼不过冲（眼珠跟随用它，过冲会像抽搐）', () => {
+      const s = new Spring(0, { stiffness: 90, dampingRatio: 1 }).to(1);
+      let peak = 0;
+      for (let i = 0; i < 240; i += 1) {
+        s.step(1 / 60);
+        peak = Math.max(peak, s.value);
+      }
+      assert.ok(peak <= 1 + 1e-6, `临界阻尼峰值 ${peak} 不该超过目标`);
+    });
+
+    ok('弹簧：5 秒的超长 dt 不会发散 / 不会 NaN（切标签页回来）', () => {
+      const s = new Spring(0, { stiffness: 300, dampingRatio: 0.6 }).to(1);
+      s.step(5);
+      assert.ok(Number.isFinite(s.value) && Number.isFinite(s.velocity), '必须保持有限值');
+      assert.ok(Math.abs(s.value) < 5, `截断后不该被一次冲出去（value=${s.value}）`);
+    });
+
+    ok('弹簧组：全体判稳才返回 false，任一在动返回 true', () => {
+      const a = new Spring(0, { stiffness: 120 }).to(1);
+      const b = new Spring(1, { stiffness: 120 }); // 已在目标位
+      assert.equal(stepAll([a, b], 1 / 60), true, 'a 还在动');
+      a.snap(1);
+      assert.equal(stepAll([a, b], 1 / 60), false, '全体判稳');
+    });
+
+    ok('驱动器：onFrame 返回 false 时自动停表（不会泄漏 rAF）', () => {
+      // 替身必须真的实现 cancel：否则"停表"只是把标志位改了，测试却看不出来
+      const queued = new Map<number, (t: number) => void>();
+      let nextId = 1;
+      let cancels = 0;
+      let calls = 0;
+      const ticker = createTicker(
+        () => {
+          calls += 1;
+          return calls < 3;
+        },
+        (cb) => {
+          const id = nextId++;
+          queued.set(id, cb);
+          return id;
+        },
+        (id) => {
+          if (queued.delete(id)) cancels += 1;
+        },
+      );
+      ticker.start();
+      let t = 1000;
+      for (let i = 0; i < 8 && queued.size > 0; i += 1) {
+        const [id, cb] = [...queued.entries()][0]!;
+        queued.delete(id);
+        t += 16.6;
+        cb(t);
+      }
+      assert.equal(ticker.running, false, '第 3 帧返回 false 后必须已停表');
+      assert.equal(calls, 3);
+      assert.equal(queued.size, 0, '停表后不得还留着待执行的帧');
+      assert.ok(cancels >= 1, '停表要走 cancel（不是只把标志位改了）');
+      ticker.start();
+      assert.equal(ticker.running, true, '可以再次启动');
+      ticker.stop();
+      assert.equal(ticker.running, false);
+    });
+
+    // ── 心情裁决：优先级是一张表，不是一堆 if ──
+    const baseSignals = {
+      phase: null as null | 'connecting' | 'thinking' | 'streaming' | 'tool' | 'retrying',
+      pendingDeletions: 0,
+      awaitingUser: false,
+      loadError: false,
+      chatError: false,
+      focused: false,
+      lastSuccessAt: 0,
+      lastFailureAt: 0,
+      lastPrideAt: 0,
+      lastActiveAt: 1_000_000,
+    };
+    const now = 1_000_500;
+    const sig = (patch: Partial<typeof baseSignals>) => ({ ...baseSignals, ...patch });
+
+    ok('心情优先级：出错 > 得意/开心 > 干活 > 想 > 说 > 担心 > 在听 > 闲置', () => {
+      const cases: Array<[string, ReturnType<typeof sig>, string]> = [
+        ['chatError 压过一切', sig({ chatError: true, phase: 'tool', lastSuccessAt: now - 100 }), 'error'],
+        ['loadError 也算出错', sig({ loadError: true }), 'error'],
+        ['刚被撸 → 得意', sig({ lastPrideAt: now - 100, lastSuccessAt: now - 100 }), 'proud'],
+        ['刚成功 → 开心', sig({ lastSuccessAt: now - 100 }), 'happy'],
+        ['跑工具 → 干活', sig({ phase: 'tool' }), 'working'],
+        ['等首字节/思考 → 想', sig({ phase: 'thinking' }), 'thinking'],
+        ['出字 → 说话', sig({ phase: 'streaming' }), 'talking'],
+        ['有待删 → 担心', sig({ pendingDeletions: 2 }), 'worried'],
+        ['弹着确认框 → 在听', sig({ awaitingUser: true }), 'listening'],
+        ['输入框聚焦 → 在听', sig({ focused: true }), 'listening'],
+        ['闲置 45s → 好奇', sig({ lastActiveAt: now - 46_000 }), 'curious'],
+        ['闲置 8min → 打盹', sig({ lastActiveAt: now - 9 * 60_000 }), 'sleeping'],
+        ['什么信号都没有 → 闲置', sig({}), 'idle'],
+      ];
+      for (const [label, signals, expected] of cases) {
+        assert.equal(resolvePetState(signals, now), expected, `${label} 应为 ${expected}`);
+      }
+    });
+
+    ok('奖励表情有驻留：庆祝期间普通信号打断不了，但"新任务"能打断', () => {
+      const director = new PetDirector();
+      const t0 = 5_000;
+      assert.equal(director.update(sig({ lastSuccessAt: t0 }), t0), 'happy');
+      // 200ms 后：普通 idle 信号 —— 仍应保持 happy
+      assert.equal(director.update(sig({ lastSuccessAt: t0, focused: false }), t0 + 200), 'happy');
+      // 用户又发了一条任务：必须立刻切到"干活/在想"
+      assert.equal(director.update(sig({ lastSuccessAt: t0, phase: 'tool' }), t0 + 300), 'working');
+    });
+
+    ok('忙碌族内部切换不重启驻留（工具链里 1 秒三次也不抖）', () => {
+      const director = new PetDirector();
+      const t0 = 9_000;
+      // 注意：phase 的取值是 connecting/thinking/streaming/tool/retrying，
+      // "干活"对应 tool 相 —— 写成 'working' 会落进 default 分支（这条断言曾因此假通过）
+      assert.equal(director.update(sig({ phase: 'thinking' }), t0), 'thinking');
+      assert.equal(director.update(sig({ phase: 'tool' }), t0 + 150), 'working');
+      assert.equal(director.update(sig({ phase: 'streaming' }), t0 + 260), 'talking');
+    });
+
+    // ── 表情表的不变量 ──
+    ok('十一种心情都有完整表情：开合/缩放/嘴形/特效字段齐全且在合理区间', () => {
+      const mouthIds = new Set(['smile', 'grin', 'flat', 'oh', 'wavy', 'frown', 'cat', 'sleep']);
+      const fxIds = new Set(['none', 'sparkle', 'sweat', 'zzz', 'question', 'ring', 'bang', 'dots']);
+      const states = Object.keys(EXPRESSIONS);
+      assert.ok(states.length >= 11, `心情应至少 11 种，实际 ${states.length}`);
+      for (const key of states) {
+        const e = EXPRESSIONS[key as keyof typeof EXPRESSIONS];
+        assert.ok(e.aria.length > 0, `${key} 缺少读屏说明`);
+        assert.ok(e.lidOpen >= 0 && e.lidOpen <= 1.2, `${key}.lidOpen 越界：${e.lidOpen}`);
+        assert.ok(e.squash >= 0.9 && e.squash <= 1.08, `${key}.squash 越界：${e.squash}`);
+        assert.ok(e.stretch >= 0.9 && e.stretch <= 1.08, `${key}.stretch 越界：${e.stretch}`);
+        assert.ok(e.blush >= 0 && e.blush <= 1, `${key}.blush 越界`);
+        assert.ok(mouthIds.has(e.mouth), `${key}.mouth 非法：${e.mouth}`);
+        assert.ok(fxIds.has(e.fx), `${key}.fx 非法：${e.fx}`);
+        // 视线基准不能跑到眼睛外面（瞳孔位移过大看起来像斜视）
+        assert.ok(Math.abs(e.gazeX) <= 3 && Math.abs(e.gazeY) <= 3, `${key}.gaze 越界：${e.gazeX}/${e.gazeY}`);
+        assert.ok(e.browAlpha >= 0 && e.browAlpha <= 1, `${key}.browAlpha 越界`);
+        assert.ok(e.blinkPeriod.endsWith('s'), `${key}.blinkPeriod 必须是 CSS 时间值：${e.blinkPeriod}`);
+      }
+      // 未知心情必须回落而不是抛错（渲染侧不能因为表缺项白屏）
+      assert.equal(expressionOf('nope' as keyof typeof EXPRESSIONS), EXPRESSIONS.idle);
+    });
+
+    ok('眉毛的语义表是对的：担心=眉头抬起、出错=眉头下压（这两个最容易画反）', () => {
+      assert.ok(EXPRESSIONS.worried.browTilt < 0, `worried.browTilt 应为负（眉头抬起），实际 ${EXPRESSIONS.worried.browTilt}`);
+      assert.ok(EXPRESSIONS.curious.browTilt < 0, 'curious 也应眉头抬起');
+      assert.ok(EXPRESSIONS.error.browTilt > 0, 'error 应眉头下压');
+      assert.ok(EXPRESSIONS.working.browTilt > 0, 'working（专注）应眉头下压');
+      // 平静状态眉毛几乎不可见：它只用来区分情绪，不该常驻
+      assert.ok(EXPRESSIONS.idle.browAlpha <= 0.2, `idle.browAlpha=${EXPRESSIONS.idle.browAlpha} 太高，会显得在皱眉`);
+      assert.ok(EXPRESSIONS.error.browAlpha > EXPRESSIONS.idle.browAlpha, '出错时眉毛必须比闲置更明显');
+    });
+
+    ok('CSS 必须覆盖每个用到的特效（否则"在想"的小点根本不出现）', () => {
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      const css = readFileSync(resolve(srcDir, 'assets/main.css'), 'utf8');
+      // 组件里的 class 名与情绪 id 的对应（写死一份，改组件时这条会红）
+      for (const selector of ['.pet-fx.sparkle', '.pet-fx.zz', '.pet-fx.sweat', '.pet-fx.question', '.pet-fx.ring', '.pet-fx.bang', '.pet-fx.dot']) {
+        assert.ok(css.includes(selector), `main.css 缺少 ${selector}`);
+      }
+      assert.ok(css.includes('@keyframes pet-eye-close'), '缺少眨眼关键帧');
+      assert.ok(css.includes('animation-duration: 0.01ms !important'), '减少动态的通配兜底不能删（宠物动画必须可被系统关闭）');
+    });
+
+    ok('被戳：同一心情连戳不重复，未知心情也有台词', () => {
+      const seen = new Set<string>();
+      for (let i = 0; i < 3; i += 1) seen.add(pickPokeLine('idle', i));
+      assert.ok(seen.size >= 2, `连戳三次应至少两句不同，实际 ${seen.size} 句`);
+      const line = pickPokeLine('nope' as 'idle', 0);
+      assert.ok(line.length > 0, '未知心情不能吐出空气泡');
+    });
+
+    // ── 组件侧的硬约束（静态检查，因为这几条在 DOM 里看不出来） ──
+    ok('角色本体是纯 SVG + 命令式写 DOM：组件里不许出现 useState', () => {
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      const avatar = readFileSync(resolve(srcDir, 'components/pet/pet-avatar.tsx'), 'utf8');
+      // 每帧 setState 会让 React 以 60fps 重渲染整棵子树 —— 常驻组件绝对不能这么做
+      assert.ok(!avatar.includes('useState'), 'pet-avatar 不许用 useState（姿态必须走 ref 直写）');
+      assert.ok(avatar.includes('ticker.stop()'), '卸载必须停表，否则 rAF 泄漏');
+      assert.ok(avatar.includes('createTicker'), '动画必须走单 rAF 驱动器');
+      assert.ok(avatar.includes('prefersReducedMotion'), '必须尊重系统"减少动态"');
+    });
+
+    ok('宠物层把 store 通知合并到一次微任务（流式 token 不会让宠物抖动）', () => {
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      const layer = readFileSync(resolve(srcDir, 'components/pet/pet-layer.tsx'), 'utf8');
+      assert.ok(layer.includes('queueMicrotask'), '必须合并 notify，否则每个 token 都重算一次');
+      assert.ok(layer.includes('aria-label={`书签精灵'), '按钮必须有可访问名称');
+      assert.ok(layer.includes('aria-live="polite"'), '气泡要用 aria-live，读屏用户也要能听到');
+      assert.ok(layer.includes('const heartbeat = window.setInterval(schedule, DIRECTOR_TICK_MS)'), '闲置推进必须有心跳');
+    });
+
+    ok('设置页有「宠物」分区，且预览用的是真组件（不是另画一张示意图）', () => {
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      const layout = readFileSync(resolve(srcDir, 'components/options/settings-layout.tsx'), 'utf8');
+      const form = readFileSync(resolve(srcDir, 'components/options/config-form.tsx'), 'utf8');
+      const section = readFileSync(resolve(srcDir, 'components/options/pet-settings.tsx'), 'utf8');
+      assert.match(layout, /id: 'pet', label: '宠物'/, '导航里必须有宠物分区，否则用户找不到开关');
+      assert.match(form, /<PetSettingsSection \/>/, '设置页主体必须真的挂上这个分区（只登记导航等于空链接）');
+      assert.match(section, /<PetAvatar/, '预览必须渲染真实角色组件');
+      assert.match(section, /PET_SIZES\.map/, '大小档位必须由常量表驱动（写死三处会漂移）');
+      assert.match(section, /usePetStore\.getState\(\)\.load\(\)/, '设置页自己也要 load 一次（独立文档不会自动继承主页面状态）');
+    });
+
+    await okA('宠物设置独立落盘（不与 markai.config 混在一起）', async () => {
+      const { usePetStore, PET_DEFAULT_SETTINGS, PET_STORAGE_KEY } = await import('../src/stores/petStore');
+      assert.equal(PET_DEFAULT_SETTINGS.enabled, true, '默认应显示（否则用户永远发现不了它）');
+      assert.equal(PET_DEFAULT_SETTINGS.size, 56);
+      assert.equal(PET_STORAGE_KEY, 'markai.pet');
+      await usePetStore.getState().update({ enabled: false, size: 72 });
+      const saved = storageMap.get('markai.pet') as Record<string, unknown> | undefined;
+      assert.ok(saved, 'update 必须落盘');
+      assert.equal(saved!.enabled, false);
+      assert.equal(saved!.size, 72);
+      assert.ok(!storageMap.has('markai.config'), '宠物设置不得写进 AI 配置');
+      // 复位，避免影响后续用例
+      await usePetStore.getState().update({ enabled: true, size: 56 });
+    });
+  }
+
   console.log(`\n全部通过：${passed} 项 ✔`);
 })().catch((e) => {
   console.error('\n❌ 测试失败:', e);

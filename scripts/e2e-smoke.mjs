@@ -4615,6 +4615,108 @@ async function run() {
     check('键盘聚焦时焦点可见（outline 或 ring，不依赖 hover）', focusRing.ok, JSON.stringify(focusRing));
   }
 
+  /* ══════════ 9.6 书签精灵（常驻角色） ══════════ */
+  console.log('\n[9.6] 书签精灵');
+  {
+    /*
+     * 这一组只回答"角色真的在、不挡事、能互动"三件事。
+     * 心情是否跟状态走属于业务契约，已经由单测（T29 的心情表）钉住，
+     * 在 e2e 里再模拟一遍流式只会把两套东西绑在一起、一起变脆。
+     */
+    const pet = await ev(`(() => {
+      const btn = document.querySelector('[data-testid="pet"] button');
+      if (!btn) return null;
+      const r = btn.getBoundingClientRect();
+      const svg = btn.querySelector('[data-testid="pet-avatar"]');
+      return {
+        state: btn.getAttribute('data-pet-state'),
+        label: btn.getAttribute('aria-label') || '',
+        rect: { x: r.x, y: r.y, w: r.width, h: r.height },
+        hasSvg: !!svg,
+        viewBox: svg ? svg.getAttribute('viewBox') : null,
+      };
+    })()`);
+    check(
+      '完整页角落常驻一只书签精灵（内联 SVG，零图片资源）',
+      pet && pet.hasSvg && pet.viewBox === '0 0 100 100',
+      pet ? JSON.stringify({ state: pet.state, rect: pet.rect, viewBox: pet.viewBox }) : 'pet 不存在',
+    );
+    check(
+      '它有可访问名称（读屏能知道它是什么、什么心情）',
+      Boolean(pet && pet.label.includes('书签精灵') && pet.label.length > 8),
+      pet ? pet.label : '',
+    );
+
+    // 不遮挡关键控件：宠物与搜索框 / 聊天输入框 / 发送按钮的矩形不能相交
+    const overlap = await ev(`(() => {
+      const petBtn = document.querySelector('[data-testid="pet"] button');
+      if (!petBtn) return { ok: false, reason: 'no-pet' };
+      const pr = petBtn.getBoundingClientRect();
+      const sel = ['[data-testid="search"]', '[data-testid="chat-input"]', 'button[aria-label="发送"]'];
+      const targets = sel.map((q) => document.querySelector(q)).filter(Boolean);
+      const hit = targets.filter((el) => {
+        const r = el.getBoundingClientRect();
+        const overlapX = Math.max(0, Math.min(pr.right, r.right) - Math.max(pr.left, r.left));
+        const overlapY = Math.max(0, Math.min(pr.bottom, r.bottom) - Math.max(pr.top, r.top));
+        return overlapX > 0 && overlapY > 0;
+      });
+      return {
+        ok: hit.length === 0,
+        hit: hit.map((e) => e.getAttribute('data-testid') || e.getAttribute('aria-label')),
+        checked: targets.length,
+      };
+    })()`);
+    check(
+      '宠物不压住搜索框 / 输入框 / 发送按钮',
+      overlap.ok,
+      `检查了 ${overlap.checked} 个控件${overlap.hit?.length ? '，遮挡：' + overlap.hit.join('、') : ''}`,
+    );
+
+    // 戳一下：出气泡，再戳一句要换（同一心情里轮转，不做随机）
+    const firstLine = await ev(`(async () => {
+      const btn = document.querySelector('[data-testid="pet"] button');
+      btn.click();
+      await new Promise((r) => setTimeout(r, 260));
+      const b = document.querySelector('[data-testid="pet-bubble"]');
+      return b ? b.textContent : null;
+    })()`);
+    const secondLine = await ev(`(async () => {
+      const btn = document.querySelector('[data-testid="pet"] button');
+      btn.click();
+      await new Promise((r) => setTimeout(r, 260));
+      const b = document.querySelector('[data-testid="pet-bubble"]');
+      return b ? b.textContent : null;
+    })()`);
+    check(
+      '戳一下它会说话（气泡走 aria-live，读屏也能听到）',
+      Boolean(firstLine && firstLine.length > 0),
+      JSON.stringify({ firstLine, secondLine }),
+    );
+    check(
+      '连戳两次不会重复同一句',
+      Boolean(firstLine && secondLine && firstLine !== secondLine),
+      JSON.stringify({ firstLine, secondLine }),
+    );
+
+    // 双击 = 撸一把：心情切到"得意"，且这一下不是靠随机文案，而是真心情
+    const doubleClick = await ev(`(async () => {
+      const btn = document.querySelector('[data-testid="pet"] button');
+      btn.click();
+      await new Promise((r) => setTimeout(r, 120));
+      btn.click();
+      await new Promise((r) => setTimeout(r, 400));
+      return {
+        state: btn.getAttribute('data-pet-state'),
+        bubble: document.querySelector('[data-testid="pet-bubble"]')?.textContent ?? null,
+      };
+    })()`);
+    check(
+      '双击会"得意"（心情真的切到 proud，不只是换了句台词）',
+      doubleClick.state === 'proud' && Boolean(doubleClick.bubble),
+      JSON.stringify(doubleClick),
+    );
+  }
+
   /* ══════════ 10. 健康检查（自诊断） ══════════ */
   console.log('\n[10] 健康检查');
   {

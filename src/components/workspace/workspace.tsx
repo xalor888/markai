@@ -21,6 +21,7 @@ import { OnboardingTip } from '@/components/common/onboarding-tip';
 import { ShortcutsDialog } from '@/components/common/shortcuts-dialog';
 import { ErrorBoundary } from '@/components/common/error-boundary';
 import { useUIStore } from '@/stores/uiStore';
+import { PetLayer } from '@/components/pet/pet-layer';
 import { CHAT_WIDTH_MAX, CHAT_WIDTH_MAX_COMPACT, clampChatWidth } from '@/lib/chat-width';
 import {
   clearSearchHistory,
@@ -557,12 +558,22 @@ export function Workspace({
            * 这一层 div 不是多余的：ErrorBoundary 正常时渲染 display:contents（为了零布局影响），
            * 它的子元素会被「穿透」成根 flex-row 的直接子节点——提示条一旦落在那一层就会被挤成竖条。
            * 显式给一个 flex-col 容器，提示条才真的在列表下方。
+           *
+           * `relative` 是宠物用的：宠物的定位基准必须是**中栏**，不能是整页。
+           * 用整页的话（fixed）它会压住完整页右下角的 Agent 输入框；而中栏的右下角
+           * 永远是留白，宠物待在那儿既显眼又不挡任何控件。
            */}
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col">
+          <div className="relative flex min-h-0 min-w-0 flex-1 flex-col">
             <BookmarkList compact={mode === 'compact'} className="min-w-0 flex-1" />
             {/* 首次打开的三步提示：底部一条可跳过的横幅，不做遮罩导览——
                 顶栏图标不显眼，但把界面压暗、还要点三下才能用，对「只想赶紧整理一下」的人是净负担。 */}
             <OnboardingTip onGoOrganize={() => setOrganizeLogOpen(true)} />
+            {/*
+             * 书签精灵：常驻在中栏左下角。
+             * 底部有引导条时靠 `--markai-bottom-bar` 自动抬高（与 toast 同一套约定），
+             * 所以它永远不会压住「下一步」那行字。
+             */}
+            <PetLayer className="bottom-[calc(0.75rem+var(--markai-bottom-bar,0px))] left-3" />
           </div>
         </ErrorBoundary>
 

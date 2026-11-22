@@ -1033,6 +1033,14 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.ok(props(cleanup).dryRun, 'cleanup_sweep 缺 dryRun');
     });
 
+    await okA('系统提示明确多根与根级书签的合法性', async () => {
+      const { SYSTEM_PROMPT } = await import('../src/lib/ai/prompts');
+      assert.match(SYSTEM_PROMPT, /书签栏 ≠ 全库/, '必须明确书签栏不是全库');
+      assert.match(SYSTEM_PROMPT, /其他书签 \/ 移动设备的根级书签是合法存放位置/, '不能把其他根的书签默认当成游离');
+      assert.match(SYSTEM_PROMPT, /不必|不要.*搬进书签栏/, '未经用户明确要求，不得跨根搬迁');
+      assert.match(SYSTEM_PROMPT, /根层全是分类文件夹.*不要.*硬造同名分类/s, '根层无直接书签时不得硬造分类');
+    });
+
     await okA('executeTool 拒绝未知工具', async () => {
       await assert.rejects(
         () => executeTool('hack_tool', '{}'),
@@ -2074,6 +2082,39 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.ok(lafj.hasMore);
       assert.equal(lafj.nextOffset, 2);
       assert.ok(String(laf.result).includes('offset=2'), 'note 应提示继续分页');
+    });
+
+    ok('list_all_folders 先给根分布与递归书签数', () => {
+      const j = JSON.parse(laf.result) as {
+        roots: { title: string; bookmarks: number; directBookmarks: number }[];
+        folders: { title: string; bookmarks: number; folders: number; root: string }[];
+      };
+      assert.ok(Array.isArray(j.roots) && j.roots.length >= 2, '必须列出所有根，不能只列书签栏');
+      assert.ok(j.roots.some((r) => r.title === '书签栏' && r.bookmarks >= 3), '书签栏递归书签数缺失');
+      assert.ok(j.roots.some((r) => r.title === '其他书签' && r.directBookmarks >= 2), '其他书签根被漏掉');
+      const tech = j.folders.find((f) => f.title === '技术');
+      assert.ok(tech, '分页内应包含技术文件夹');
+      assert.ok(tech!.bookmarks >= 1, '递归书签数不能只算直接 children（技术下还有 MDN）');
+      assert.equal(tech!.root, '书签栏');
+    });
+
+    await okA('list_bookmarks 列到根层时同时给出其他根，避免“书签栏=全库”', async () => {
+      const r = await executeTool('list_bookmarks', JSON.stringify({ parentId: '1' }));
+      const j = JSON.parse(r.result) as {
+        scope: string;
+        directBookmarks: number;
+        directFolders: number;
+        roots?: { title: string; bookmarks: number; directBookmarks: number }[];
+      };
+      assert.equal(j.scope, 'root');
+      assert.ok(j.directBookmarks >= 2, `书签栏直接子书签至少 2 条，实际 ${j.directBookmarks}`);
+      assert.ok(j.directFolders >= 1, `书签栏直接子文件夹至少 1 个，实际 ${j.directFolders}`);
+      assert.ok(j.roots?.some((x) => x.title === '其他书签' && x.directBookmarks >= 2), '其他书签根必须一起出现');
+
+      const sub = await executeTool('list_bookmarks', JSON.stringify({ parentId: '5' }));
+      const sj = JSON.parse(sub.result) as { scope: string; roots?: unknown[] };
+      assert.equal(sj.scope, 'folder', '非根层不应带根分布，避免每层都重复');
+      assert.equal(sj.roots, undefined);
     });
     const laf2 = await executeTool('list_all_folders', JSON.stringify({ limit: 2, offset: 2 }));
     const lafj2 = JSON.parse(laf2.result) as { offset: number; shown: number };

@@ -161,6 +161,51 @@ export async function assertNoCycle(bookmarkId: string, parentId: string): Promi
   }
 }
 
+type TreeTally = { bookmarks: number; folders: number };
+type RootSummary = TreeTally & { id: string; title: string; directBookmarks: number; directFolders: number };
+
+/**
+ * 递归统计一棵子树，并把每个节点的统计放进 out（后序，一次遍历）。
+ *
+ * 书签库有多个根，且书签常被放在“分类/分类/子类”下面。只看某一层的
+ * children.length 会把 142 条书签的「AI 工具」显示成 10，模型就会误判
+ * 书签都散在根层，进而造出同名分类。这里给的是**递归书签数**。
+ */
+function tallyTree(node: chrome.bookmarks.BookmarkTreeNode, out: Map<string, TreeTally>): TreeTally {
+  if (node.url) return { bookmarks: 1, folders: 0 };
+  let bookmarks = 0;
+  let folders = 1;
+  for (const child of node.children ?? []) {
+    const t = tallyTree(child, out);
+    bookmarks += t.bookmarks;
+    folders += t.folders;
+  }
+  const tally = { bookmarks, folders };
+  out.set(node.id, tally);
+  return tally;
+}
+
+function summarizeRoots(tree: chrome.bookmarks.BookmarkTreeNode[]): {
+  roots: RootSummary[];
+  tallies: Map<string, TreeTally>;
+} {
+  const tallies = new Map<string, TreeTally>();
+  const roots = (tree[0]?.children ?? []).map((root) => {
+    const tally = tallyTree(root, tallies);
+    const direct = root.children ?? [];
+    return {
+      id: root.id,
+      title: root.title || root.id,
+      bookmarks: tally.bookmarks,
+      // 根自己不算“文件夹”，报给模型的是根内部的分类数
+      folders: Math.max(0, tally.folders - 1),
+      directBookmarks: direct.filter((n) => n.url).length,
+      directFolders: direct.filter((n) => !n.url).length,
+    };
+  });
+  return { roots, tallies };
+}
+
 function serializeBookmark(n: chrome.bookmarks.BookmarkTreeNode): Record<string, unknown> {
   /*
    * 只发模型真正会用的字段。
@@ -221,10 +266,22 @@ async function listBookmarks(
   const children = await chrome.bookmarks.getChildren(pid);
   const items = children.slice(offset, offset + useLimit);
   const folderName = (await resolvePath(pid)).split(' > ').pop() ?? pid;
+  const [node] = await chrome.bookmarks.get(pid).catch(() => []);
+  /*
+   * 列到根层时，必须把“其他根有多少书签”一并说清。
+   * 否则模型只看见书签栏的 16 个文件夹，很容易把这里当成整个书签库，
+   * 进而把「其他书签」根层的合法书签叫成“游离”，或硬造同名分类。
+   */
+  const isRoot = !!node && (node.parentId === undefined || node.parentId === '0');
+  const rootOverview = isRoot ? summarizeRoots(await chrome.bookmarks.getTree()) : null;
   const out = {
     parentId: pid,
     folder: folderName,
     path: await resolvePath(pid),
+    scope: isRoot ? 'root' : 'folder',
+    directBookmarks: children.filter((n) => n.url).length,
+    directFolders: children.filter((n) => !n.url).length,
+    ...(rootOverview ? { roots: rootOverview.roots } : {}),
     total: children.length,
     shown: items.length,
     offset,
@@ -1726,37 +1783,61 @@ const listAllFoldersSchema = z.object({
   offset: z.number().int().min(0).optional(),
 });
 
-/** 列出全部文件夹（id + 完整路径），一次 getTree 完成——Agent 找目标文件夹时避免逐层递归 */
-async function listAllFolders(args: unknown): Promise<ToolOutput> {
-  const { limit = 200, offset = 0 } = listAllFoldersSchema.parse(args);
-  await ensureRoots();
-  const tree = await chrome.bookmarks.getTree();
-  const folders: { id: string; title: string; path: string; count: number }[] = [];
-  const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[], chain: string[]) => {
-    for (const n of nodes) {
-      // 书签不是文件夹（空文件夹的 children 字段可能缺失，不能以 !children 判断）
-      if (n.url) continue;
-      const title = n.title || '(未命名)';
-      const path = [...chain, title].join(' > ');
-      folders.push({ id: n.id, title, path, count: n.children?.length ?? 0 });
-      walk(n.children ?? [], [...chain, title]);
-    }
-  };
-  walk(tree[0]?.children ?? [], []);
-  const page = folders.slice(offset, offset + limit);
-  const hasMore = offset + page.length < folders.length;
-  return {
-    result: JSON.stringify({
-      total: folders.length,
-      shown: page.length,
-      offset,
-      nextOffset: hasMore ? offset + page.length : undefined,
-      hasMore,
-      note: hasMore ? `文件夹共 ${folders.length} 个，本批显示 ${page.length} 个（用 offset=${offset + page.length} 获取下一批）。` : undefined,
-      folders: page,
-    }),
-  };
-}
+ /** 列出全部文件夹（id + 完整路径 + 递归书签数），一次 getTree 完成——Agent 找目标文件夹时避免逐层递归 */
+ async function listAllFolders(args: unknown): Promise<ToolOutput> {
+   const { limit = 200, offset = 0 } = listAllFoldersSchema.parse(args);
+   await ensureRoots();
+   const tree = await chrome.bookmarks.getTree();
+   const { roots, tallies } = summarizeRoots(tree);
+   const folders: {
+     id: string;
+     title: string;
+     path: string;
+     /** 直接子项数（旧字段，兼容） */
+     count: number;
+     /** 递归书签数：这个分类下面实际有多少条书签 */
+     bookmarks: number;
+     /** 递归子文件夹数（不含自己） */
+     folders: number;
+     root: string;
+   }[] = [];
+   const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[], chain: string[]) => {
+     for (const n of nodes) {
+       if (n.url) continue;
+       const title = n.title || '(未命名)';
+       const path = [...chain, title].join(' > ');
+       const tally = tallies.get(n.id) ?? { bookmarks: 0, folders: 1 };
+       folders.push({
+         id: n.id,
+         title,
+         path,
+         count: n.children?.length ?? 0,
+         bookmarks: tally.bookmarks,
+         folders: Math.max(0, tally.folders - 1),
+         root: chain[0] ?? title,
+       });
+       walk(n.children ?? [], [...chain, title]);
+     }
+   };
+   walk(tree[0]?.children ?? [], []);
+   const page = folders.slice(offset, offset + limit);
+   const hasMore = offset + page.length < folders.length;
+   return {
+     result: JSON.stringify({
+       total: folders.length,
+       shown: page.length,
+       offset,
+       nextOffset: hasMore ? offset + page.length : undefined,
+       hasMore,
+       // 先给根分布：模型必须看到「书签栏 ≠ 全库」，再决定整理范围
+       roots,
+       note: hasMore
+         ? `文件夹共 ${folders.length} 个，本批显示 ${page.length} 个（用 offset=${offset + page.length} 获取下一批）。`
+         : undefined,
+       folders: page,
+     }),
+   };
+ }
 
 const listEmptySchema = z.object({});
 

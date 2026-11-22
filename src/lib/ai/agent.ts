@@ -3,7 +3,7 @@
 import { chatCompletion, ChatError, type ApiMessage, type ApiToolCall } from './client';
 import { formatMemoriesForPrompt, getMemories, type MemoryItem } from './memory';
 import { personalInstruction } from '@/lib/pet/personal';
-import { buildTimeContext, organizeStagingInstruction, PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT, TOOL_DEFINITIONS } from './prompts';
+import { API_TOOL_DEFINITIONS, buildTimeContext, organizeStagingInstruction, PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT } from './prompts';
 import { executeTool, TOOL_META, type ToolOutput } from './tools';
 import { applyPlan, buildPlan, classifyTool, stepCountOf, type PlannedStep } from './turn-plan';
 // 只读/写/声明/闸门的分类**只有 turn-plan 一份**：历史上同一份名单抄成两份，
@@ -17,10 +17,14 @@ import type { AIConfig, ChatMessage, ChatOutbound, ToolCallRecord } from './type
 const MAX_REPEAT_CALLS = 3;
 /** 单条消息文本送入模型的最大长度 */
 const MAX_MESSAGE_CHARS = 6000;
-/** 工具结果回填模型的长度上限：默认上下文已放宽到 1024K，
- *  120K 字符 ≈ 1000+ 条书签清单，配合 limit=2000 让模型一次拿到足够数据；
- *  仍超长时用 offset/maxItems 分页让模型分批消化 */
-const MAX_TOOL_RESULT_CHARS = 120_000;
+/**
+ * 工具结果回填模型的兜底长度：80K 字符 ≈ 22k token。
+ *
+ * 旧值 120K 会一次吃掉 128K 上下文的三分之一，而且是在字符串中间硬切——
+ * JSON 从这里断开后模型拿到的是坏数据。大列表已在工具层按整条收缩并给
+ * nextOffset；这里只兜底非分页工具，仍超长时明确提示收窄。
+ */
+const MAX_TOOL_RESULT_CHARS = 80_000;
 /** 支持 offset 翻页的工具：截断提示只能对这些说"用 offset 继续" */
 /**
  * 支持 offset 分页的**写类/列表**工具。截断提示据它分流：
@@ -110,7 +114,42 @@ function extractText(m: ChatMessage): string {
 }
 
 /** 历史里每条工具结果的转写上限（保留结论，丢掉逐条 JSON） */
-const TOOL_RECORD_CHARS = 160;
+const TOOL_RECORD_CHARS = 180;
+
+/**
+ * 把工具结果压成"模型下一轮真正记得住"的一句话。
+ *
+ * 旧实现直接截取原始 JSON 前 160 字符：list_bookmarks 的结果开头全是
+ * `parentId/folder/path/total/shown/offset/items` 这些字段名，截完一个标题都没有——
+ * 模型跨轮问"刚才那几条"时只能重查，白多一次 5k token 的往返。
+ */
+function compactToolPayload(name: string, payload: string): string {
+  const clean = payload.replace(/\s+/g, ' ').trim();
+  try {
+    const parsed = JSON.parse(clean) as Record<string, unknown>;
+    if (Array.isArray(parsed.items)) {
+      const items = parsed.items as Record<string, unknown>[];
+      const head = items
+        .slice(0, 5)
+        .map((item) => {
+          const title = String(item.title ?? '(未命名)').slice(0, 18);
+          return item.id ? `${String(item.id)}:${title}` : title;
+        })
+        .join(' / ');
+      const total = parsed.total ?? items.length;
+      const more = parsed.nextOffset !== undefined ? `，next ${String(parsed.nextOffset)}` : '';
+      return `${String(total)} 条${more}；${head}${items.length > 5 ? ' …' : ''}`;
+    }
+    if (name === 'organize_folder') {
+      return `建 ${String(parsed.createdFolders ?? 0)} 类 / 移 ${String(parsed.moved ?? 0)} 条` +
+        (parsed.staged ? '（待确认）' : '');
+    }
+  } catch {
+    // 非 JSON 结果（进度文本 / 错误说明）按原文截断
+  }
+  return clean;
+}
+
 
 /**
  * 取出「可发送给模型的历史文本」：正文 + **工具结果的摘要**（不含思考）。
@@ -129,8 +168,9 @@ export function extractHistoryText(m: ChatMessage): string {
   if (records.length === 0) return text;
   const lines = records.map((r) => {
     const status = r.status === 'done' ? '' : `（${r.status}）`;
-    const payload = (r.result ?? r.error ?? '').replace(/\s+/g, ' ').trim().slice(0, TOOL_RECORD_CHARS);
-    return `[工具 ${r.name}${status}] ${payload}${payload.length === TOOL_RECORD_CHARS ? '…' : ''}`;
+    const full = compactToolPayload(r.name, r.result ?? r.error ?? '');
+    const payload = full.slice(0, TOOL_RECORD_CHARS);
+    return `[工具 ${r.name}${status}] ${payload}${full.length > TOOL_RECORD_CHARS ? '…' : ''}`;
   });
   return [text, ...lines].filter(Boolean).join('\n');
 }
@@ -159,7 +199,7 @@ export function fixedOverheadTokens(memories?: MemoryItem[]): number {
     estimateTokens(SYSTEM_PROMPT) +
     estimateTokens(PLAN_MODE_INSTRUCTION) +
     estimateTokens(memStr) +
-    estimateTokens(JSON.stringify(TOOL_DEFINITIONS)) +
+    estimateTokens(JSON.stringify(API_TOOL_DEFINITIONS)) +
     100
   );
 }
@@ -173,7 +213,7 @@ export function fixedOverheadTokens(memories?: MemoryItem[]): number {
  */
 export function estimateRequestTokens(apiMessages: ApiMessage[]): number {
   return (
-    estimateTokens(JSON.stringify(TOOL_DEFINITIONS)) +
+    estimateTokens(JSON.stringify(API_TOOL_DEFINITIONS)) +
     apiMessages.reduce((acc, m) => {
       let n = estimateTokens(m.content ?? '') + PER_MESSAGE_OVERHEAD;
       if (m.tool_calls) n += estimateTokens(JSON.stringify(m.tool_calls));
@@ -438,7 +478,7 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
   for (;;) {
     let turn: { content: string; toolCalls: ApiToolCall[] };
     try {
-      turn = await chatCompletion(config, apiMessages, TOOL_DEFINITIONS, signal, {
+      turn = await chatCompletion(config, apiMessages, API_TOOL_DEFINITIONS, signal, {
         onText: (t) => safePost(onEvent, { type: 'chat:delta', messageId, text: t }),
         // 思考内容单独投递：UI 要把它放进可折叠的思考区，不能与正文混在一起
         onReasoning: (t) => safePost(onEvent, { type: 'chat:reasoning', messageId, text: t }),

@@ -233,6 +233,26 @@ function PopupApp() {
         </Button>
       </div>
 
+      {/* 最常用动作放在首屏：不夹在几张状态卡中间，也不等用户滚到按钮才看见 */}
+      <div className="border-b border-border px-3 py-2.5">
+        <Button
+          variant="default"
+          className="w-full"
+          disabled={!canSave}
+          onClick={() => void saveCurrentTab()}
+          title={canSave ? '收藏当前标签页到书签栏' : '当前页面无法收藏'}
+        >
+          <BookmarkPlus className="h-3.5 w-3.5" />
+          收藏当前页面
+        </Button>
+        {!canSave && (
+          <p className="mt-1.5 text-center text-2xs leading-4 text-muted-foreground">
+            当前页面无法收藏（浏览器内部页面、扩展页或没有活动标签页）
+          </p>
+        )}
+        {saveError && <p className="mt-1.5 text-center text-2xs text-destructive">{saveError}</p>}
+      </div>
+
       <div className="space-y-2 p-3">
         {/* Agent 处理中提示 */}
         {taskRunning && (
@@ -364,17 +384,7 @@ function PopupApp() {
               <span className="shrink-0 text-2xs font-medium text-accent">存到这里 →</span>
             </button>
           )}
-          <Button
-            variant="outline"
-            className="w-full"
-            disabled={!canSave}
-            onClick={() => void saveCurrentTab()}
-            title={canSave ? '收藏当前标签页到书签栏' : '当前页面无法收藏（支持网页与本地文件；浏览器自身页面不行）'}
-          >
-            <BookmarkPlus className="h-3.5 w-3.5" />
-            收藏当前页面
-          </Button>
-          {saveError && <p className="text-center text-2xs text-destructive">{saveError}</p>}
+
           <div className="grid grid-cols-2 gap-2">
             <Button variant="outline" onClick={() => void openSidePanel()} title="打开侧边栏（Ctrl+Shift+M）">
               <LayoutPanelLeft className="h-3.5 w-3.5" />

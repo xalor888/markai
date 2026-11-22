@@ -1117,15 +1117,16 @@ export function BookmarkList({ className, compact = false }: { className?: strin
           {/* 一键让 Agent 整理当前文件夹（主操作，不再和排序按钮同色同权重） */}
           {!overview && !effectiveTag && browsing && selectedFolderId && (
             <Button
-              size={compact ? 'icon' : 'sm'}
+              size="sm"
               variant="default"
               onClick={organizeFolder}
               aria-label={ORGANIZE_LABEL.folder}
               title="让 MarkAI 整理当前文件夹"
-              className={compact ? 'h-8 w-8' : 'h-8'}
+              className={compact ? 'h-8 gap-1 px-2' : 'h-8'}
             >
               <Sparkles className="h-3 w-3" />
-              {!compact && '整理'}
+              {/* 侧栏 ≥420px 时把“整理”写出来：只有一朵火花时，新用户很难知道它是主操作 */}
+              <span className={compact ? 'hidden text-2xs min-[420px]:inline' : 'text-2xs'}>整理</span>
             </Button>
           )}
         </div>
@@ -1231,7 +1232,11 @@ export function BookmarkList({ className, compact = false }: { className?: strin
           autoScrollDrag(e.clientY);
         }}
         onDrop={handleListDrop}
-        className="min-h-0 flex-1 overflow-y-auto p-2 outline-none"
+        className={cn(
+          'min-h-0 flex-1 overflow-y-auto p-2 outline-none',
+          // 书签精灵浮在列表左下角：给滚动内容留出脚部空间，最后一行不会被它盖住
+          compact ? 'pb-24' : 'pb-16',
+        )}
       >
         {loadErr ? (
           <div className="flex flex-col items-center gap-1 px-2 py-4 text-center">
@@ -1439,7 +1444,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
               title={ORGANIZE_LABEL.selection(selectedIds.length)}
             >
               <Sparkles className="h-3 w-3" />
-              {!compact && '让 MarkAI 整理'}
+              {compact ? '整理' : '让 MarkAI 整理'}
             </Button>
             <Button
               size="sm"
@@ -1449,7 +1454,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
               title="移动到…"
             >
               <FolderInput className="h-3 w-3" />
-              {!compact && '移动'}
+              移动
             </Button>
             <Button
               size="sm"
@@ -1459,7 +1464,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
               title="删除所选"
             >
               <Trash2 className="h-3 w-3" />
-              {!compact && '删除'}
+              删除
             </Button>
             <div className="relative">
               <Button

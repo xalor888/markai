@@ -162,14 +162,20 @@ export async function assertNoCycle(bookmarkId: string, parentId: string): Promi
 }
 
 function serializeBookmark(n: chrome.bookmarks.BookmarkTreeNode): Record<string, unknown> {
+  /*
+   * 只发模型真正会用的字段。
+   *
+   * 旧版每条带 dateLastUsed / dateGroupModified，再给每条拼一份完整 path：
+   * 1000 条的文件夹光这两项就多出 6 万字符（约 1.5 万 token），而模型整理时
+   * 只需要 id / 标题 / URL / 是否文件夹 / 收藏时间。路径在列表顶部给一次就够；
+   * 搜索结果跨文件夹，才在调用处补 path。
+   */
   return {
     id: n.id,
     title: n.title,
     url: n.url,
     folder: !n.url,
-    dateAdded: n.dateAdded,
-    dateLastUsed: n.dateLastUsed ?? undefined,
-    dateGroupModified: n.dateGroupModified,
+    ...(n.dateAdded ? { dateAdded: n.dateAdded } : {}),
   };
 }
 
@@ -215,7 +221,6 @@ async function listBookmarks(
   const children = await chrome.bookmarks.getChildren(pid);
   const items = children.slice(offset, offset + useLimit);
   const folderName = (await resolvePath(pid)).split(' > ').pop() ?? pid;
-  const paths = await resolvePaths(items.map((n) => n.id));
   const out = {
     parentId: pid,
     folder: folderName,
@@ -226,46 +231,82 @@ async function listBookmarks(
     nextOffset: offset + items.length < children.length ? offset + items.length : undefined,
     hasMore: offset + items.length < children.length,
     truncated: children.length > items.length,
-    items: items.map((n) => ({ ...serializeBookmark(n), path: paths.get(n.id) })),
+    note: undefined as string | undefined,
+    // 直接子项都在同一文件夹，path 已在顶部；逐条重复只会白烧 token
+    items: items.map((n) => serializeBookmark(n)),
   };
-  return { result: JSON.stringify(out) };
+  /*
+   * 按**完整条目**收缩，而不是等 agent 层把 JSON 拦腰截断。
+   *
+   * 2000 条大文件夹 ~10 万字符，旧实现会变成半条记录 + 无法 JSON.parse，
+   * 模型既读不全也接不上 nextOffset。这里留出 55k 字符预算，超了就从尾部
+   * 去掉整条并把 nextOffset 指回来——返回的永远是合法 JSON。
+   */
+  const MAX_LIST_CHARS = 55_000;
+  let encoded = JSON.stringify(out);
+  while (out.items.length > 1 && encoded.length > MAX_LIST_CHARS) {
+    const keep = Math.max(1, Math.floor(out.items.length * 0.8));
+    out.items = out.items.slice(0, keep);
+    out.shown = keep;
+    const end = offset + keep;
+    out.nextOffset = end < children.length ? end : undefined;
+    out.hasMore = end < children.length;
+    out.truncated = true;
+    out.note ??= `结果过长已截断：本次只返回前 ${keep} 条。用 nextOffset 分页继续。`;
+    encoded = JSON.stringify(out);
+  }
+  return { result: encoded };
 }
 
 const searchBookmarksSchema = z.object({
   // trim 在前：`" "` 长度 1 原本能过校验，而 chrome.bookmarks.search(" ")
-  // 会命中任何标题里有空格的书签，等于把上限 2000 条无关结果灌进上下文
+  // 会命中任何标题里有空格的书签，等于把上限灌进上下文
   query: z.string().trim().min(1).max(100),
-  // 返回条数上限：默认 2000，Agent 可传更大值获取更完整结果
+  // 默认 50：搜索是"先定位再操作"，不是"导出全库"。默认 2000 会把一次普通搜索
+  // 变成几万 token 的超大回填，模型反而更难找到目标。需要更多时显式传 limit/offset。
   limit: z.number().int().min(1).max(2000).optional(),
+  offset: z.number().int().min(0).optional(),
 });
 
 async function searchBookmarks(args: unknown): Promise<ToolOutput> {
-  const { query, limit } = searchBookmarksSchema.parse(args);
-  const defaultLimit = await getToolLimit();
-  const useLimit = limit ?? Math.min(defaultLimit, 2000);
+  const { query, limit = 50, offset = 0 } = searchBookmarksSchema.parse(args);
   const nodes = await chrome.bookmarks.search(query);
-  const items = nodes.slice(0, useLimit);
+  const items = nodes.slice(offset, offset + limit);
   const paths = await resolvePaths(items.map((n) => n.id));
-  const omitted = nodes.length - items.length;
-  const out = {
-    query,
-    total: nodes.length,
-    shown: items.length,
-    truncated: omitted > 0,
-    /*
-     * `truncated: true` 是个光秃秃的布尔值——模型知道"没给全"，但不知道该怎么办。
-     * 搜索没有 offset 翻页，唯一的补救是把关键词收窄，这句话必须说出来。
-     * （list_bookmarks 有 nextOffset、find_duplicates 有 note，只有这里什么都没有。）
-     */
-    ...(omitted > 0
-      ? {
-          omitted,
-          note: `共匹配 ${nodes.length} 条，本次只返回前 ${items.length} 条，另有 ${omitted} 条未返回。搜索不支持翻页，请把关键词收窄（加站点名、加年份、用更具体的词）再查一次，或用 list_bookmarks 到具体文件夹里逐层看。`,
-        }
-      : {}),
-    items: items.map((n) => ({ ...serializeBookmark(n), path: paths.get(n.id) })),
+  const itemRows = items.map((n) => ({ ...serializeBookmark(n), path: paths.get(n.id) }));
+
+  const build = (rows: typeof itemRows, sizeLimited = false) => {
+    const omitted = nodes.length - offset - rows.length;
+    const truncated = omitted > 0 || sizeLimited;
+    const note = sizeLimited
+      ? `结果过长已截断：只返回前 ${rows.length} 条。用 nextOffset 继续，或把关键词收窄。`
+      : omitted > 0
+        ? `共匹配 ${nodes.length} 条，本次从第 ${offset} 条起返回 ${rows.length} 条，另有 ${omitted} 条未返回；用 nextOffset 继续、把关键词收窄，或用 list_bookmarks 到具体文件夹里逐层看。`
+        : undefined;
+    return {
+      query,
+      total: nodes.length,
+      shown: rows.length,
+      offset,
+      nextOffset: offset + rows.length < nodes.length ? offset + rows.length : undefined,
+      hasMore: offset + rows.length < nodes.length,
+      truncated,
+      ...(omitted > 0 ? { omitted } : {}),
+      ...(note ? { note } : {}),
+      items: rows,
+    };
   };
-  return { result: JSON.stringify(out) };
+
+  let out = build(itemRows);
+  let encoded = JSON.stringify(out);
+  // 与 list_bookmarks 同一条原则：按整条收缩，保证返回是合法 JSON 且 nextOffset 可续
+  const MAX_SEARCH_CHARS = 55_000;
+  while (itemRows.length > 1 && encoded.length > MAX_SEARCH_CHARS) {
+    const keep = Math.max(1, Math.floor(out.items.length * 0.8));
+    out = build(itemRows.slice(0, keep), true);
+    encoded = JSON.stringify(out);
+  }
+  return { result: encoded };
 }
 
 const getRecentSchema = z.object({
@@ -714,12 +755,7 @@ async function stageOrganize(
   const { folderId } = stageOrganizeSchema.parse(args);
   // 设置里关掉了暂存，就不能靠系统提示"默认"绕过用户的选择：这里硬拒绝，
   // 模型会改走直接落位，而不是一边说关了、一边偷偷开批次。
-  const saved = (await chrome.storage.local.get(CONFIG_STORAGE_KEY).catch(() => ({}))) as Record<
-    string,
-    unknown
-  >;
-  const config = resolveConfig(saved[CONFIG_STORAGE_KEY] as Parameters<typeof resolveConfig>[0]);
-  if (config.organizeStaging === false) {
+  if ((await organizeStagingEnabled()) === false) {
     throw new Error('整理暂存区已在设置中关闭；请直接在该文件夹内部创建子分类并移动书签，不要开暂存批次。');
   }
   const targetId = folderId ?? ctx?.focusFolderId;
@@ -738,6 +774,182 @@ async function stageOrganize(
         `不要声称已经改进用户的文件夹——落位是用户在界面上点的（原文件夹 / 书签栏 / 任意文件夹）。`,
     }),
   };
+}
+
+/** 读取用户当前的整理落位设置（默认开启暂存） */
+async function organizeStagingEnabled(): Promise<boolean> {
+  const saved = (await chrome.storage.local.get(CONFIG_STORAGE_KEY).catch(() => ({}))) as Record<string, unknown>;
+  const config = resolveConfig(saved[CONFIG_STORAGE_KEY] as Parameters<typeof resolveConfig>[0]);
+  return config.organizeStaging !== false;
+}
+
+const organizeFolderSchema = z.object({
+  folderId: z.string().optional(),
+  folderPath: z.string().optional(),
+  plan: z
+    .array(
+      z.object({
+        folder: z.string().trim().min(1).max(80),
+        bookmarkIds: z.array(z.string().min(1)).min(1).max(500),
+      }),
+    )
+    .min(1)
+    .max(40),
+  dryRun: z.boolean().optional(),
+  // 省略按设置；true 在设置关闭时会被拒绝；false 允许用户明确要求直接落位
+  staging: z.boolean().optional(),
+});
+
+/**
+ * 一次完成整理：建分类 + 批量移动。
+ *
+ * 为什么需要它：整理一个 5 类的文件夹，旧流程是 stage + 5 次 create_folder + 5 次 move，
+ * 至少 11 次模型往返；每次往返都要重发 5k+ token 的工具定义，用户等的是十几秒到几十秒。
+ * 这里把「建/复用分类 + 移动」合成一个原子工具调用，模型只需先 list 一次拿 id。
+ *
+ * 落位规则与 stage_organize 共用同一套组织逻辑：默认搬进真实暂存批次，用户确认后才落位；
+ * 设置关闭或用户明确要求时直接整理进原文件夹。任何一步失败都保留已做的部分并报进度，
+ * 便于用户撤销或重试，绝不谎报全成。
+ */
+async function organizeFolder(
+  args: unknown,
+  onProgress?: (t: string) => void,
+  signal?: AbortSignal,
+  ctx?: ToolContext,
+): Promise<ToolOutput> {
+  const throwIfAborted = makeAbortCheck(signal);
+  throwIfAborted();
+  const { folderId, folderPath, plan, dryRun = false, staging } = organizeFolderSchema.parse(args);
+
+  let targetId: string;
+  if (folderId) {
+    targetId = await assertFolder(folderId);
+  } else if (folderPath) {
+    const found = await findFolderByPath(folderPath);
+    if (!found) throw new Error(`找不到文件夹：${folderPath}，可用 list_all_folders 查看现有路径`);
+    targetId = await assertFolder(found);
+  } else {
+    targetId = await assertFolder(undefined, ctx?.focusFolderId);
+  }
+
+  const configuredStaging = await organizeStagingEnabled();
+  if (configuredStaging === false && staging === true) {
+    throw new Error('整理暂存区已在设置中关闭；不能强行开批次。请直接整理，或让用户在设置里重新开启暂存。');
+  }
+
+  const children = await chrome.bookmarks.getChildren(targetId).catch(() => []);
+  const direct = new Map(children.filter((n) => n.url).map((n) => [n.id, n]));
+  const groups = new Map<string, string[]>();
+  const seen = new Set<string>();
+  /*
+   * 先查 plan 内的重复 id，再查“是不是直接子项”。
+   * 顺序很重要：同一条书签被列进两个分类，是调用方自己的结构性错误；
+   * 若先查直接子项，会被上一步移动后的状态误报成“跨文件夹”，
+   * 模型收到的下一步建议就完全跑偏了。
+   */
+  const occurrences = new Map<string, number>();
+  for (const item of plan) {
+    for (const id of item.bookmarkIds) occurrences.set(id, (occurrences.get(id) ?? 0) + 1);
+  }
+  const duplicate = [...occurrences.entries()].find(([, n]) => n > 1);
+  if (duplicate) throw new Error(`书签 id 在 plan 里重复出现：${duplicate[0]}；每条书签只能归入一个分类`);
+  for (const item of plan) {
+    const title = item.folder.replace(/\s+/g, ' ').trim();
+    const ids = groups.get(title) ?? [];
+    for (const id of item.bookmarkIds) {
+      const node = direct.get(id);
+      if (!node) {
+        throw new Error(
+          `书签 ${id} 不是文件夹「${(await resolvePath(targetId)).split(' > ').pop() ?? targetId}」的直接子书签；` +
+            '请先 list_bookmarks 重新取当前文件夹的直接子项，不要移动别的文件夹里的书签',
+        );
+      }
+      seen.add(id);
+      ids.push(id);
+    }
+    groups.set(title, ids);
+  }
+  const total = seen.size;
+  throwIfAborted(`已校验 ${total} 条`);
+
+  const useStaging = staging ?? configuredStaging;
+  let containerId = targetId;
+  let batch: Awaited<ReturnType<typeof stageBatch>> | null = null;
+  if (useStaging && !dryRun) {
+    batch = await stageBatch(targetId);
+    containerId = batch.batchId;
+  }
+  const existingChildren = await chrome.bookmarks.getChildren(containerId).catch(() => []);
+  const existingFolders = new Map(
+    existingChildren.filter((n) => !n.url).map((n) => [(n.title || '').trim(), n]),
+  );
+
+  let created = 0;
+  let reused = 0;
+  let moved = 0;
+  const failures: { bookmarkId: string; folder: string; error: string }[] = [];
+  const actions: { folder: string; count: number; action: 'create' | 'reuse' | 'preview' }[] = [];
+  for (const [title, ids] of groups) {
+    throwIfAborted(`已移动 ${moved}/${total} 条`);
+    const existing = existingFolders.get(title);
+    if (dryRun) {
+      actions.push({ folder: title, count: ids.length, action: existing ? 'reuse' : 'preview' });
+      if (existing) reused += 1;
+      else created += 1;
+      continue;
+    }
+    let folderId: string;
+    if (existing) {
+      folderId = existing.id;
+      reused += 1;
+      actions.push({ folder: title, count: ids.length, action: 'reuse' });
+    } else {
+      const node = await jCreate({ parentId: containerId, title });
+      folderId = node.id;
+      existingFolders.set(title, node);
+      created += 1;
+      actions.push({ folder: title, count: ids.length, action: 'create' });
+    }
+    for (const id of ids) {
+      throwIfAborted(`已移动 ${moved}/${total} 条`);
+      try {
+        await jMove(id, { parentId: folderId });
+        moved += 1;
+      } catch (e) {
+        // 单条失败不能让整次整理变成"全没做"：已建分类、已移动的书签都真实存在，
+        // 必须如实回报，模型才不会重试整批、把成功的再搬一次。
+        failures.push({ bookmarkId: id, folder: title, error: e instanceof Error ? e.message : String(e) });
+      }
+      onProgress?.(`整理中：${moved}/${total} 条`);
+    }
+  }
+
+  const targetPath = await resolvePath(targetId);
+  const summary = {
+    dryRun: dryRun || undefined,
+    ...(useStaging && !dryRun ? { staged: true as const } : {}),
+    ...(batch ? { batchId: batch.batchId } : {}),
+    targetId,
+    targetPath,
+    total,
+    folderCount: groups.size,
+    createdFolders: created,
+    reusedFolders: reused,
+    moved,
+    failed: failures.length,
+    ...(failures.length > 0 ? { failures: failures.slice(0, 10) } : {}),
+    actions,
+    note: dryRun
+      ? `预览：将创建 ${created} 个分类、复用 ${reused} 个分类，移动 ${total} 条书签；没有改动任何书签。`
+      : useStaging
+        ? `已放进「自动整理」暂存区（批次 ${batch?.batchId}），等待用户在「整理记录」里确认落位；` +
+          (failures.length > 0
+            ? `其中 ${failures.length} 条移动失败，可在确认前重试或放弃。`
+            : '不要声称已经改进用户的文件夹。')
+        : `已直接整理到「${targetPath}」：新建 ${created} 个、复用 ${reused} 个分类，移动 ${moved} 条书签` +
+          (failures.length > 0 ? `；${failures.length} 条失败，可重试失败项。` : '。'),
+  };
+  return { result: JSON.stringify(summary) };
 }
 
 const autoCategorizeSchema = z.object({
@@ -1774,15 +1986,15 @@ async function findFolderByPath(path: string): Promise<string | undefined> {
 const getFolderContentSchema = z.object({
   folderId: z.string().optional(),
   folderPath: z.string().optional(),
-  // 每层书签上限；不传用用户配置的默认值（2000，与 list_bookmarks 一致）
+  // 每层书签上限；默认 100（结构预览不是全量导出）
   limit: z.number().int().min(1).max(2000).optional(),
-  // 递归深度（1=只看子项，2=含孙级），避免一次展开整个书签库
+  // 递归深度（1=只看子项，2=含孙级）；默认 1，避免一次展开整个书签库
   depth: z.number().int().min(1).max(3).optional(),
 });
 
 /** 查看文件夹完整结构（支持路径定位，Agent 规划整理时先摸清结构） */
 async function getFolderContent(args: unknown): Promise<ToolOutput> {
-  const { folderId, folderPath, limit, depth = 2 } = getFolderContentSchema.parse(args);
+  const { folderId, folderPath, limit = 100, depth = 1 } = getFolderContentSchema.parse(args);
   let pid = folderId;
   if (!pid) {
     if (!folderPath) throw new Error('需要 folderId 或 folderPath 之一（路径示例："书签栏 > 技术"）');
@@ -1790,8 +2002,7 @@ async function getFolderContent(args: unknown): Promise<ToolOutput> {
     if (!pid) throw new Error(`找不到文件夹：${folderPath}，可用 list_all_folders 查看现有路径`);
   }
   await assertFolder(pid);
-  const defaultLimit = await getToolLimit();
-  const useLimit = limit ?? Math.min(defaultLimit, 2000);
+  const useLimit = Math.min(limit, 2000);
 
   const nodes = await chrome.bookmarks.get(pid).catch(() => []);
   const root = nodes[0];
@@ -2307,6 +2518,7 @@ const TOOL_MAP: Record<string, ToolEntry> = {
   check_urls_bulk: { name: 'check_urls_bulk', handler: checkUrlsBulk },
   classify_urls: { name: 'classify_urls', handler: classifyUrls },
   stage_organize: { name: 'stage_organize', handler: stageOrganize },
+  organize_folder: { name: 'organize_folder', handler: organizeFolder },
   auto_categorize: { name: 'auto_categorize', handler: autoCategorize },
   cleanup_sweep: { name: 'cleanup_sweep', handler: cleanupSweep },
   stats: { name: 'stats', handler: stats },
@@ -2431,14 +2643,30 @@ export async function executeTool(
     return result;
   } catch (e) {
     if (timedOut) throw new Error(`工具「${name}」长时间没有进度，已中止；可以缩小范围后重试。`);
-    if (e instanceof z.ZodError) {
-      throw new Error(`参数不合法：${e.issues.map((i) => i.message).join('；')}`);
-    }
-    throw e instanceof Error ? e : new Error(String(e));
+    const raw =
+      e instanceof z.ZodError
+        ? `参数不合法：${e.issues.map((i) => i.message).join('；')}`
+        : e instanceof Error
+          ? e.message
+          : String(e);
+    const hint = toolFailureHint(raw);
+    throw new Error(hint && !raw.includes('下一步：') ? `${raw}（下一步：${hint}）` : raw);
   } finally {
     if (timer) clearTimeout(timer);
     signal?.removeEventListener('abort', onParentAbort);
   }
+}
+
+/** 把常见失败翻译成模型下一步能执行的动作（错误信息只说"错了"会诱发同样重试） */
+function toolFailureHint(message: string): string | null {
+  if (/参数不合法|参数不是合法 JSON/.test(message)) return '按工具 schema 检查必填项与类型后重试';
+  if (/父文件夹不存在|找不到文件夹|文件夹不存在/.test(message)) return '先用 list_all_folders / get_folder_path 查真实 folderId';
+  if (/书签不存在/.test(message)) return '先用 search_bookmarks / list_bookmarks 查真实书签 id';
+  if (/不是文件夹/.test(message)) return 'parentId 必须是文件夹 id，不是书签 id';
+  if (/循环嵌套/.test(message)) return '目标不能是自身或自己的子孙文件夹';
+  if (/暂存区已在设置中关闭/.test(message)) return '改为直接整理（不要传 staging:true），或让用户在设置里开启暂存';
+  if (/未知工具/.test(message)) return '只能调用工具定义里存在的工具';
+  return null;
 }
 
 /** 判断工具是否可能修改书签（用于 UI 触发书签树刷新） */
@@ -2455,6 +2683,7 @@ export const MUTATING_TOOLS = new Set([
   'propose_deletions',
   'delete_all_bookmarks',
   'stage_organize',
+  'organize_folder',
   'auto_categorize',
   'cleanup_sweep',
 ]);
@@ -2485,6 +2714,7 @@ export const TOOL_META: Record<string, { label: string }> = {
   check_urls_bulk: { label: '批量检测' },
   classify_urls: { label: '分类 URL' },
   stage_organize: { label: '开整理暂存区' },
+  organize_folder: { label: '一次整理' },
   auto_categorize: { label: '自动分类' },
   stats: { label: '统计' },
   find_duplicates: { label: '查找重复' },

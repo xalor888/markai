@@ -21,7 +21,7 @@ import { readUndoPoints } from '../src/lib/undo/recorder';
 import { applyUndo } from '../src/lib/undo/apply';
 import { ChatError } from '../src/lib/ai/client';
 import type { MemoryItem } from '../src/lib/ai/memory';
-import { TOOL_DEFINITIONS } from '../src/lib/ai/prompts';
+import { API_TOOL_DEFINITIONS, TOOL_DEFINITIONS } from '../src/lib/ai/prompts';
 import { executeTool, TOOL_META } from '../src/lib/ai/tools';
 import type { AIConfig, ChatInbound, ChatMessage, ChatOutbound, DeletionProposal, ReasoningEffort } from '../src/lib/ai/types';
 import { getModelContextWindow, normalizeReasoningEffort, resolveConfig } from '../src/lib/providers';
@@ -1011,6 +1011,26 @@ async function okA(name: string, fn: () => Promise<void> | void) {
           def.function.name + ' 必须声明 additionalProperties: false',
         );
       }
+    });
+
+    ok('发送层去掉 additionalProperties，源码契约仍保留', () => {
+      // 两个定义必须同源同数量；少了工具不是"优化"，是能力丢失
+      assert.equal(API_TOOL_DEFINITIONS.length, TOOL_DEFINITIONS.length);
+      assert.deepEqual(
+        API_TOOL_DEFINITIONS.map((d) => d.function.name),
+        TOOL_DEFINITIONS.map((d) => d.function.name),
+      );
+      assert.equal(JSON.stringify(API_TOOL_DEFINITIONS).includes('additionalProperties'), false);
+      assert.equal(JSON.stringify(TOOL_DEFINITIONS).includes('additionalProperties'), true);
+    });
+
+    ok('行为参数不能被压缩掉：staging 与 dryRun 必须出现在 schema 里', () => {
+      const organize = TOOL_DEFINITIONS.find((d) => d.function.name === 'organize_folder')!;
+      const cleanup = TOOL_DEFINITIONS.find((d) => d.function.name === 'cleanup_sweep')!;
+      const props = (def: typeof organize) =>
+        (def.function.parameters as { properties?: Record<string, unknown> }).properties ?? {};
+      assert.ok(props(organize).staging, 'organize_folder 缺 staging');
+      assert.ok(props(cleanup).dryRun, 'cleanup_sweep 缺 dryRun');
     });
 
     await okA('executeTool 拒绝未知工具', async () => {
@@ -7413,6 +7433,11 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.equal(stepCountOf(JSON.stringify({ count: 8 })), 8);
       assert.equal(stepCountOf(JSON.stringify({ bookmarkIds: ['a', 'b'] })), 2);
       assert.equal(stepCountOf(JSON.stringify({ items: ['a'] })), 1);
+      assert.equal(
+        stepCountOf(JSON.stringify({ plan: [{ folder: 'A', bookmarkIds: ['a', 'b'] }, { folder: 'B', bookmarkIds: ['c'] }] })),
+        3,
+        'organize_folder 的规模要按 plan 里的书签数算，不能显示成 1 条',
+      );
       assert.equal(stepCountOf('{invalid json}'), 1);
       assert.equal(stepCountOf(JSON.stringify(['arr'])), 1);
     });
@@ -10857,7 +10882,7 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       const ui = read('src/stores/uiStore.ts');
       assert.match(ui, /treeCollapsed: true/, 'compact 默认应收起');
       const ws = read('src/components/workspace/workspace.tsx');
-      assert.match(ws, /absolute inset-y-0 left-0 z-30 w-52/, '展开态应是浮层');
+      assert.match(ws, /absolute top-0 bottom-\[var\(--markai-bottom-bar,0px\)\] left-0 z-30 w-52/, '展开态应是浮层，且不能盖住底部引导条');
     });
   }
 
@@ -14713,11 +14738,11 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
       `结果被截断时必须说明，实际结尾：${(toolMsg!.content ?? '').slice(-60)}`,
     );
     assert.ok(
-      !/offset/.test((toolMsg!.content ?? '').slice(-200)),
-      `search_bookmarks 不支持翻页，提示里不该出现 offset：${(toolMsg!.content ?? '').slice(-200)}`,
+      /nextOffset/.test(toolMsg!.content ?? ''),
+      `search_bookmarks 现在支持 nextOffset 翻页，提示应给出下一页：${(toolMsg!.content ?? '').slice(-200)}`,
     );
     assert.ok(
-      /不支持分页/.test(toolMsg!.content ?? '') && /收窄/.test(toolMsg!.content ?? ''),
+      /收窄/.test(toolMsg!.content ?? ''),
       `该告诉它把条件收窄，实际：${(toolMsg!.content ?? '').slice(-200)}`,
     );
 
@@ -14749,8 +14774,8 @@ await okA('存储接近配额：日志是主因才给修复，不是主因就不
     assert.ok(toolMsg2, '应有一条 tool 消息');
     if (/结果过长已截断/.test(toolMsg2!.content ?? '')) {
       assert.ok(
-        /offset/.test((toolMsg2!.content ?? '').slice(-200)),
-        `list_bookmarks 支持翻页，提示该说 offset：${(toolMsg2!.content ?? '').slice(-200)}`,
+        /nextOffset/.test(toolMsg2!.content ?? ''),
+        `list_bookmarks 支持翻页，提示该说 nextOffset：${(toolMsg2!.content ?? '').slice(-200)}`,
       );
     }
   });
@@ -17449,7 +17474,8 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
     const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
     assert.match(src, /data-testid="pet-suggestion"/, '缺少稳定锚点');
-    assert.match(src, /onChip\(suggestion\.prompt\)/, '「开始」只能把 prompt 当一句话发给 Agent');
+    assert.match(src, /start\(suggestion\.prompt\)/, '「开始」只能把 prompt 当一句话发给 Agent');
+    assert.match(src, /onChip\(prompt\)/, '未配置时跳设置；已配置时必须仍走 onChip(prompt)，不直接执行');
     assert.doesNotMatch(src, /executeTool\(/, '面板里不许直接调工具——那会绕过确认');
   });
 
@@ -17561,7 +17587,7 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     );
     assert.match(
       ws,
-      /<div className="absolute inset-y-0 left-0 z-30 w-52 min-w-0">/,
+      /<div className="absolute [^"]*left-0 z-30 w-52 min-w-0">/,
       '侧边栏抽屉必须有真实盒子承载 absolute 与 w-52（否则浮层会退化成文档流里的宽块）',
     );
   });
@@ -17976,10 +18002,10 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
       }
       // 直接落位：要求建在内部，不许去根目录
       assert.match(direct, /在\*\*这个文件夹内部\*\*创建/, '直接落位必须要求建在内部');
-      assert.match(direct, /parentId="777"/, '直接落位要给出可抄的 parentId');
+      assert.match(direct, /organize_folder\(folderId="777"/, '直接落位要给出可抄的工具调用');
       assert.match(direct, /不要.*建到书签栏/, '直接落位必须明确禁止建到根目录');
       // 先落暂存：走 stage_organize，且明确"不要直接改我的文件夹"
-      assert.match(staged, /stage_organize\(folderId="777"\)/, '暂存模式必须先开批次');
+      assert.match(staged, /organize_folder\(folderId="777"/, '暂存模式必须用一次整理工具');
       assert.match(staged, /不要直接改我的文件夹/, '暂存模式必须禁止直接写用户文件夹');
       assert.match(staged, /暂存区/, '暂存模式要说清落点');
     });
@@ -18037,8 +18063,8 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
       assert.match(prompt, /buildSlashOrganizePrompt/, '斜杠命令要有独立构造器');
       assert.match(prompt, /新子分类必须建在这个文件夹\*\*内部\*\*/, '直接落位必须写明建在内部');
       assert.match(prompt, /不要建到书签栏根目录/, '必须明确禁止建到根目录');
-      assert.match(prompt, /stage_organize\(\)/, '暂存分支必须点名工具');
-      assert.match(prompt, /不传 folderId/, '暂存分支要用上下文里的文件夹，不伪造 id');
+      assert.match(prompt, /organize_folder\(plan=/, '暂存分支必须点名一次整理工具');
+      assert.match(prompt, /当前上下文/, '暂存分支要用上下文里的文件夹，不伪造 id');
       assert.equal(
         filterSlashCommands('/整', { organizeStaging: false })[0]!.prompt.includes('stage_organize'),
         false,
@@ -18226,12 +18252,116 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
       await discardBatch(batch.batchId);
     });
 
+    await okA('organize_folder：一次调用建分类并移动，默认进暂存、dryRun 零改动', async () => {
+      const orgTarget = await chrome.bookmarks.create({ parentId: bar.id, title: '一次整理测试' });
+      const o1 = await chrome.bookmarks.create({ parentId: orgTarget.id, title: 'O1', url: 'https://org.test/1' });
+      const o2 = await chrome.bookmarks.create({ parentId: orgTarget.id, title: 'O2', url: 'https://org.test/2' });
+      const o3 = await chrome.bookmarks.create({ parentId: orgTarget.id, title: 'O3', url: 'https://org.test/3' });
+      await chrome.bookmarks.create({ parentId: orgTarget.id, title: 'O4', url: 'https://org.test/4' });
+      const plan = [
+        { folder: '开发', bookmarkIds: [o1.id, o2.id] },
+        { folder: '阅读', bookmarkIds: [o3.id] },
+      ];
+      const preview = JSON.parse(
+        (await executeTool('organize_folder', JSON.stringify({ folderId: orgTarget.id, plan, dryRun: true }))).result,
+      );
+      assert.equal(preview.dryRun, true);
+      assert.equal(preview.moved, 0);
+      assert.equal((await chrome.bookmarks.getChildren(orgTarget.id)).filter((n) => n.url).length, 4, 'dryRun 不能动书签');
+
+      const res = JSON.parse(
+        (await executeTool('organize_folder', JSON.stringify({ folderId: orgTarget.id, plan }))).result,
+      );
+      assert.equal(res.staged, true, '默认设置必须走暂存');
+      assert.equal(res.createdFolders, 2);
+      assert.equal(res.moved, 3);
+      const batchKids = await chrome.bookmarks.getChildren(res.batchId);
+      assert.deepEqual(batchKids.filter((n) => !n.url).map((n) => n.title).sort(), ['开发', '阅读'].sort());
+      assert.equal((await batchStats(res.batchId)).bookmarks, 3);
+
+      await applyBatch(res.batchId, orgTarget.id);
+      const after = await chrome.bookmarks.getChildren(orgTarget.id);
+      assert.ok(after.some((n) => !n.url && n.title === '开发'));
+      assert.ok(after.some((n) => !n.url && n.title === '阅读'));
+      assert.ok(after.some((n) => n.id === 'O4' || n.title === 'O4'), '未列入 plan 的书签留在原地');
+      await chrome.bookmarks.removeTree(orgTarget.id).catch(() => {});
+    });
+
+    await okA('organize_folder：staging=false 直接落位；同名分类复用；跨文件夹/重复 id 拒绝', async () => {
+      const directTarget = await chrome.bookmarks.create({ parentId: bar.id, title: '直接落位测试' });
+      const d1 = await chrome.bookmarks.create({ parentId: directTarget.id, title: 'D1', url: 'https://direct.test/1' });
+      const d2 = await chrome.bookmarks.create({ parentId: directTarget.id, title: 'D2', url: 'https://direct.test/2' });
+      const existing = await chrome.bookmarks.create({ parentId: directTarget.id, title: '已有分类' });
+      const res = JSON.parse(
+        (
+          await executeTool(
+            'organize_folder',
+            JSON.stringify({
+              folderId: directTarget.id,
+              staging: false,
+              plan: [
+                { folder: '已有分类', bookmarkIds: [d1.id] },
+                { folder: '新分类', bookmarkIds: [d2.id] },
+              ],
+            }),
+          )
+        ).result,
+      );
+      assert.equal(res.staged, undefined);
+      assert.equal(res.moved, 2);
+      assert.equal(res.createdFolders, 1);
+      assert.equal(res.reusedFolders, 1);
+      assert.ok((await chrome.bookmarks.getChildren(existing.id)).some((n) => n.id === d1.id));
+
+      const other = await chrome.bookmarks.create({ parentId: bar.id, title: '别的文件夹' });
+      const stranger = await chrome.bookmarks.create({ parentId: other.id, title: '不是直接子项', url: 'https://other.test/' });
+      await assert.rejects(
+        () =>
+          executeTool(
+            'organize_folder',
+            JSON.stringify({ folderId: directTarget.id, staging: false, plan: [{ folder: 'X', bookmarkIds: [stranger.id] }] }),
+          ),
+        /不是文件夹.*的直接子书签/,
+        '不能把别的文件夹的书签混进来',
+      );
+      await assert.rejects(
+        () =>
+          executeTool(
+            'organize_folder',
+            JSON.stringify({
+              folderId: directTarget.id,
+              staging: false,
+              plan: [
+                { folder: 'A', bookmarkIds: [d1.id] },
+                { folder: 'B', bookmarkIds: [d1.id] },
+              ],
+            }),
+          ),
+        /重复出现/,
+      );
+      await chrome.bookmarks.removeTree(directTarget.id).catch(() => {});
+      await chrome.bookmarks.removeTree(other.id).catch(() => {});
+    });
+
     await okA('设置里关掉暂存后，stage_organize 工具必须拒绝而不是偷偷开批次', async () => {
       await chrome.storage.local.set({ 'markai.config': { organizeStaging: false } });
       await assert.rejects(
         () => executeTool('stage_organize', JSON.stringify({ folderId: target.id })),
         /暂存区已在设置中关闭/,
         '关掉设置后工具仍会开批次，说明设置只是 UI 开关',
+      );
+      await assert.rejects(
+        () =>
+          executeTool(
+            'organize_folder',
+            JSON.stringify({
+              folderId: target.id,
+              staging: true,
+              plan: [{ folder: '不该开批次', bookmarkIds: ['x'] }],
+            }),
+          ),
+        /暂存区已在设置中关闭/,
+        'organize_folder 也不能把 staging:true 当后门',
       );
       await chrome.storage.local.set({ 'markai.config': { organizeStaging: true } });
     });

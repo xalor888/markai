@@ -297,11 +297,11 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
           <button
             type="button"
             onClick={() => useUIStore.getState().setTreeCollapsed(true)}
-            className="rounded-sm p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
             title="收起书签树（给右侧让出宽度）"
             aria-label="收起书签树"
           >
-            <PanelLeftClose className="h-3 w-3" />
+            <PanelLeftClose className="h-3.5 w-3.5" />
           </button>
         )}
         {/* 过滤模式下展开/折叠无可见反馈，隐藏避免困惑 */}

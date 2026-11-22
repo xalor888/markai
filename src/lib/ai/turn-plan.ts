@@ -134,6 +134,18 @@ function inferCount(a: Record<string, unknown> | undefined): { count: number; de
     const v = a[key];
     if (Array.isArray(v)) return { count: v.length, declared: true };
   }
+  /*
+   * organize_folder 的规模藏在 plan 里的各组 bookmarkIds 中：
+   * 不把它算出来，计划卡会把「移动 12 条」显示成 1 条，授权上限也跟着错。
+   */
+  if (Array.isArray(a.plan)) {
+    let total = 0;
+    for (const item of a.plan) {
+      const ids = item && typeof item === 'object' ? (item as Record<string, unknown>).bookmarkIds : undefined;
+      if (Array.isArray(ids)) total += ids.length;
+    }
+    if (total > 0) return { count: total, declared: true };
+  }
   return { count: 1, declared: false };
 }
 

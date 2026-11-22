@@ -89,10 +89,13 @@ export function ChatPanel({
   className,
   style,
   focusOnMount = false,
+  onClose,
 }: {
   className?: string;
   style?: CSSProperties;
   focusOnMount?: boolean;
+  /** 侧边栏抽屉的显式关闭入口；不传则不显示（完整页仍可用顶栏切换） */
+  onClose?: () => void;
 }) {
   const messages = useAIStore((s) => s.messages);
   const streaming = useAIStore((s) => s.streaming);
@@ -548,6 +551,17 @@ export function ChatPanel({
           >
             <Download className="h-3.5 w-3.5" />
           </Button>
+          {onClose && (
+            <Button
+              variant="ghost"
+              size="icon"
+              title="关闭 Agent 面板"
+              aria-label="关闭 Agent 面板"
+              onClick={onClose}
+            >
+              <X className="h-3.5 w-3.5" />
+            </Button>
+          )}
         </div>
       </div>
 
@@ -1324,6 +1338,14 @@ function EmptyState({
   onAcceptHabit: (text: string) => Promise<void>;
   onDeclineHabit: (text: string) => Promise<void>;
 }) {
+  // 未配置 AI 时，点任何起手卡都应该去设置页，而不是发一条必然被后台拒绝的消息
+  const start = (prompt: string) => {
+    if (!configured) {
+      void chrome.runtime.openOptionsPage();
+      return;
+    }
+    onChip(prompt);
+  };
   return (
     <div className="flex h-full flex-col items-center justify-center overflow-y-auto px-5 py-8">
       <div className="w-full max-w-[300px] space-y-4">
@@ -1388,10 +1410,12 @@ function EmptyState({
             </p>
             <p className="mt-1 text-xs leading-5 text-foreground">{suggestion.text}</p>
             <div className="mt-2 flex items-center gap-1.5">
-              <Button size="sm" variant="secondary" onClick={() => onChip(suggestion.prompt)}>
-                开始
+              <Button size="sm" variant="secondary" onClick={() => start(suggestion.prompt)}>
+                {configured ? '开始' : '去配置'}
               </Button>
-              <span className="text-2xs text-muted-foreground">会先征求你确认</span>
+              <span className="text-2xs text-muted-foreground">
+                {configured ? '会先征求你确认' : '配置后才能执行'}
+              </span>
             </div>
           </div>
         )}
@@ -1431,8 +1455,8 @@ function EmptyState({
               key={chip.label}
               type="button"
               disabled={chip.disabled}
-              title={chip.title}
-              onClick={() => onChip(chip.prompt)}
+              onClick={() => start(chip.prompt)}
+              title={!configured ? '请先配置 AI 服务' : chip.title}
               className="group flex w-full items-center gap-2.5 rounded-xl border border-border bg-card px-3 py-2.5 text-left transition-colors hover:border-accent/40 hover:bg-muted/40 disabled:pointer-events-none disabled:opacity-40"
             >
               <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent-muted text-accent">

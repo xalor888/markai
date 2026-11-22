@@ -355,7 +355,9 @@ export function diagnose(snapshot: HealthSnapshot): HealthReport {
       area: 'ai',
       severity: 'medium',
       title: '最近一次 AI 调用失败',
-      detail: snapshot.lastAiError.slice(0, 200),
+      detail: /aborted due to timeout|timeout/i.test(snapshot.lastAiError)
+        ? 'AI 请求超时：服务端在时限内没有返回。可稍后重试，或换更快的模型/通道。'
+        : snapshot.lastAiError.slice(0, 200),
       manualHint: '在设置页点「测试连接」看具体报错；过期/额度不足是最常见原因。',
     });
   }

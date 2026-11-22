@@ -461,6 +461,52 @@ async function main() {
       await sp2.shot('09-sidepanel-tree-open');
     }
 
+    /*
+     * 4.6) 侧边栏 · 展开 Agent 抽屉。
+     *
+     * 真机审计发现：抽屉沿用完整页的 chatWidth，430px 视口里只铺到 315px，
+     * 右边留下 115px「看得见点不到」的空白。这里用真实几何断言守住：
+     * 抽屉必须铺满视口、右边缘贴住视口，并且有显式关闭按钮。
+     */
+    if (want('sidepanel-chat')) {
+      const sp3 = await openPage(`chrome-extension://${EXT_ID}/sidepanel.html`, { width: 430, height: 880 });
+      await sp3.waitReady(`!!document.querySelector('header')`);
+      await sleep(600);
+      await sp3.ev(`(() => {
+        if (!document.querySelector('[data-testid="more-menu"]')) {
+          document.querySelector('[data-testid="more-trigger"]')?.click();
+        }
+        return true;
+      })()`);
+      await sleep(250);
+      await sp3.ev(`(() => {
+        const hit = [...document.querySelectorAll('[role="menuitem"]')]
+          .find((b) => (b.textContent || '').includes('展开 Agent 面板'));
+        if (!hit) return false;
+        hit.click();
+        return true;
+      })()`);
+      await sleep(500);
+      if (!(await sp3.waitReady(`!!document.querySelector('[data-testid="chat-panel"]')`, 30))) {
+        throw new Error('侧边栏 Agent 抽屉没有展开，拒绝产出错误截图');
+      }
+      const geo = await sp3.ev(`(() => {
+        const p = document.querySelector('[data-testid="chat-panel"]');
+        const r = p.getBoundingClientRect();
+        const close = document.querySelector('button[aria-label="关闭 Agent 面板"]');
+        return {
+          width: Math.round(r.width),
+          right: Math.round(r.right),
+          vw: window.innerWidth,
+          close: !!close,
+        };
+      })()`);
+      if (geo.width < geo.vw - 2 || geo.right < geo.vw - 2 || !geo.close) {
+        throw new Error(`Agent 抽屉没有铺满或有缺口：${JSON.stringify(geo)}`);
+      }
+      await sp3.shot('21-sidepanel-chat');
+    }
+
     // 5) 弹出窗
     if (want('popup')) {
       const pop = await openPage(`chrome-extension://${EXT_ID}/popup.html`, { width: 380, height: 620 });

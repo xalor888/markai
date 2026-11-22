@@ -41,6 +41,14 @@ import { Favicon } from '@/components/common/favicon';
  * 用户对它的感知等于「书签有时会自己换位置」。这个面板把后台行为摊开：
  * 统计 + 逐条去向 + 失败重试 + 对已有书签补整理。
  */
+/** 把底层英文错误翻成用户能据此行动的一句话（原始细节仍可在导出记录里看到） */
+function friendlyDetail(detail: string): string {
+  if (/aborted due to timeout|timed?\s*out|timeout/i.test(detail)) {
+    return '请求超时（模型服务未在时限内返回，可稍后重试或换更快的模型/通道）';
+  }
+  return detail;
+}
+
 export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const [entries, setEntries] = useState<OrganizeLogEntry[]>([]);
   const [stats, setStats] = useState<OrganizeStats | null>(null);
@@ -457,7 +465,7 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
         </div>
       ) : (
         <div
-          className="max-h-80 overflow-y-auto rounded-md border border-border"
+          className="rounded-md border border-border"
           role="list"
           aria-label={onlyFailed ? '失败的整理记录' : '整理记录'}
         >
@@ -503,7 +511,7 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
                         <span className="rounded-xs bg-accent-muted px-1 py-px text-accent">→ {e.target}</span>
                       </>
                     )}
-                    {e.detail ? ` · ${e.detail}` : ''}
+                    {e.detail ? ` · ${friendlyDetail(e.detail)}` : ''}
                   </p>
                 </div>
                 <span className="shrink-0 text-2xs text-muted-foreground/70">

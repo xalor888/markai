@@ -588,7 +588,7 @@ export function Workspace({
            */
           <>
             <div
-              className="absolute inset-0 z-20 bg-foreground/5"
+              className="absolute inset-x-0 top-0 bottom-[var(--markai-bottom-bar,0px)] z-20 bg-foreground/20"
               onClick={() => setTreeCollapsed(true)}
               aria-hidden="true"
             />
@@ -598,7 +598,7 @@ export function Workspace({
              * 而它没有被边界包住时，抛错的后果是**整个工作区被卸载**（白屏），
              * 连带列表和 Agent 面板一起消失。现在最坏情况只是"树这块坏了，其余照常"。
              */}
-            <div className="absolute inset-y-0 left-0 z-30 w-52 min-w-0">
+            <div className="absolute top-0 bottom-[var(--markai-bottom-bar,0px)] left-0 z-30 w-52 min-w-0">
               <ErrorBoundary area="书签树">
                 <BookmarkTree
                   collapsible
@@ -656,7 +656,11 @@ export function Workspace({
               />
             )}
             <ErrorBoundary area="Agent 面板" className="h-full">
-              <ChatPanel className={cn('h-full w-full border-l border-border', !chatOpen && 'border-l-0')} focusOnMount={chatOpen} />
+              <ChatPanel
+                className={cn('h-full w-full border-l border-border', !chatOpen && 'border-l-0')}
+                focusOnMount={chatOpen}
+                onClose={() => setChatOpen(false)}
+              />
             </ErrorBoundary>
           </div>
         ) : (
@@ -693,8 +697,13 @@ export function Workspace({
               <ErrorBoundary area="Agent 面板" className="h-full">
                 <ChatPanel
                   className="h-full border-l border-border"
-                  style={{ width: chatWidth, maxWidth: `min(100%, ${CHAT_WIDTH_MAX_COMPACT}px)` }}
+                  style={{
+                    // 侧边栏抽屉必须铺满可用宽度；沿用完整页的 chatWidth 会在右侧留一条“看得见点不到”的空白
+                    width: mode === 'compact' ? '100%' : chatWidth,
+                    maxWidth: mode === 'compact' ? '100%' : `min(100%, ${CHAT_WIDTH_MAX_COMPACT}px)`,
+                  }}
                   focusOnMount={chatOpen}
+                  onClose={() => setChatOpen(false)}
                 />
               </ErrorBoundary>
             </div>

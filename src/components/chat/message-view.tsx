@@ -56,6 +56,7 @@ const TOOL_ICONS: Record<string, LucideIcon> = {
   export_bookmarks: Upload,
   merge_folders: GitMerge,
   create_folder: FolderPlus,
+  organize_folder: FolderInput,
   create_bookmark: BookmarkPlus,
   create_bookmarks: BookmarkPlus,
   move_bookmark: FolderInput,
@@ -147,6 +148,11 @@ function summarize(record: ToolCallRecord): string {
     }
     if (record.name === 'auto_categorize') {
       return `已创建 ${String(j.created ?? 0)} 个分类，移动 ${String(j.moved ?? 0)} 条`;
+    }
+    if (record.name === 'organize_folder') {
+      const failed = Number(j.failed ?? 0);
+      return `建 ${String(j.createdFolders ?? 0)} 类 · 移 ${String(j.moved ?? 0)} 条` +
+        (failed > 0 ? ` · 失败 ${failed}` : j.staged ? ' · 待确认' : '');
     }
     if (record.name === 'propose_deletions') return `已提交 ${String(j.submitted ?? 0)} 项删除提议`;
     if (typeof j.title === 'string' && record.name !== 'create_folder') return j.title;

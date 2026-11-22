@@ -8,8 +8,8 @@
  * 用法：npx tsx scripts/measure-agent-cost.ts
  */
 
-import { estimateRequestTokens, estimateTokens } from '../src/lib/ai/agent';
-import { PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT, TOOL_DEFINITIONS } from '../src/lib/ai/prompts';
+import { estimateRequestTokens, estimateTokens, extractHistoryText } from '../src/lib/ai/agent';
+import { API_TOOL_DEFINITIONS, PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT } from '../src/lib/ai/prompts';
 import { effectiveContextWindow, getModelContextWindow } from '../src/lib/providers';
 import { TOOL_META } from '../src/lib/ai/tools';
 import { selectHistory } from '../src/lib/ai/agent';
@@ -22,7 +22,7 @@ const pct = (part: number, whole: number): string => `${((part / whole) * 100).t
 
 const systemTokens = estimateTokens(SYSTEM_PROMPT);
 const planTokens = estimateTokens(PLAN_MODE_INSTRUCTION);
-const toolTokens = estimateTokens(JSON.stringify(TOOL_DEFINITIONS));
+const toolTokens = estimateTokens(JSON.stringify(API_TOOL_DEFINITIONS));
 
 console.log('\nMarkAI Agent 成本基线（离线测量 · 不调用任何 API）');
 console.log('─'.repeat(58));
@@ -30,7 +30,7 @@ console.log('─'.repeat(58));
 console.log('\n【固定开销】每轮请求都要带，与对话长短无关');
 console.log(`  系统提示词        ${fmt(systemTokens).padStart(6)} tok`);
 console.log(`  计划模式说明      ${fmt(planTokens).padStart(6)} tok（仅 planMode 开启时）`);
-console.log(`  工具定义 ${TOOL_DEFINITIONS.length} 个   ${fmt(toolTokens).padStart(6)} tok  ← 占比最大`);
+console.log(`  工具定义 ${API_TOOL_DEFINITIONS.length} 个   ${fmt(toolTokens).padStart(6)} tok  ← 占比最大`);
 const fixed = systemTokens + toolTokens;
 console.log(`  小计（不含记忆）  ${fmt(fixed).padStart(6)} tok`);
 
@@ -41,7 +41,7 @@ console.log(`  只读(可并行) ${cls.read} 个 · 写(需串行+确认) ${cls.
 if (cls.unknown > 0) console.log('  ⚠ 存在未分类工具：既不并行也不确认，是隐患');
 
 console.log('\n【工具定义成本排名】（前 8，按描述+schema 估算）');
-const perTool = TOOL_DEFINITIONS.map((t) => ({
+const perTool = API_TOOL_DEFINITIONS.map((t) => ({
   name: t.function.name,
   tokens: estimateTokens(JSON.stringify(t)),
 }));
@@ -49,7 +49,7 @@ perTool.sort((a, b) => b.tokens - a.tokens);
 for (const t of perTool.slice(0, 8)) {
   console.log(`  ${t.name.padEnd(22)} ${fmt(t.tokens).padStart(5)} tok  (${pct(t.tokens, toolTokens)})`);
 }
-console.log(`  平均每工具             ${fmt(Math.round(toolTokens / TOOL_DEFINITIONS.length))} tok`);
+console.log(`  平均每工具             ${fmt(Math.round(toolTokens / API_TOOL_DEFINITIONS.length))} tok`);
 
 console.log('\n【上下文预算】window × compressThreshold(0.8) − 固定开销 = 历史可用');
 for (const [label, model] of [
@@ -128,8 +128,8 @@ for (const [label, autoCompress] of [['开启', true], ['关闭（默认）', fa
 }
 console.log('  压缩是**本地摘要**（早期消息每条截 200 字符），不额外调用模型 —— 不花往返');
 
-// 历史里的工具结果：UI 看得见，模型看不见
-console.log('\n【历史工具结果对模型不可见】历史组装只取 text 块（tool/reasoning 都丢掉）');
+// 历史里的工具结果：UI 看得见，模型看见的是结构化摘要
+console.log('\n【历史工具结果转写】每条原始 JSON → 一条可读摘要（不是简单截前缀）');
 const toolHeavy: ChatMessage[] = mkHistory(200).map((m, idx) =>
   idx % 4 === 2
     ? {
@@ -140,33 +140,53 @@ const toolHeavy: ChatMessage[] = mkHistory(200).map((m, idx) =>
             kind: 'tool' as const,
             record: {
               id: `t${idx}`,
-              name: 'search_bookmarks',
-              args: '{"query":"Rust"}',
+              name: 'list_bookmarks',
+              args: '{}',
               status: 'done' as const,
-              result: JSON.stringify(Array.from({ length: 12 }, (_, i) => ({ title: `Rust 异步 ${i}`, url: `https://x/${i}` }))),
+              result: JSON.stringify({
+                total: 50,
+                items: Array.from({ length: 12 }, (_, i) => ({
+                  id: String(i + 1),
+                  title: `Rust 异步 ${i}`,
+                  url: `https://x/${i}`,
+                })),
+              }),
             },
           },
         ],
       }
     : m,
 );
-const textTokens2 = toolHeavy.reduce(
-  (acc, m) => acc + estimateTokens(m.blocks.flatMap((b) => (b.kind === 'text' ? [b.text] : [])).join('')),
-  0,
-);
-const toolTokens2 = toolHeavy.reduce(
+const rawToolTokens = toolHeavy.reduce(
   (acc, m) => acc + estimateTokens(m.blocks.flatMap((b) => (b.kind === 'tool' ? [b.record.result ?? ''] : [])).join('')),
   0,
 );
-console.log(
-  `  200 轮里：正文 ${fmt(textTokens2)} tok · 工具结果 ${fmt(toolTokens2)} tok（全部没有进请求，` +
-    `占历史可发送内容的 ${pct(toolTokens2, textTokens2 + toolTokens2)}）`,
+const exposed = toolHeavy.map((m) => extractHistoryText(m));
+const exposedTokens = exposed.reduce((acc, t) => acc + estimateTokens(t), 0);
+const legacyTextTokens = toolHeavy.reduce(
+  (acc, m) => acc + estimateTokens(m.blocks.flatMap((b) => (b.kind === 'text' ? [b.text] : [])).join('')),
+  0,
 );
-console.log('  → 模型"记不住"刚才查到的数据，用户问「那些重复的」它只能重查一遍（多一次往返）');
+console.log(
+  `  200 轮里：正文 ${fmt(legacyTextTokens)} tok；工具原始结果 ${fmt(rawToolTokens)} tok → 摘要后 ${fmt(exposedTokens)} tok`,
+);
+console.log(`  例：${exposed.find((t) => t.includes('[工具'))?.slice(0, 120) ?? '（无）'}`);
+console.log('  → 模型能看到 id/标题/nextOffset，追问时不必重查；原始 JSON 不再进历史。');
+
+console.log('\n【整理任务往返次数】旧流程 vs organize_folder（按 6 个分类估算）');
+for (const [label, folders, legs] of [
+  ['旧：stage + 每类 create + move + 收尾', 6, 2],
+  ['新：list + organize_folder + 收尾', 6, 1],
+] as const) {
+  const rounds = label.startsWith('旧') ? 1 + 1 + folders * legs + 1 : 1 + 1 + 1;
+  const tokens = rounds * (fixed + 447);
+  console.log(`  ${label.padEnd(38)} ${rounds} 轮 · 约 ${fmt(tokens)} tok`);
+}
+
 
 console.log('\n【结论】');
 const toolShare = (toolTokens / (toolTokens + systemTokens)) * 100;
 console.log(`  · 固定开销的大头是工具定义：占总固定开销 ${toolShare.toFixed(0)}%`);
-console.log(`  · 工具定义平均 ${fmt(Math.round(toolTokens / TOOL_DEFINITIONS.length))} tok/个，描述越啰嗦越贵——每轮都付一次`);
+console.log(`  · 工具定义平均 ${fmt(Math.round(toolTokens / API_TOOL_DEFINITIONS.length))} tok/个，描述越啰嗦越贵——每轮都付一次`);
 console.log(`  · 128K 模型上固定开销占预算 ${pct(fixed, Math.round(window * 0.8))}，压缩阈值触发前只剩 ${fmt(usable)} tok`);
 console.log('  · 优化方向（按收益）：①压缩工具描述 ②并行只读工具减少往返 ③工具结果裁剪\n');

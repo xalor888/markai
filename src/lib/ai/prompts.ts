@@ -17,13 +17,12 @@ export const SYSTEM_PROMPT = `你是 MarkAI，运行在用户浏览器里的智�
 
 【行为准则】
 1. 默认使用中文回复（除非用户使用其他语言），内容简洁、条理清晰，必要时使用短列表。
-2. 动手之前先了解结构：优先用 list_bookmarks / search_bookmarks / get_folder_path 查询，不要凭空假设书签 ID。
+2. 动手之前先了解结构：优先用 list_bookmarks / search_bookmarks / get_folder_path 查询，不要凭空假设书签 ID；多个互不依赖的只读查询放在同一轮并发发出，不要一轮只查一个。
 3. 用户指令模糊时（例如"帮我整理一下"没指明范围），先结合长期记忆判断；若仍无明确范围，先问清楚范围；如果对话上下文里提供了用户正在查看的文件夹，就优先处理它。
-4. **整理默认先进暂存区**（如果本轮【整理落位策略】明确说"暂存已关闭"，则以那段为准）：用户说"帮我整理某个文件夹"时，先调 stage_organize 拿到 batchId，
-   把新分类建在 batchId 下、把书签移进 batchId，然后告诉用户"已放进自动整理暂存区，等待确认"。
-   落位（搬进原文件夹或放到书签栏）由用户在「整理记录」里点——**不要自己搬运，也不要声称已经改进用户的文件夹**。
-   如果用户明确说"直接整理进去/不用确认"，才跳过 stage_organize 按下面第 5 条直接落位。
-5. **直接落位时（或用户关掉了暂存），整理某个文件夹的新子分类必须建在它内部**（create_folder 显式传 parentId，或 parentPath 写成该文件夹的完整路径）。
+4. **整理默认先进暂存区，用 organize_folder 一次完成**：先用 list_bookmarks 取目标文件夹直接子书签的 id，把分类计划作为 plan 一次提交；工具会建/复用分类并批量移动，不要逐个 create_folder + move_bookmarks。
+   默认暂存开启时它会自动开批次，完成后说"已放进自动整理暂存区，等待确认"；落位由用户在「整理记录」里点——**不要自己搬运，也不要声称已经改进用户的文件夹**。
+   如果用户明确说"直接整理进去/不用确认"，才传 staging:false 让工具直接落位；暂存已在设置里关闭时，工具会直接落位，不要调用 stage_organize。
+5. **直接落位时，整理某个文件夹的新子分类必须建在它内部**（organize_folder 已保证；手工分步时 create_folder 要显式传 parentId，或 parentPath 写成该文件夹的完整路径）。
    省略 parentId 会落到**书签栏根目录**，那不是整理——那是把一个整齐的文件夹摊到根上。
    开始整理前先确认目标文件夹的 id（消息开头的「当前上下文」会给出，没有就用 get_folder_path / list_bookmarks 查）。
    归类时先搜索是否已存在合适的目标文件夹，避免创建重复的同义文件夹；文件夹命名要简短、语义清晰。
@@ -35,9 +34,9 @@ export const SYSTEM_PROMPT = `你是 MarkAI，运行在用户浏览器里的智�
 7. 涉及删除建议时，每条都必须给出具体、可信的理由；批量删除前提醒用户确认。
 8. 不要编造工具返回中不存在的书签 ID 或数据。
 9. 如果用户问与书签无关的问题，可以简短回答，并自然地引导回书签管理。
-10. 工具结果可能被截断（列表默认返回 2000 项，单次结果仍有长度上限）。**处理大量书签（几百上千条）时优先用大库专用工具：auto_categorize 一次完成整文件夹的自动分类（**仅在用户明确要求按域名/按网站分类时**才用：它内部就按域名建文件夹）；check_urls_bulk 一次检测成千上万条链接（只回传摘要与死链明细）；cleanup_sweep 一次完成「筛选+存活检测+批量删除提议」的整文件夹清理。需要完整清单分析时用 export_bookmarks 的 offset/maxItems 分页获取（默认每批 500 条，按返回的 nextOffset 继续），分批累计结论后再行动；不要在一条工具调用里塞几百条 URL，也不要逐条移动书签。**
-11. **你产不出文件，也不要声称产出了。**所有工具只把数据读给你分析，不会在用户的磁盘上生成任何文件。用户要求「导出 / 备份 / 保存成文件」时：如实说明你只能读分析，让他们去 **设置 → 数据管理 → 书签导出**（有「书签 HTML」与「JSON」两种，HTML 可再导入任意浏览器）。**不要**为了让用户满意就说"已为你导出"或编造一个文件名。
-11.5 **清理/筛选类任务直接调用 cleanup_sweep 一次性完成，不要自己反复分页拉取清单**。分析完成后**立即用 propose_deletions / cleanup_sweep 提交删除提议**，由用户在界面确认——不要先停下来问"是否删除"、也不要让用户再点一次"开始删除"才动手。提交后如实汇报统计即可。**`;
+10. 工具结果可能被截断（list_bookmarks 默认 2000 项；search_bookmarks 默认 50 条，需要更多用 offset）。大量书签优先用专用工具：auto_categorize（仅在用户明确要求按域名/按网站分类时）、check_urls_bulk（批量存活检测）、cleanup_sweep（筛选+检测+删除提议）；完整清单用 export_bookmarks 的 offset/maxItems 分页。不要逐条移动书签。
+11. **你产不出文件，也不要声称产出了。**工具只把数据读给你分析，不会在用户磁盘上生成文件。用户要求导出/备份时，如实说明只能读分析，让他们去 **设置 → 数据管理 → 书签导出**（书签 HTML 与 JSON）。不要编造文件名或声称"已为你导出"。
+11.5 清理/筛选直接调用 cleanup_sweep 一次完成，不要反复分页拉清单。分析完立即用 propose_deletions / cleanup_sweep 提交删除提议，由用户确认；不要先停下来问"是否删除"再让用户点一次"开始删除"。`;
 
 /**
  * 本轮的整理落位策略。
@@ -51,16 +50,16 @@ export function organizeStagingInstruction(staging: boolean): string {
     return `
 
 【整理落位策略】本轮**启用暂存区**（用户设置 organizeStaging = 开）：
-- 整理单个文件夹：先 stage_organize 拿 batchId，新分类与书签都放进去；完成后如实说"已放进自动整理暂存区，等待确认"。
+- 整理单个文件夹：list_bookmarks 取直接子书签 id → organize_folder(plan=[{folder, bookmarkIds}]) 一次完成；它会自动开批次，新分类与书签都放进去。完成后如实说"已放进自动整理暂存区，等待确认"。
 - 落位由用户在「整理记录」里点（原文件夹 / 书签栏 / 其他文件夹），**不要自己搬运，也不要声称已经改进用户的文件夹**。
-- 零散选中的书签、整库整理不要硬塞进一个批次（暂存区只服务"整理某个文件夹"）。
+- 只有用户明确要求"直接整理进去/不用确认"时才传 staging:false；零散选中的书签、整库整理不要硬塞进一个批次。
 `;
   }
   return `
 
 【整理落位策略】本轮**暂存已关闭**（用户设置 organizeStaging = 关）：
-- 不要调用 stage_organize；整理文件夹时直接把新子分类建在该文件夹内部（create_folder 传 parentId），把书签归类移动到位。
-- 省略 parentId 会落到书签栏根目录，那不是整理。
+- 不要调用 stage_organize；整理文件夹时用 organize_folder（默认直接落位）一次建好分类并移动到位，它会把新子分类建在该文件夹内部。
+- 若手工分步，create_folder 必须传目标 folderId 作 parentId；省略会落到书签栏根目录，那不是整理。
 `;
 }
 
@@ -91,7 +90,7 @@ export const PLAN_MODE_INSTRUCTION = [
   '',
 ].join('\n');
 
-export const TOOL_DEFINITIONS: ToolDefinition[] = [
+const RAW_TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
@@ -114,12 +113,13 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'search_bookmarks',
-      description: '按关键字搜索书签（匹配标题与 URL），默认返回 2000 条，可传 limit 调整，带所在路径。',
+      description: '按关键字搜索书签（匹配标题与 URL），默认返回 50 条，支持 offset 翻页，带所在路径。',
       parameters: {
         type: 'object',
         properties: {
           query: { type: 'string', description: '搜索关键字' },
-          limit: { type: 'integer', description: '返回条数上限，默认 2000，最大 2000' },
+          limit: { type: 'integer', description: '返回条数上限，默认 50，最大 2000' },
+          offset: { type: 'integer', description: '跳过前 N 条（分页用，取上一批返回的 nextOffset）' },
         },
         required: ['query'],
         additionalProperties: false,
@@ -333,6 +333,44 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     type: 'function',
     function: {
+      name: 'organize_folder',
+      description:
+        '一次完成一个文件夹的整理：按 plan 在目标文件夹内（暂存开启时在暂存批次内）创建/复用分类文件夹，并批量移动书签。' +
+        '模型只需先 list_bookmarks 取得直接子书签的 id，然后调用本工具，不要为每个分类分别 create_folder + move_bookmarks。' +
+        '默认开启暂存时，本工具会自动开批次；dryRun=true 只返回将要创建/移动的数量，不改动书签。',
+      parameters: {
+        type: 'object',
+        properties: {
+          folderId: { type: 'string', description: '要整理的文件夹 id（与 folderPath 二选一；省略则用当前上下文文件夹）' },
+          folderPath: { type: 'string', description: '要整理的文件夹完整路径' },
+          plan: {
+            type: 'array',
+            description: '分类计划：每个分类一个 folder + 要移入的 bookmarkIds；bookmark 必须是被整理文件夹的直接子书签，且不能重复',
+            items: {
+              type: 'object',
+              properties: {
+                folder: { type: 'string', description: '分类文件夹标题；已存在同名子文件夹时复用' },
+                bookmarkIds: {
+                  type: 'array',
+                  items: { type: 'string' },
+                  description: '要移入该分类的书签 id 列表',
+                },
+              },
+              required: ['folder', 'bookmarkIds'],
+              additionalProperties: false,
+            },
+          },
+          dryRun: { type: 'boolean', description: '只预览，不创建/移动' },
+          staging: { type: 'boolean', description: '是否先进暂存区；省略按设置，false=用户明确要求直接落位' },
+        },
+        required: ['plan'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'auto_categorize',
       description:
         '先用 dryRun=true 出计划（不创建文件夹、不移动书签），用户确认后再执行。' +
@@ -369,6 +407,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           keepOnly: { type: 'string', enum: ['root', 'page'], description: '保留类型：root=仅主页面（默认），page=主页面+栏目页' },
           checkReachable: { type: 'boolean', description: '是否实测保留候选的存活（默认 true）' },
           recursive: { type: 'boolean', description: '是否递归子文件夹（默认 true，只删书签不删文件夹）' },
+          dryRun: { type: 'boolean', description: '只预览，不生成删除提议；确认后再用 dryRun=false 执行' },
           limit: { type: 'integer', description: '本次处理条数上限，默认 1000，最大 1000' },
           offset: { type: 'integer', description: '跳过前 N 条（分页：上一轮返回 remaining>0 时用返回的 offset 继续）' },
         },
@@ -543,8 +582,8 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         properties: {
           folderId: { type: 'string', description: '文件夹 id，与 folderPath 二选一' },
           folderPath: { type: 'string', description: '文件夹路径（如"书签栏 > 技术"）' },
-          depth: { type: 'integer', description: '递归深度：1=只看直接子项，2=含孙级，3=最多三层，默认 2' },
-          limit: { type: 'integer', description: '每层书签上限，默认 2000，最大 2000' },
+          depth: { type: 'integer', description: '递归深度：1=只看直接子项（默认），2=含孙级，3=最多三层' },
+          limit: { type: 'integer', description: '每层书签上限，默认 100，最大 2000' },
         },
         additionalProperties: false,
       },
@@ -736,6 +775,143 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
     },
   },
 ];
+
+/**
+ * 工具描述的「压缩视图」。
+ *
+ * 35 个工具的完整 schema 每轮请求约 5.7k token（占总固定开销 80%），而其中大量文字
+ * 是给开发者看的背景说明、示例和重复的限制句。模型真正需要的只有：**这个工具做什么、
+ * 关键参数是什么、什么时候不该用**。因此保留一份详尽的 RAW 定义作为源码事实，
+ * 发给模型前再过一遍 lossy 压缩——参数名、类型、required、enum 一个不动。
+ *
+ * 约束：
+ *  - 只删/缩短 description，不改任何 schema 结构；
+ *  - 关键前置条件（parentId、暂存开关、删除确认）必须留在描述里；
+ *  - 压缩后仍要能通过「提示词禁止/允许不冲突」守卫。
+ */
+const TOOL_SUMMARY: Record<string, string> = {
+  list_bookmarks: '列出文件夹的直接子项（id/标题/URL/文件夹），支持路径与 offset 分页；省略 parentId 时用当前文件夹。',
+  search_bookmarks: '按标题/URL 搜索书签；默认 50 条，支持 offset 分页。',
+  get_recent_bookmarks: '最近添加的书签，可按天数筛选。',
+  get_folder_path: '把书签/文件夹 id 解析成完整路径。',
+  create_folder: '新建文件夹；整理某个文件夹时必须显式传 parentId。',
+  create_bookmarks: '批量创建书签（≤50 条），parentId/parentPath 定位目标。',
+  create_bookmark: '创建单条书签。',
+  move_bookmark: '移动单条书签到指定文件夹。',
+  rename_bookmark: '重命名书签或文件夹。',
+  update_bookmark_url: '修改书签 URL。',
+  classify_urls: '把 URL 归为主页面/栏目页/深层页，供清理判断。',
+  check_urls_bulk: '批量实测 URL 存活，只回摘要与死链明细。',
+  stage_organize: '开整理暂存批次（高级工具；一般直接用 organize_folder）。',
+  auto_categorize: '按域名聚类整理文件夹并批量移动；仅在用户明确要求按网站/域名分类时用。',
+  cleanup_sweep: '一键清理文件夹：筛选→存活检测→删除提议；仅用户明确要求清理时用。',
+  check_urls: '检测少量 URL 是否存活。',
+  stats: '统计书签/文件夹数量与最近变化。',
+  list_all_folders: '列出所有文件夹的 id 与路径，查找落点用。',
+  move_bookmarks: '批量移动书签到同一文件夹，保留顺序。',
+  copy_bookmark: '复制书签到另一个文件夹。',
+  submit_plan: '计划模式下，动手前一次性声明本轮写操作。',
+  open_bookmark: '在浏览器打开一个书签。',
+  open_bookmarks: '批量打开书签（≤10 条）。',
+  list_empty_folders: '列出空文件夹，供清理。',
+  get_folder_content: '递归读取文件夹内容，适合看结构。',
+  export_bookmarks: '分页导出书签 HTML/JSON 供分析；不会写用户磁盘。',
+  merge_folders: '把源文件夹内容并入目标文件夹。',
+  find_duplicates: '按 URL/标题查找重复书签，只读。',
+  dedupe_bookmarks: '批量去重并保留一条，删除走确认。',
+  sort_folder: '按标题/日期/URL 排序文件夹。',
+  propose_deletions: '提交删除提议，等用户确认；默认不直接删。',
+  delete_all_bookmarks: '清空书签（危险，需确认）。',
+  remember: '记录一条长期偏好/规则。',
+  recall_memories: '查询长期记忆。',
+  forget_memory: '删除一条长期记忆。',
+  organize_folder: '一次完成整理：按 plan 在目标文件夹（或暂存批次）内建分类并移动书签，替代多次 create_folder/move_bookmarks。',
+};
+
+/**
+ * 明显到不需要说明的参数名。模型从名字和类型就能正确填；
+ * 保留它们只会让每轮 schema 多几百 token。parentId 例外——它是最容易
+ * 被省略、且一省略就落到书签栏根的危险参数，必须保留一句前置条件。
+ */
+const BARE_PARAM_NAMES = new Set([
+  'title', 'url', 'query', 'count', 'bookmarkId', 'id', 'ids', 'index',
+  'days', 'name', 'value', 'folderId', 'folderPath', 'parentPath',
+  'folder', 'bookmarkIds', 'reason', 'category', 'enabled', 'text', 'plan',
+]);
+
+function trimDescription(text: string, max = 78): string {
+  const oneLine = text.replace(/\s+/g, ' ').trim();
+  if (oneLine.length <= max) return oneLine;
+  const cut = oneLine.slice(0, max);
+  const sentence = Math.max(cut.lastIndexOf('。'), cut.lastIndexOf('；'), cut.lastIndexOf('，'));
+  return (sentence > max * 0.45 ? cut.slice(0, sentence) : cut).trimEnd() + '…';
+}
+
+/** 只压缩 description，结构原样保留（JSON Schema 的 required/enum/type 不动） */
+function compactSchema(node: unknown, key = ''): unknown {
+  if (Array.isArray(node)) return node.map((item) => compactSchema(item));
+  if (!node || typeof node !== 'object') return node;
+  const src = node as Record<string, unknown>;
+  const out: Record<string, unknown> = { ...src };
+
+  if (typeof out.description === 'string') {
+    if (key && BARE_PARAM_NAMES.has(key) && !src.type?.toString().includes('object') && !src.enum) {
+      delete out.description;
+    } else {
+      out.description = trimDescription(out.description, key === 'parentId' ? 52 : 78);
+    }
+  }
+  if (out.properties && typeof out.properties === 'object') {
+    const props = out.properties as Record<string, unknown>;
+    out.properties = Object.fromEntries(
+      Object.entries(props).map(([name, schema]) => [name, compactSchema(schema, name)]),
+    );
+  }
+  if (out.items) out.items = compactSchema(out.items, key);
+  return out;
+}
+
+function compactToolDefinition(def: ToolDefinition): ToolDefinition {
+  return {
+    type: 'function',
+    function: {
+      name: def.function.name,
+      description: TOOL_SUMMARY[def.function.name] ?? trimDescription(def.function.description, 110),
+      parameters: compactSchema(def.function.parameters) as Record<string, unknown>,
+    },
+  };
+}
+
+export const TOOL_DEFINITIONS: ToolDefinition[] = RAW_TOOL_DEFINITIONS.map(compactToolDefinition);
+
+/**
+ * 实际发给模型的定义：去掉 `additionalProperties: false`。
+ *
+ * 这个键对 OpenAI 兼容接口不是必填，zod 也会静默剥离未知键；
+ * 36 个工具每个多 7 token，合计约 290 token/轮，纯属白付。
+ * 源码保留完整定义（契约测试仍能检查），发送层用这份精简副本。
+ */
+function stripAdditionalProperties(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(stripAdditionalProperties);
+  if (!node || typeof node !== 'object') return node;
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+    // 只删这个键本身；数组 items、allOf/oneOf、properties 里的对象都要继续递归
+    if (key === 'additionalProperties') continue;
+    out[key] = stripAdditionalProperties(value);
+  }
+  return out;
+}
+
+export const API_TOOL_DEFINITIONS: ToolDefinition[] = TOOL_DEFINITIONS.map((def) => ({
+  type: 'function',
+  function: {
+    name: def.function.name,
+    description: def.function.description,
+    parameters: stripAdditionalProperties(def.function.parameters) as Record<string, unknown>,
+  },
+}));
+
 
 /**
  * 给模型的「现在几点」上下文。

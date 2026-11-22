@@ -34,15 +34,15 @@ export function buildOrganizePrompt({ folderTitle, folderId, staging }: Organize
   if (staging) {
     return (
       `请整理书签文件夹「${title}」（folderId = "${folderId}"）：` +
-      `先调用 stage_organize(folderId="${folderId}") 开一个暂存批次，` +
-      `把新分类建在返回的 batchId 下、把书签移进 batchId（不要直接改我的文件夹，也不要建到书签栏根目录）；` +
+      `先 list_bookmarks(folderId="${folderId}") 取直接子书签的 id，再用 organize_folder(folderId="${folderId}", plan=[{folder, bookmarkIds}]) 一次完成分类与移动；` +
+      `它会自动开暂存批次（不要直接改我的文件夹，也不要建到书签栏根目录）。` +
       `完成后告诉我「已放进自动整理暂存区，等待确认」，我会在整理记录里决定应用还是放弃。`
     );
   }
   return (
     `请整理书签文件夹「${title}」（folderId = "${folderId}"）：` +
-    `浏览其全部书签，在**这个文件夹内部**创建合适的子分类（create_folder 必须传 parentId="${folderId}"），` +
-    `并把书签归类移动到位；不要把子分类建到书签栏或其他根目录下。`
+    `先 list_bookmarks 取得直接子书签 id，再用 organize_folder(folderId="${folderId}", plan=[{folder, bookmarkIds}]) 一次完成；` +
+    `它会在**这个文件夹内部**创建分类并移动，不要把子分类建到书签栏或其他根目录下。`
   );
 }
 
@@ -57,14 +57,13 @@ export function buildSlashOrganizePrompt(staging: boolean): string {
   if (staging) {
     return (
       '请整理当前文件夹（就是消息开头「当前上下文」里给出的那个 folderId）：' +
-      '先列出你打算怎么分类和移动，等我确认后再调用 stage_organize() 开一个暂存批次' +
-      '（不传 folderId，用当前上下文），把新子分类建在返回的 batchId 下、把书签移进 batchId；' +
-      '不要直接改我的文件夹，也不要建到书签栏根目录。'
+      '先 list_bookmarks 取直接子书签的 id，再用 organize_folder(plan=[{folder, bookmarkIds}]) 一次完成；' +
+      '它会自动开暂存批次，不要直接改我的文件夹，也不要建到书签栏根目录。'
     );
   }
   return (
     '请整理当前文件夹（就是消息开头「当前上下文」里给出的那个 folderId）：' +
-    '新子分类必须建在这个文件夹**内部**（create_folder 显式传 parentId），不要建到书签栏根目录。' +
-    '先列出你打算怎么分类和移动，等我确认后再执行。'
+    '先 list_bookmarks 取得直接子书签 id，再用 organize_folder(plan=[{folder, bookmarkIds}]) 一次完成；' +
+    '新子分类必须建在这个文件夹**内部**（organize_folder 会保证），不要建到书签栏根目录。'
   );
 }

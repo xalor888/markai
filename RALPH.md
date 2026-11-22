@@ -5,7 +5,7 @@
 
 ## 1. 当前基线（2026-11-23）
 
-- 版本：`0.2.173`（已发布，GitHub Release：markai-0.2.173-chrome.zip）
+- 版本：`0.2.174`（已发布，GitHub Release：markai-0.2.174-chrome.zip）
 - 仓库：`/Users/xalor/Documents/markai`，分支 `main`，工作区只有未跟踪的 `promo/`，**不要提交 promo/**。
 - 技术栈：WXT + React 19 + TypeScript + Tailwind v4 + Zustand + Chrome MV3。
 - 上次验证（0.2.174）：`npm run compile` 通过；`npm test` **1,112 项全过**；真实 Chrome e2e **214/214**；视觉审计 16/16。
@@ -81,7 +81,10 @@ CHROME_BIN='/Users/xalor/Library/Caches/ms-playwright/chromium-1255/chrome-mac-a
 ## 3. 当前已知缺口（按优先级）
 
 1. ~~`organize_folder` 只接受目标文件夹的直接子书签。~~ 已新增显式 `scope:"deep"`：可递归目标子树，暂存放弃会按原父文件夹逐条回原位；默认仍是 direct，避免误伤。仍需真实任务验证 Agent 是否会在“整理整个大类”时正确选择 deep。
+2. 弹窗仍有三张状态卡占首屏；整理记录底部操作区在窄高视口可能被截；健康检查已有「去填写」但仍需真机确认。
+3. e2e 书签精灵说话用例偶发首轮 `firstLine=null`，复跑即过；需要消除随机/冷却依赖。
 2. `list_all_folders` 已有递归书签数，但 Agent 仍可能只读一个根；需要用真实任务验证提示词是否真的改变行为。
+3. 深整理已实现但尚未在真实 1000+ 书签库跑完整任务；需要测轮数、耗时、放弃后结构还原。
 3. Agent 仍然偏“问答式”：分析完停在“需要我执行吗”，用户要再回一句。需要更主动地给出**可确认的计划**（计划卡/暂存），而不是纯文本建议。
 4. 多选入口在 compact 下不够明显。
 5. 整理记录长内容/底部操作区在窄高视口仍有截断风险。

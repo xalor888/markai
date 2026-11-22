@@ -28,6 +28,8 @@ import { cn } from '@/lib/utils';
 import { pushToast } from '@/lib/toast';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
+import { StagedBatchesCard } from '@/components/organize/staged-batches';
+import { STAGED_KEY } from '@/lib/ai/organize-staging';
 import { Dialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { Favicon } from '@/components/common/favicon';
@@ -56,6 +58,8 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
   const [query, setQuery] = useState('');
   /** 被用户「叫停」的站点：撤销过一次自动整理就会进来 */
   const [optouts, setOptouts] = useState<OptOutEntry[]>([]);
+  /** 待确认方案的重读信号：应用/放弃之后要让卡片自己消失 */
+  const [stagedToken, setStagedToken] = useState(0);
   /**
    * 免打扰名单是否展开显示全部。
    *
@@ -93,6 +97,8 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
       setNotice('无法联系后台进程，请再试一次。');
     } finally {
       if (!opts.silent) setLoading(false);
+      // 待确认方案也要跟着重读：另一个窗口应用/放弃之后，这张卡片必须自己消失
+      setStagedToken((v) => v + 1);
     }
   }, []);
 
@@ -109,7 +115,7 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
       area: chrome.storage.AreaName,
     ) => {
       if (area !== 'local') return;
-      if (!changes[ORGANIZE_LOG_KEY] && !changes[ORGANIZE_OPTOUT_KEY]) return;
+      if (!changes[ORGANIZE_LOG_KEY] && !changes[ORGANIZE_OPTOUT_KEY] && !changes[STAGED_KEY]) return;
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
         timer = null;
@@ -277,6 +283,9 @@ export function OrganizeLogDialog({ open, onOpenChange }: { open: boolean; onOpe
         </Button>
       }
     >
+      {/* 待确认的整理方案：放在最前面——它比"过去整理了多少"更该被看到 */}
+      <StagedBatchesCard refreshToken={stagedToken} onChanged={() => void refresh({ silent: true })} />
+
       {/* 统计条：一眼看到「今天帮我整理了几条」 */}
       <div className="mb-3 flex flex-wrap items-center gap-1.5">
         <Badge variant="outline">今天 {stats?.today ?? 0} 条</Badge>

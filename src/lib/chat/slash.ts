@@ -10,6 +10,8 @@
  *  - 过滤是纯函数，菜单只是它的投影。
  */
 
+import { buildSlashOrganizePrompt } from '@/lib/ai/organize-prompt';
+
 export interface SlashCommand {
   /** 展示与过滤用的命令名（含斜杠） */
   cmd: string;
@@ -24,10 +26,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     cmd: '/整理',
     label: '整理当前文件夹',
     description: '先给计划，确认后再移动与合并',
-    prompt:
-      '请整理当前文件夹（就是消息开头「当前上下文」里给出的那个 folderId）：' +
-      '新子分类必须建在这个文件夹**内部**（create_folder 显式传 parentId），不要建到书签栏根目录。' +
-      '先列出你打算怎么分类和移动，等我确认后再执行。',
+    // 默认按「先落暂存区」生成；filterSlashCommands 会按用户设置替换成对应口径
+    prompt: buildSlashOrganizePrompt(true),
   },
   {
     cmd: '/清理',
@@ -60,11 +60,20 @@ export const SLASH_COMMANDS: SlashCommand[] = [
  * 输入不是以 `/` 开头 → 返回空数组（菜单不该出现）。
  * 只有 `/` → 返回全部。
  */
-export function filterSlashCommands(input: string): SlashCommand[] {
+export function filterSlashCommands(
+  input: string,
+  opts: { organizeStaging?: boolean } = {},
+): SlashCommand[] {
   if (!input.startsWith('/')) return [];
+  const staging = opts.organizeStaging ?? true;
+  // 整理命令的 prompt 不在模块常量里定死：它要跟随设置，否则关掉暂存后
+  // 斜杠命令仍会让 Agent 先开批次，而用户明明选的是"直接落位"。
+  const commands = SLASH_COMMANDS.map((c) =>
+    c.cmd === '/整理' ? { ...c, prompt: buildSlashOrganizePrompt(staging) } : c,
+  );
   const q = input.slice(1).trim().toLowerCase();
-  if (!q) return SLASH_COMMANDS;
-  return SLASH_COMMANDS.filter(
+  if (!q) return commands;
+  return commands.filter(
     (c) =>
       c.cmd.slice(1).toLowerCase().includes(q) ||
       c.label.toLowerCase().includes(q) ||

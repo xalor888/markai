@@ -11,6 +11,8 @@
  * 「读-改-写」若并发交错会互相覆盖丢记录（真实并发场景：串行队列 + toast 回调）。
  */
 
+import { normalizeUrlForDup } from '@/lib/bookmarks/insights';
+
 export const ORGANIZE_LOG_KEY = 'markai.organize.log';
 /** 环形缓冲容量：200 条足够覆盖「最近几次整理」，又不会把 storage 撑大 */
 export const ORGANIZE_LOG_LIMIT = 200;
@@ -143,6 +145,46 @@ export async function readOrganizeLog(): Promise<OrganizeLogEntry[]> {
       .sort((a, b) => b.at - a.at)
       .slice(0, ORGANIZE_LOG_LIMIT);
   }
+}
+
+/**
+ * 「这条记录还对应着一条真实书签吗」——概览只该展示这个。
+ *
+ * 整理日志是只增不减的历史；书签被删掉之后记录还在。概览把最近五条摊开时，
+ * 那些指向已删书签的条目会让用户以为书签还在（"我明明删了它"）。
+ *
+ * 判定顺序：
+ *  1. `runId = auto-organize:<bookmarkId>`：ID 还在树上就是同一条书签（移动/改名都不影响）；
+ *  2. 没有 runId 的旧记录：按归一化 URL 是否仍在库里判断（同一 URL 还有别的副本时保留）；
+ *  3. 没有 URL 的系统记录（批量跳过的摘要）：保留。
+ *
+ * 纯函数：不调用 chrome API，便于单测；roots 必须是**当前**树。
+ */
+export function filterDeletedOrganizeEntries(
+  entries: readonly OrganizeLogEntry[],
+  roots: readonly chrome.bookmarks.BookmarkTreeNode[],
+): OrganizeLogEntry[] {
+  const liveIds = new Set<string>();
+  const liveUrls = new Set<string>();
+  const walk = (nodes: readonly chrome.bookmarks.BookmarkTreeNode[] | undefined): void => {
+    for (const node of nodes ?? []) {
+      if (node.url) {
+        liveIds.add(node.id);
+        const key = normalizeUrlForDup(node.url);
+        if (key) liveUrls.add(key);
+      }
+      if (node.children) walk(node.children);
+    }
+  };
+  walk(roots);
+
+  return entries.filter((entry) => {
+    if (entry.runId?.startsWith('auto-organize:')) {
+      return liveIds.has(entry.runId.slice('auto-organize:'.length));
+    }
+    if (!entry.url) return true;
+    return liveUrls.has(normalizeUrlForDup(entry.url));
+  });
 }
 
 /** 清空日志 */

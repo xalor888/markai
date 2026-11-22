@@ -977,6 +977,17 @@ export function ConfigForm() {
               </ul>
             )}
           </SettingRow>
+          <ToggleRow
+            label="整理先进暂存区，由我确认"
+            keywords="暂存 预演 确认 staging organize approve"
+            checked={config.organizeStaging ?? true}
+            onCheckedChange={(v) => void update({ organizeStaging: v })}
+            hint={
+              config.organizeStaging ?? true
+                ? '开着：Agent 的新分类先放进书签栏的「自动整理」里，你在「整理记录」里点「应用」才搬进你的文件夹——也可以选择放到书签栏、挑任意文件夹，或者放弃让书签回原位。'
+                : '已关闭：整理会**直接写进**你的文件夹（老行为）。分类习惯已经认可的话才建议关。'
+            }
+          />
         </SettingsSection>
       </ErrorBoundary>
 

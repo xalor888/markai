@@ -145,6 +145,7 @@ import {
   clearOrganizeLog,
   buildOrganizeLogMarkdown,
   decorateOrganizeDetail,
+  filterDeletedOrganizeEntries,
   filterOrganizeLog,
   groupByTarget,
   pickRetryableEntries,
@@ -8583,6 +8584,48 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.notEqual(normalizeUrlForDup('https://example.com/a?page=2'), normalizeUrlForDup('https://example.com/a'));
       assert.equal(normalizeUrlForDup(''), '');
       assert.equal(normalizeUrlForDup('not a url'), 'not a url');
+    });
+
+    ok('概览「最近整理」不再展示已删书签（历史仍留在整理记录里）', () => {
+      const entry = (
+        id: string,
+        url: string,
+        runId?: string,
+      ): OrganizeLogEntry =>
+        ({
+          id,
+          at: NOW,
+          title: id,
+          url,
+          domain: '',
+          action: 'moved',
+          detail: '',
+          ...(runId ? { runId } : {}),
+        }) as OrganizeLogEntry;
+      const entries = [
+        entry('live-id', 'https://react.dev/b', 'auto-organize:b2'),
+        entry('deleted-id', 'https://gone.test/x', 'auto-organize:gone'),
+        entry('old-url-live', 'https://react.dev/b#top'),
+        entry('old-url-deleted', 'https://deleted.test/y'),
+        { ...entry('system', ''), action: 'skipped', title: '批量新增 20 条' } as OrganizeLogEntry,
+      ];
+      const visible = filterDeletedOrganizeEntries(entries, tree);
+      assert.deepEqual(
+        visible.map((e) => e.id),
+        ['live-id', 'old-url-live', 'system'],
+        '已删书签（按 id 或归一化 URL 判断）必须消失；无 URL 的系统记录要留下',
+      );
+      // 只剩已删记录时，概览应该显示空态，而不是"最后一件事还在"
+      assert.equal(
+        filterDeletedOrganizeEntries([entry('only', 'https://only.test/', 'auto-organize:gone')], tree).length,
+        0,
+      );
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      assert.match(
+        readFileSync(resolve(srcDir, 'components/bookmark-list/overview-panel.tsx'), 'utf8'),
+        /filterDeletedOrganizeEntries/,
+        '概览必须走同一份过滤（否则只是测试里对，界面上还显示）',
+      );
     });
 
     ok('每周回顾：从周一开始、统计本周整理/失败、与上次快照比变化', () => {
@@ -17236,7 +17279,7 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
     const src = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
     assert.match(src, /data-testid="slash-menu"/, '缺少稳定锚点');
-    assert.match(src, /filterSlashCommands\(input\)/, '菜单必须由纯函数驱动');
+    assert.match(src, /filterSlashCommands\(input, \{ organizeStaging \}\)/, '菜单必须由纯函数驱动，并跟随暂存设置');
     assert.match(src, /chooseSlash\(slashMatches/, 'Enter 应该填入命令而不是发送');
     assert.match(src, /setSlashIndex/, '需要键盘高亮索引');
   });
@@ -17923,11 +17966,39 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
       assert.match(folderContextNote({ id: '1', title: '' }), /「\(未命名\)」/);
     });
 
-    ok('「整理此文件夹」的起手指令必须带 folderId（只给标题等于让模型猜）', () => {
+    await okA('「整理此文件夹」的起手指令必须带 folderId（只给标题等于让模型猜）', async () => {
+      const { buildOrganizePrompt } = await import('../src/lib/ai/organize-prompt');
+      const direct = buildOrganizePrompt({ folderTitle: '软件工具', folderId: '777', staging: false });
+      const staged = buildOrganizePrompt({ folderTitle: '软件工具', folderId: '777', staging: true });
+      for (const [label, prompt] of [['直接落位', direct], ['先落暂存', staged]] as const) {
+        assert.match(prompt, /folderId = "777"/, `${label}：必须把 folderId 写进去`);
+        assert.match(prompt, /软件工具/, `${label}：必须说明整理的是哪个文件夹`);
+      }
+      // 直接落位：要求建在内部，不许去根目录
+      assert.match(direct, /在\*\*这个文件夹内部\*\*创建/, '直接落位必须要求建在内部');
+      assert.match(direct, /parentId="777"/, '直接落位要给出可抄的 parentId');
+      assert.match(direct, /不要.*建到书签栏/, '直接落位必须明确禁止建到根目录');
+      // 先落暂存：走 stage_organize，且明确"不要直接改我的文件夹"
+      assert.match(staged, /stage_organize\(folderId="777"\)/, '暂存模式必须先开批次');
+      assert.match(staged, /不要直接改我的文件夹/, '暂存模式必须禁止直接写用户文件夹');
+      assert.match(staged, /暂存区/, '暂存模式要说清落点');
+    });
+
+    ok('四个整理入口共用同一份指令口径（各写一套必然漂移）', () => {
       const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
       const chat = readFileSync(resolve(srcDir, 'components/chat/chat-panel.tsx'), 'utf8');
-      assert.match(chat, /folderId = "\$\{selectedFolderId\}"/, '整理指令必须把 folderId 写进去');
-      assert.match(chat, /create_folder 必须传 parentId/, '整理指令必须明确要求子分类建在内部');
+      const tree = readFileSync(resolve(srcDir, 'components/sidebar/bookmark-tree.tsx'), 'utf8');
+      const list = readFileSync(resolve(srcDir, 'components/bookmark-list/bookmark-list.tsx'), 'utf8');
+      const slash = readFileSync(resolve(srcDir, 'lib/chat/slash.ts'), 'utf8');
+      assert.match(chat, /buildOrganizePrompt\(/, 'chip 必须走统一口径');
+      assert.match(tree, /buildOrganizePrompt\(/, '右键必须走统一口径');
+      assert.match(list, /buildOrganizePrompt\(/, '列表工具栏也必须走统一口径');
+      assert.match(slash, /buildSlashOrganizePrompt\(/, '斜杠命令也必须走统一口径');
+      assert.match(chat, /staging: organizeStaging/, 'chip 必须按设置分叉');
+      assert.match(tree, /organizeStaging/, '右键必须按设置分叉');
+      assert.match(list, /organizeStaging/, '列表按钮必须按设置分叉');
+      assert.match(slash, /organizeStaging/, '斜杠命令必须按设置分叉');
+      assert.match(chat, /filterSlashCommands\(input, \{ organizeStaging \}\)/, '输入框必须把设置交给斜杠菜单');
     });
 
     ok('后台装配：用同一个文案构造器，并把 focusFolderId 一路交给 runAgentTurn', () => {
@@ -17938,27 +18009,41 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
       assert.match(bg, /focusFolderId \? \{ focusFolderId \}/, '必须把 focusFolderId 交给 runAgentTurn');
     });
 
-    ok('书签树右键「让 MarkAI 整理」的指令同样带 folderId 并要求建在内部', () => {
-      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
-      const tree = readFileSync(resolve(srcDir, 'components/sidebar/bookmark-tree.tsx'), 'utf8');
-      assert.match(tree, /folderId = "\$\{node\?\.id/, '右键整理指令必须带 folderId');
-      assert.match(tree, /在\*\*这个文件夹内部\*\*创建合适的子分类/, '右键整理指令必须写明建在内部');
-    });
+
 
     ok('系统提示必须把「整理不许建到根目录」写成硬规则', () => {
       const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
       const prompts = readFileSync(resolve(srcDir, 'lib/ai/prompts.ts'), 'utf8');
-      assert.match(prompts, /整理某个文件夹时，新子分类必须建在它内部/, '缺少这条硬规则');
+      assert.match(prompts, /整理某个文件夹的新子分类必须建在它内部/, '缺少这条硬规则');
+      // 0.2.171：默认先落暂存区，模型必须知道这件事
+      assert.match(prompts, /整理默认先进暂存区/, '缺少「默认先落暂存区」的规则');
+      assert.match(prompts, /stage_organize/, '必须点名 stage_organize');
+      assert.match(prompts, /不要声称已经改进用户的文件夹/, '必须禁止谎称已落位');
+      assert.match(prompts, /organizeStagingInstruction/, '必须有按设置分叉的运行时策略');
+      assert.match(prompts, /暂存已关闭/, '关掉暂存后要给模型明确的直接落位策略');
+      assert.match(
+        readFileSync(resolve(srcDir, 'lib/ai/agent.ts'), 'utf8'),
+        /organizeStagingInstruction\(config\.organizeStaging !== false\)/,
+        'Agent 必须把设置注入系统提示（否则聊天框里直接说"整理"会绕过设置）',
+      );
       assert.match(prompts, /省略 parentId 会落到\*\*书签栏根目录\*\*/, '必须点明省略 parentId 的后果');
       // create_folder 的参数说明也要跟着改，否则模型只看工具 schema 时还是会省略 parentId
       assert.match(prompts, /整理某个文件夹时必须传该文件夹的 id/, 'create_folder 的 parentId 说明必须写清');
     });
 
-    ok('/整理 斜杠命令也要说清父级（它是静态文本，只能靠上下文）', () => {
+    ok('/整理 斜杠命令两条分支都要说清落点（它只能靠上下文，不能伪造 id）', () => {
       const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
-      const slash = readFileSync(resolve(srcDir, 'lib/chat/slash.ts'), 'utf8');
-      assert.match(slash, /新子分类必须建在这个文件夹\*\*内部\*\*/, '/整理 必须写明建在内部');
-      assert.match(slash, /不要建到书签栏根目录/, '/整理 必须明确禁止建到根目录');
+      const prompt = readFileSync(resolve(srcDir, 'lib/ai/organize-prompt.ts'), 'utf8');
+      assert.match(prompt, /buildSlashOrganizePrompt/, '斜杠命令要有独立构造器');
+      assert.match(prompt, /新子分类必须建在这个文件夹\*\*内部\*\*/, '直接落位必须写明建在内部');
+      assert.match(prompt, /不要建到书签栏根目录/, '必须明确禁止建到根目录');
+      assert.match(prompt, /stage_organize\(\)/, '暂存分支必须点名工具');
+      assert.match(prompt, /不传 folderId/, '暂存分支要用上下文里的文件夹，不伪造 id');
+      assert.equal(
+        filterSlashCommands('/整', { organizeStaging: false })[0]!.prompt.includes('stage_organize'),
+        false,
+        '关掉暂存后，斜杠命令不能还要求先开批次',
+      );
     });
 
     // 清理：把本次造的树删掉，避免影响后面的用例
@@ -17966,6 +18051,226 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
       await chrome.bookmarks.removeTree(n.id).catch(() => {});
     }
     await chrome.bookmarks.removeTree(toolId).catch(() => {});
+  }
+
+  // ── T31: 整理暂存区（先看再落位） ──
+  console.log('\n[staging] 整理暂存区');
+
+  {
+    const {
+      STAGED_KEY,
+      STAGING_TITLE,
+      applyBatch,
+      batchStats,
+      bookmarkBarId,
+      discardBatch,
+      ensureStagingRoot,
+      findStagingRoot,
+      listBatches,
+      listPendingBatches,
+      stageBatch,
+    } = await import('../src/lib/ai/organize-staging');
+
+    const roots = await chrome.bookmarks.getTree();
+    const bar = roots[0]!.children!.find((c) => c.id === '1')!;
+    const target = await chrome.bookmarks.create({ parentId: bar.id, title: '暂存测试' });
+    const b1 = await chrome.bookmarks.create({ parentId: target.id, title: 'A', url: 'https://a.test/' });
+    const b2 = await chrome.bookmarks.create({ parentId: target.id, title: 'B', url: 'https://b.test/' });
+
+    await okA('开批次：在书签栏下建「自动整理/<文件夹名>」，元信息落 storage', async () => {
+      const batch = await stageBatch(target.id);
+      assert.equal(batch.title, '暂存测试');
+      assert.equal(batch.targetParentId, target.id);
+      const root = await ensureStagingRoot();
+      assert.equal(root, await ensureStagingRoot(), '暂存根必须幂等（不许每次新建）');
+      const kids = await chrome.bookmarks.getChildren(root);
+      assert.ok(kids.some((k) => k.id === batch.batchId), '批次节点必须在暂存根下');
+      const saved = storageMap.get(STAGED_KEY) as { batches: { batchId: string }[] } | undefined;
+      assert.ok(saved?.batches.some((x) => x.batchId === batch.batchId), '元信息必须落盘');
+    });
+
+    await okA('同名文件夹整理两次会并进同一批（不堆出「(2)」这种名字）', async () => {
+      const again = await stageBatch(target.id);
+      const batches = await listBatches();
+      const sameTitle = batches.filter((b) => b.title === '暂存测试');
+      assert.equal(sameTitle.length, 1, `同名批次应只有 1 个，实际 ${sameTitle.length}`);
+      assert.equal(again.batchId, sameTitle[0]!.batchId);
+    });
+
+    await okA('空批次不该让顶栏出现「待确认 1」：只有真的有内容才算待确认', async () => {
+      const empty = await listPendingBatches();
+      assert.equal(empty.filter((b) => b.title === '暂存测试').length, 0, '刚开、还没放东西的批次不显示');
+      // 单独开一个目标，避免动到上一用例里那个「暂存测试」批次
+      const pendingTarget = await chrome.bookmarks.create({ parentId: target.id, title: '待确认测试' });
+      const batch = await stageBatch(pendingTarget.id);
+      await chrome.bookmarks.create({ parentId: batch.batchId, title: '有内容' });
+      assert.equal(
+        (await listPendingBatches()).filter((b) => b.batchId === batch.batchId).length,
+        1,
+        '有分类之后才算待确认',
+      );
+      await applyBatch(batch.batchId, pendingTarget.id);
+      await chrome.bookmarks.removeTree(pendingTarget.id).catch(() => {});
+    });
+
+    await okA('暂存期间不动用户的文件夹：书签还在原位，只有暂存区里有新分类', async () => {
+      const batch = (await listBatches()).find((b) => b.title === '暂存测试')!;
+      const cat = await chrome.bookmarks.create({ parentId: batch.batchId, title: '开发' });
+      await chrome.bookmarks.move(b1.id, { parentId: cat.id });
+      const inTarget = await chrome.bookmarks.getChildren(target.id);
+      assert.ok(!inTarget.some((n) => n.id === b1.id), '书签应已离开原文件夹（进暂存区）');
+      const stats = await batchStats(batch.batchId);
+      assert.equal(stats.folders, 1);
+      // 递归数：书签躺在分类里也必须算进来，否则卡片会显示"0 条书签"，用户以为什么都没动
+      assert.equal(stats.bookmarks, 1, '书签在分类里也要计入');
+    });
+
+    await okA('应用：分类搬进目标文件夹，空的批次壳与暂存根一起清掉', async () => {
+      const batch = (await listBatches()).find((b) => b.title === '暂存测试')!;
+      const res = await applyBatch(batch.batchId, target.id);
+      assert.equal(res.folders, 1);
+      // 书签在分类里也要算：toast 上那句"N 条书签已落位"是用户判断"动没动东西"的唯一依据
+      assert.equal(res.bookmarks, 1, '应用结果必须报出真实书签数');
+      const inTarget = await chrome.bookmarks.getChildren(target.id);
+      assert.ok(inTarget.some((n) => !n.url && n.title === '开发'), '分类应出现在目标文件夹里');
+      assert.equal((await listBatches()).length, 0, '应用后不该还留着待确认批次');
+      const leftover = await chrome.bookmarks.get(batch.batchId).catch(() => []);
+      assert.equal(leftover.length, 0, '批次壳应被删除');
+      // 暂存根空了要自己消失，不能给用户留个空文件夹
+      const tree2 = await chrome.bookmarks.getTree();
+      const bar2 = tree2[0]!.children!.find((c) => c.id === '1')!;
+      assert.ok(!bar2.children!.some((c) => c.title === STAGING_TITLE), '空暂存根必须清掉');
+    });
+
+    await okA('放弃：书签回原位、分类丢弃、暂存区清空', async () => {
+      const batch = await stageBatch(target.id);
+      const cat = await chrome.bookmarks.create({ parentId: batch.batchId, title: '待丢弃' });
+      await chrome.bookmarks.move(b2.id, { parentId: cat.id });
+      const res = await discardBatch(batch.batchId);
+      assert.equal(res.returned, 1, '应把 1 条书签搬回原位');
+      const home = await chrome.bookmarks.getChildren(target.id);
+      assert.ok(home.some((n) => n.id === b2.id), '书签必须回到原文件夹');
+      assert.equal((await listBatches()).length, 0);
+    });
+
+    await okA('存放位置可以改：应用到书签栏而不是原文件夹', async () => {
+      const batch = await stageBatch(target.id);
+      const cat = await chrome.bookmarks.create({ parentId: batch.batchId, title: '放吧' });
+      await chrome.bookmarks.create({ parentId: cat.id, title: 'X', url: 'https://x.test/' });
+      const barId = await bookmarkBarId();
+      await applyBatch(batch.batchId, barId);
+      const barKids = await chrome.bookmarks.getChildren(barId);
+      assert.ok(barKids.some((n) => !n.url && n.title === '放吧'), '分类应落到书签栏根');
+    });
+
+    await okA('存放位置可以改：用「其他文件夹」落到任意目录，而不是只能二选一', async () => {
+      const custom = await chrome.bookmarks.create({ parentId: target.id, title: '自定义落点' });
+      const batch = await stageBatch(target.id);
+      const cat = await chrome.bookmarks.create({ parentId: batch.batchId, title: '自定义分类' });
+      await chrome.bookmarks.create({ parentId: cat.id, title: 'Y', url: 'https://y.test/' });
+      await applyBatch(batch.batchId, custom.id);
+      const kids = await chrome.bookmarks.getChildren(custom.id);
+      assert.ok(kids.some((n) => !n.url && n.title === '自定义分类'), '分类应落到任意选择的文件夹');
+      await chrome.bookmarks.removeTree(custom.id).catch(() => {});
+    });
+
+    await okA('不同文件夹同名时不能并进同一批（否则会搬错目标）', async () => {
+      const a = await chrome.bookmarks.create({ parentId: target.id, title: '同名目标' });
+      const b = await chrome.bookmarks.create({ parentId: target.id, title: '同名目标' });
+      const ba = await stageBatch(a.id);
+      const bb = await stageBatch(b.id);
+      assert.notEqual(ba.batchId, bb.batchId, '两个同名但不同的文件夹必须各开一批');
+      assert.equal(ba.targetParentId, a.id);
+      assert.equal(bb.targetParentId, b.id);
+      assert.notEqual(ba.title, bb.title, '两个批次的标题要能区分，不能都叫「同名目标」');
+      await applyBatch(ba.batchId, a.id);
+      await applyBatch(bb.batchId, b.id);
+      await chrome.bookmarks.removeTree(a.id).catch(() => {});
+      await chrome.bookmarks.removeTree(b.id).catch(() => {});
+    });
+
+    await okA('用户自己的同名「自动整理」文件夹不会被接管或清空', async () => {
+      // 清掉当前暂存根与元信息，模拟"用户先建了一个同名文件夹"的全新状态
+      const oldRoot = await ensureStagingRoot();
+      await chrome.bookmarks.removeTree(oldRoot).catch(() => {});
+      await chrome.storage.local.remove(STAGED_KEY);
+      const barId = await bookmarkBarId();
+      const mine = await chrome.bookmarks.create({ parentId: barId, title: '自动整理' });
+      const keep = await chrome.bookmarks.create({
+        parentId: mine.id,
+        title: '我的收藏',
+        url: 'https://mine.test/',
+      });
+      const batch = await stageBatch(target.id);
+      const batchNode = (await chrome.bookmarks.get(batch.batchId))[0]!;
+      assert.notEqual(batchNode.parentId, mine.id, '批次不能塞进用户自己的同名文件夹');
+      assert.ok(
+        (await chrome.bookmarks.getChildren(mine.id)).some((n) => n.id === keep.id),
+        '用户文件夹里的内容必须原样保留',
+      );
+      await applyBatch(batch.batchId, target.id);
+      // 清掉我们新建的根（如果还在）与用户的文件夹
+      const root = await findStagingRoot();
+      if (root && root !== mine.id) await chrome.bookmarks.removeTree(root).catch(() => {});
+      await chrome.bookmarks.removeTree(mine.id).catch(() => {});
+    });
+
+    await okA('应用目标在批次子树里时拒绝（不能把分类搬进它自己）', async () => {
+      const batch = await stageBatch(target.id);
+      const cat = await chrome.bookmarks.create({ parentId: batch.batchId, title: '自己' });
+      await assert.rejects(
+        () => applyBatch(batch.batchId, cat.id),
+        /循环嵌套/,
+        '搬进自己的子文件夹必须拒绝',
+      );
+      await discardBatch(batch.batchId);
+    });
+
+    await okA('设置里关掉暂存后，stage_organize 工具必须拒绝而不是偷偷开批次', async () => {
+      await chrome.storage.local.set({ 'markai.config': { organizeStaging: false } });
+      await assert.rejects(
+        () => executeTool('stage_organize', JSON.stringify({ folderId: target.id })),
+        /暂存区已在设置中关闭/,
+        '关掉设置后工具仍会开批次，说明设置只是 UI 开关',
+      );
+      await chrome.storage.local.set({ 'markai.config': { organizeStaging: true } });
+    });
+
+    await okA('批次节点被用户手动删掉后，待确认列表自己清干净（不留幽灵卡片）', async () => {
+      const batch = await stageBatch(target.id);
+      await chrome.bookmarks.create({ parentId: batch.batchId, title: '会被删' });
+      // 模拟用户直接在树里删掉暂存文件夹
+      await chrome.bookmarks.removeTree(batch.batchId).catch(() => {});
+      const alive = await listBatches();
+      assert.equal(alive.length, 0, '节点没了，元信息必须一起清掉');
+    });
+
+    ok('卡片必须给三条出路，且「放弃」要二次确认', () => {
+      const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
+      const card = readFileSync(resolve(srcDir, 'components/organize/staged-batches.tsx'), 'utf8');
+      assert.match(card, /staged-apply-origin/, '缺少「应用到原文件夹」');
+      assert.match(card, /staged-apply-bar/, '缺少「放到书签栏」');
+      assert.match(card, /staged-apply-picker/, '缺少「选择其他文件夹」');
+      assert.match(card, /staged-folder-option/, '选择器没有真正的文件夹选项');
+      assert.match(card, /folderOptions/, '选择器必须来自当前真实书签树');
+      assert.match(card, /staged-discard/, '缺少「放弃」');
+      assert.match(card, /staged-discard-confirm/, '放弃必须二次确认（书签会被搬走，分类会丢）');
+      // 卡片挂在整理记录里：用户是"对着树看一眼"再决定的，不该用弹窗催他
+      const dialog = readFileSync(resolve(srcDir, 'components/organize/organize-log-dialog.tsx'), 'utf8');
+      assert.match(dialog, /<StagedBatchesCard/, '整理记录面板必须挂上这张卡片');
+    });
+
+    await okA('设置项存在且默认开启（默认就该"先看再落位"）', async () => {
+      const { resolveConfig } = await import('../src/lib/providers');
+      assert.equal(resolveConfig({}).organizeStaging, true, '默认必须开启');
+      assert.equal(resolveConfig({ organizeStaging: false }).organizeStaging, false, '关掉要能生效');
+    });
+
+    // 清理
+    for (const n of (await chrome.bookmarks.getChildren(target.id)).slice()) {
+      await chrome.bookmarks.removeTree(n.id).catch(() => {});
+    }
+    await chrome.bookmarks.removeTree(target.id).catch(() => {});
   }
 
   console.log(`\n全部通过：${passed} 项 ✔`);

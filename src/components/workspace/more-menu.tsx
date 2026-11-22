@@ -19,6 +19,7 @@ import { cn } from '@/lib/utils';
 export function MoreMenu({
   pendingCount,
   organizeAlert,
+  stagedCount,
   chatOpen,
   mode,
   onToggleChat,
@@ -33,6 +34,8 @@ export function MoreMenu({
   pendingCount: number;
   /** 整理记录里有需要留意的失败 */
   organizeAlert: boolean;
+  /** 整理记录里有待确认的暂存方案 */
+  stagedCount: number;
   chatOpen: boolean;
   mode: 'compact' | 'full';
   onToggleChat: () => void;
@@ -101,7 +104,7 @@ export function MoreMenu({
   }, [open]);
 
   /** 有需要主人看一眼的东西：触发按钮上点一个红点 */
-  const hasAlert = pendingCount > 0 || organizeAlert;
+  const hasAlert = pendingCount > 0 || organizeAlert || stagedCount > 0;
 
   const item = (
     icon: React.ComponentType<{ className?: string }>,
@@ -170,7 +173,7 @@ export function MoreMenu({
         >
           {item(BookmarkPlus, '收藏当前页面', onSaveCurrentTab)}
           {item(Trash2, '待删除清单', onDeletions, { badge: pendingCount, danger: pendingCount > 0 })}
-          {item(Wand2, '整理记录', onOrganize, { active: organizeAlert })}
+          {item(Wand2, '整理记录', onOrganize, { badge: stagedCount, active: organizeAlert || stagedCount > 0 })}
           {/* 自动整理的状态与开关：它一直在跑，得让人看得见 */}
           <button
             type="button"

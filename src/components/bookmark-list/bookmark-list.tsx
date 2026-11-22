@@ -1,6 +1,8 @@
 import { AlertCircle, RefreshCw, Loader2, ChevronDown, Clock, ArrowDownUp, BookmarkPlus, Copy, ExternalLink, Folder, FolderInput, FolderOpen, FolderPlus, LayoutDashboard, LayoutList, Link2, LocateFixed, MoreHorizontal, Search, Settings2, Sparkles, Tag, Trash2, X } from 'lucide-react';
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type DragEvent, type KeyboardEvent, type MouseEvent, type ReactNode } from 'react';
 import { useAIStore } from '@/stores/aiStore';
+import { useConfigStore } from '@/stores/configStore';
+import { buildOrganizePrompt } from '@/lib/ai/organize-prompt';
 import { useBookmarkStore, copyNodeDeep, findNode, buildFolderChildCounts, resolveTitlePath, type TreeContextMenu } from '@/stores/bookmarkStore';
 import { useUIStore } from '@/stores/uiStore';
 import { copyText } from '@/lib/clipboard';
@@ -585,7 +587,11 @@ export function BookmarkList({ className, compact = false }: { className?: strin
     }
     const folderTitle = resolveTitlePath(useBookmarkStore.getState().roots, selectedFolderId);
     void send(
-      `请整理书签文件夹「${folderTitle}」：浏览其全部书签，创建合适的子分类，并把书签归类移动到位。`,
+      buildOrganizePrompt({
+        folderTitle,
+        folderId: selectedFolderId,
+        staging: useConfigStore.getState().config.organizeStaging ?? true,
+      }),
       { folderId: selectedFolderId },
     );
   };
@@ -596,10 +602,13 @@ export function BookmarkList({ className, compact = false }: { className?: strin
     const list = shown
       .map((n, i) => `${i + 1}. ${n.title || n.url}${n.url ? ` (${n.url})` : ''} [id: ${n.id}]`)
       .join('\n');
+    const staging = useConfigStore.getState().config.organizeStaging ?? true;
     void send(
       `请整理我选中的 ${selectedNodes.length} 个书签${
         omitted > 0 ? `（以下仅列出前 30 个，其余 ${omitted} 个请通过 search_bookmarks 补齐）` : ''
-      }：\n${list}\n创建合适的分类并归类移动（若不需要新建文件夹可直接移动），完成后简要汇报。`,
+      }：\n${list}\n创建合适的分类并归类移动（若不需要新建文件夹可直接移动），完成后简要汇报。${
+        staging ? '\n注意：这些是零散选中的书签，不要调用 stage_organize（暂存区只用于整理单个文件夹），直接归位即可。' : ''
+      }`,
     );
     clearSelection();
   };

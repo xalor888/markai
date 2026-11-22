@@ -270,6 +270,8 @@ export function resolveConfig(saved?: Partial<AIConfig> | null): AIConfig {
     // ⚠️ 这里是**白名单**：新增的配置字段必须同时加进来，否则 UI 存进去了、
     // 后台读出来却被丢掉——设置看起来生效了，实际仍是默认值（T81 就是踩了这个坑）。
     autoOrganizeAi: saved?.autoOrganizeAi ?? true,
+    // 整理先落暂存区：默认开（先看再落位）；关掉才恢复「直接写进用户文件夹」的老行为
+    organizeStaging: saved?.organizeStaging ?? true,
     // 自定义请求头：原样透传（解析与校验在 request-headers.ts，读的时候不拦）
     customHeaders: saved?.customHeaders ?? '',
     // 思考强度：非法/缺省一律回落 auto（宁可跟随模型，也不发一个上游不认识的档位）

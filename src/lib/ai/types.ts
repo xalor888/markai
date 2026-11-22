@@ -149,6 +149,14 @@ export interface AIConfig {
    */
   autoOrganizeAi?: boolean;
   /**
+   * 整理先落暂存区（默认开启，见 `lib/ai/organize-staging.ts`）。
+   *
+   * 开着时，Agent 的新分类先建在书签栏下的「自动整理」里，用户在「整理记录」里
+   * 点「应用」才搬进目标文件夹（也可以直接放到书签栏，或者放弃让书签回原位）。
+   * 关掉则恢复"直接写进用户文件夹"的老行为——适合已经认可它分类习惯的人。
+   */
+  organizeStaging?: boolean;
+  /**
    * 自定义请求头（多行 `Name: Value`）。
    *
    * 有些 OpenAI 兼容网关在标准协议之外要求额外请求头，缺了直接 400——

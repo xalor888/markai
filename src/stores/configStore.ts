@@ -26,6 +26,14 @@ export const DEFAULT_CONFIG: AIConfig = {
   autoOrganizeNew: true,
   // 自动整理允许调用 AI（关掉则只用本地规则，见 auto-organize.ts）
   autoOrganizeAi: true,
+  /**
+   * 整理先落暂存区（默认开启）。
+   *
+   * 开着：Agent 的新分类先进「自动整理」暂存区，用户在整理记录里点一下才落位——
+   * 整理结果需要"看一眼"才敢用，这是整理类操作唯一合理的默认。
+   * 关掉：直接写进用户的文件夹（老行为），适合已经信任它分类习惯的人。
+   */
+  organizeStaging: true,
   // 自定义请求头默认空（有些网关要求额外头，见 lib/ai/request-headers.ts）
   customHeaders: '',
   // 思考强度：默认 auto（跟随模型；具体档位由 models.dev 目录给出的能力决定）

@@ -9,6 +9,8 @@ import { buildDuplicateGroups, normalizeUrl, pickDuplicateKeeper, type DupeNode 
 import { ensureOrderCheckpoint } from '@/lib/undo/recorder';
 import { addMemoryItem, deleteMemoryItem, getMemories, searchMemories } from './memory';
 import { registrableDomain } from '@/lib/bookmarks/domain';
+import { stageBatch } from '@/lib/ai/organize-staging';
+import { resolveConfig } from '@/lib/providers';
 
 /** 工具执行结果 */
 export interface ToolOutput {
@@ -685,6 +687,55 @@ async function classifyUrls(args: unknown): Promise<ToolOutput> {
       byType,
       note: 'root=主页面，page=栏目页，sub=子页面，deep=深层子页面（清理时优先考虑）。',
       items,
+    }),
+  };
+}
+
+const stageOrganizeSchema = z.object({
+  /** 要整理的文件夹；省略时用本轮聚焦文件夹 */
+  folderId: z.string().optional(),
+});
+
+/**
+ * 开一个整理暂存批次。
+ *
+ * 为什么要有这个工具：用户默认希望"先看看再落位"（见设置项 organizeStaging）。
+ * 模型调用它拿到 batchId 后，把新分类**建在 batchId 下**、把书签**移到 batchId 里**，
+ * 用户会在「整理记录」里看到这批改动并决定：应用到原文件夹 / 放到书签栏 / 放弃。
+ *
+ * 不在这里直接做整理：分类决策是模型的活，工具只提供"安全的落点"。
+ */
+async function stageOrganize(
+  args: unknown,
+  _onProgress?: (t: string) => void,
+  _s?: AbortSignal,
+  ctx?: ToolContext,
+): Promise<ToolOutput> {
+  const { folderId } = stageOrganizeSchema.parse(args);
+  // 设置里关掉了暂存，就不能靠系统提示"默认"绕过用户的选择：这里硬拒绝，
+  // 模型会改走直接落位，而不是一边说关了、一边偷偷开批次。
+  const saved = (await chrome.storage.local.get(CONFIG_STORAGE_KEY).catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
+  const config = resolveConfig(saved[CONFIG_STORAGE_KEY] as Parameters<typeof resolveConfig>[0]);
+  if (config.organizeStaging === false) {
+    throw new Error('整理暂存区已在设置中关闭；请直接在该文件夹内部创建子分类并移动书签，不要开暂存批次。');
+  }
+  const targetId = folderId ?? ctx?.focusFolderId;
+  if (!targetId) {
+    throw new Error('需要指定要整理的文件夹（folderId），或先在界面上选中一个文件夹');
+  }
+  const batch = await stageBatch(targetId);
+  return {
+    result: JSON.stringify({
+      batchId: batch.batchId,
+      title: batch.title,
+      originFolderId: batch.targetParentId,
+      usage:
+        `接下来把新分类建在 batchId（${batch.batchId}）下：create_folder 传 parentId="${batch.batchId}"，` +
+        `move_bookmarks 的目标也是它。整理完成后如实告诉用户"已放进自动整理暂存区，等待确认"，` +
+        `不要声称已经改进用户的文件夹——落位是用户在界面上点的（原文件夹 / 书签栏 / 任意文件夹）。`,
     }),
   };
 }
@@ -2255,6 +2306,7 @@ const TOOL_MAP: Record<string, ToolEntry> = {
   check_urls: { name: 'check_urls', handler: checkUrls },
   check_urls_bulk: { name: 'check_urls_bulk', handler: checkUrlsBulk },
   classify_urls: { name: 'classify_urls', handler: classifyUrls },
+  stage_organize: { name: 'stage_organize', handler: stageOrganize },
   auto_categorize: { name: 'auto_categorize', handler: autoCategorize },
   cleanup_sweep: { name: 'cleanup_sweep', handler: cleanupSweep },
   stats: { name: 'stats', handler: stats },
@@ -2402,6 +2454,7 @@ export const MUTATING_TOOLS = new Set([
   'merge_folders',
   'propose_deletions',
   'delete_all_bookmarks',
+  'stage_organize',
   'auto_categorize',
   'cleanup_sweep',
 ]);
@@ -2431,6 +2484,7 @@ export const TOOL_META: Record<string, { label: string }> = {
   check_urls: { label: '检测链接' },
   check_urls_bulk: { label: '批量检测' },
   classify_urls: { label: '分类 URL' },
+  stage_organize: { label: '开整理暂存区' },
   auto_categorize: { label: '自动分类' },
   stats: { label: '统计' },
   find_duplicates: { label: '查找重复' },

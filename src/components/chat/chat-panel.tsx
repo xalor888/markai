@@ -41,6 +41,7 @@ import { Button } from '@/components/ui/button';
 import { Dialog } from '@/components/ui/dialog';
 import { Textarea } from '@/components/ui/textarea';
 import { flattenForFacts, petFacts } from '@/lib/pet/facts';
+import { buildOrganizePrompt } from '@/lib/ai/organize-prompt';
 import { buildSuggestion, type Suggestion } from '@/lib/pet/suggest';
 import {
   addDecline,
@@ -180,6 +181,8 @@ export function ChatPanel({
 
   const selectedFolderId = useBookmarkStore((s) => s.selectedFolderId);
   const config = useConfigStore((s) => s.config);
+  /** 整理先落暂存区（默认开）：决定 chip 发的是"预演"指令还是"直接落位"指令 */
+  const organizeStaging = config.organizeStaging ?? true;
   // 已配置判断与聊天实际一致：resolveConfig 回落预设（原始存储里 baseUrl 可能为空串），
   // 需要 Key 的服务商没填 Key 视为未配置
   const chatConfigured = useMemo(() => {
@@ -280,7 +283,10 @@ export function ChatPanel({
   };
 
   /** 斜杠命令：只填入 prompt，不自动发送 */
-  const slashMatches = useMemo(() => filterSlashCommands(input), [input]);
+  const slashMatches = useMemo(
+    () => filterSlashCommands(input, { organizeStaging }),
+    [input, organizeStaging],
+  );
   const [slashIndex, setSlashIndex] = useState(0);
   useEffect(() => {
     setSlashIndex(0);
@@ -361,8 +367,14 @@ export function ChatPanel({
        * 用户看到的就是"整理完，书签栏下面凭空多了一堆分类文件夹"。
        * 现在把 id 与"必须建在它内部"一起写进去，并明确禁止建到根目录。
        */
+      // 指令由 lib/ai/organize-prompt 统一生成：三个入口共用一份口径，
+      // 并且按「是否先落暂存区」分叉（用户默认希望先看一眼再落位）
       prompt: selectedFolderId
-        ? `请整理书签文件夹「${folderTitle}」（folderId = "${selectedFolderId}"）：浏览其全部书签，在**这个文件夹内部**创建合适的子分类（create_folder 必须传 parentId="${selectedFolderId}"），并把书签归类移动到位。不要把子分类建到书签栏或其他根目录下。`
+        ? buildOrganizePrompt({
+            folderTitle,
+            folderId: selectedFolderId,
+            staging: organizeStaging,
+          })
         : `请整理书签文件夹「${folderTitle}」：浏览其全部书签，在**这个文件夹内部**创建合适的子分类，并把书签归类移动到位。`,
     },
     {

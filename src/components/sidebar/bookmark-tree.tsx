@@ -49,6 +49,8 @@ import { pushToast } from '@/lib/toast';
 import { openUrl, openUrls, openUrlsInGroup } from '@/lib/open-url';
 import { moveManyWithToast } from '@/lib/bookmarks/bulk';
 import { cn } from '@/lib/utils';
+import { buildOrganizePrompt } from '@/lib/ai/organize-prompt';
+import { useConfigStore } from '@/stores/configStore';
 import { Favicon } from '@/components/common/favicon';
 import { Separator } from '@/components/ui/separator';
 import { ORGANIZE_LABEL } from '@/lib/ui/labels';
@@ -1174,11 +1176,14 @@ export function ContextMenuOverlay() {
             // 大文件夹先说明代价：Agent 要逐条浏览，几百条会跑很久也烧额度。
             // 不说清楚的话，用户点完以为卡住了。
             const n = countFolderContents(node);
+            // 指令走统一口径（lib/ai/organize-prompt）：按设置决定"先落暂存区"还是"直接落位"
             const run = () =>
               sendChat(
-                `请整理书签文件夹「${node?.title || '(未命名)'}」（folderId = "${node?.id ?? ''}"）：` +
-                  `浏览其全部书签，在**这个文件夹内部**创建合适的子分类（create_folder 必须传 parentId="${node?.id ?? ''}"）并归类移动；` +
-                  `不要把子分类建到书签栏根目录。`,
+                buildOrganizePrompt({
+                  folderTitle: node?.title ?? '',
+                  folderId: node?.id ?? '',
+                  staging: useConfigStore.getState().config.organizeStaging ?? true,
+                }),
                 node?.id,
               );
             if (n > 100) {

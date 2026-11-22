@@ -14,6 +14,7 @@ import {
   ArrowRight,
   BookMarked,
   BookmarkPlus,
+  FolderSearch,
   FolderTree,
   Merge,
   RefreshCw,
@@ -23,10 +24,11 @@ import {
   Wand2,
 } from 'lucide-react';
 import { useBookmarkStore } from '@/stores/bookmarkStore';
+import { listPendingBatches, STAGED_KEY } from '@/lib/ai/organize-staging';
 import { useConfigStore } from '@/stores/configStore';
 import { useAIStore } from '@/stores/aiStore';
 import { analyzeLibrary, type LibraryInsights } from '@/lib/bookmarks/insights';
-import { readOrganizeLog, type OrganizeLogEntry } from '@/lib/ai/organize-log';
+import { filterDeletedOrganizeEntries, readOrganizeLog, type OrganizeLogEntry } from '@/lib/ai/organize-log';
 import { formatRelativeTime } from '@/lib/format';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -110,6 +112,8 @@ export function OverviewPanel({
   onShowToday: () => void;
 }) {
   const roots = useBookmarkStore((s) => s.roots);
+  /** 树还在加载时不要过滤日志：空 roots 会被误当成"书签都删了"，导致刚打开就显示空记录 */
+  const treeLoading = useBookmarkStore((s) => s.loading);
   const addressName = useConfigStore((s) => s.config.addressName?.trim() ?? '');
   const [insightsOpen, setInsightsOpen] = useState(false);
   const [log, setLog] = useState<OrganizeLogEntry[] | null>(null);
@@ -117,8 +121,19 @@ export function OverviewPanel({
   /** 本周回顾：每周第一次打开概览时出现一次 */
   const [weeklyReview, setWeeklyReview] = useState<WeeklyReview | null>(null);
   const [weeklyDismissed, setWeeklyDismissed] = useState(false);
+  /** 待确认的整理方案数：概览是用户最常打开的页面，别让"还有东西没落位"只藏在菜单里 */
+  const [stagedCount, setStagedCount] = useState(0);
 
   const insights: LibraryInsights = useMemo(() => analyzeLibrary(roots), [roots]);
+  /**
+   * 「最近整理」只展示仍然存在的书签：
+   * 整理记录本身是历史，但概览回答的是"我的库现在怎么样"。已删书签留在里面，
+   * 用户会以为它还在（"我明明删了"）。树加载完成后再过滤，避免首帧空树造成误判。
+   */
+  const visibleLog = useMemo(
+    () => (log ? (treeLoading ? log : filterDeletedOrganizeEntries(log, roots)) : null),
+    [log, roots, treeLoading],
+  );
   const greeting = greetingOf();
   const headline = addressName ? `${greeting}，${addressName}` : greeting;
   const today = useMemo(
@@ -144,6 +159,36 @@ export function OverviewPanel({
     // roots 变化意味着书签刚被整理过，记录也应该跟着刷新
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [roots]);
+
+  // 待确认方案：storage 里应用/放弃会清元信息，树里手动删批次会让节点消失
+  useEffect(() => {
+    let alive = true;
+    const refresh = () => {
+      void listPendingBatches()
+        .then((batches) => {
+          if (alive) setStagedCount(batches.length);
+        })
+        .catch(() => {
+          if (alive) setStagedCount(0);
+        });
+    };
+    refresh();
+    const onChanged = (
+      changes: { [key: string]: chrome.storage.StorageChange },
+      area: chrome.storage.AreaName,
+    ) => {
+      if (area === 'local' && changes[STAGED_KEY]) refresh();
+    };
+    chrome.storage.onChanged.addListener(onChanged);
+    const unsubscribe = useBookmarkStore.subscribe((state, prev) => {
+      if (state.roots !== prev.roots) refresh();
+    });
+    return () => {
+      alive = false;
+      chrome.storage.onChanged.removeListener(onChanged);
+      unsubscribe();
+    };
+  }, []);
 
   // 本周回顾：读到日志后计算；本周已展示过就跳过（不重复打扰）
   useEffect(() => {
@@ -205,6 +250,15 @@ export function OverviewPanel({
     action: string;
     run: () => void;
   }> = [];
+  if (stagedCount > 0) {
+    suggestions.push({
+      icon: FolderSearch,
+      title: `${stagedCount} 份整理方案等你确认`,
+      body: '分类已经放进「自动整理」暂存区，确认后才会搬进你的文件夹；也可以换一个落点。',
+      action: '去确认',
+      run: () => document.dispatchEvent(new CustomEvent('markai:open-organize-log')),
+    });
+  }
   if (insights.duplicateGroups > 0) {
     suggestions.push({
       icon: Merge,
@@ -446,7 +500,7 @@ export function OverviewPanel({
               <h3 className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
                 <Wand2 className="h-3.5 w-3.5 text-accent" />
                 最近整理
-                {log && log.length > 0 && <Badge variant="outline">{log.length} 条</Badge>}
+                {visibleLog && visibleLog.length > 0 && <Badge variant="outline">{visibleLog.length} 条</Badge>}
               </h3>
               <button
                 type="button"
@@ -462,9 +516,9 @@ export function OverviewPanel({
               <p className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-2xs text-muted-foreground">
                 读取整理记录失败：{logError}
               </p>
-            ) : !log ? (
+            ) : !visibleLog ? (
               <p className="px-1 py-3 text-2xs text-muted-foreground">读取中…</p>
-            ) : log.length === 0 ? (
+            ) : visibleLog.length === 0 ? (
               <div className="flex flex-col items-center gap-1 rounded-lg border border-dashed border-border px-3 py-6 text-center">
                 <BookmarkPlus className="h-4 w-4 text-muted-foreground/60" />
                 <p className="text-xs text-muted-foreground">还没有整理记录</p>
@@ -474,7 +528,7 @@ export function OverviewPanel({
               </div>
             ) : (
               <ul className="divide-y divide-border/60">
-                {log.slice(0, 5).map((entry) => (
+                {visibleLog.slice(0, 5).map((entry) => (
                   <li key={entry.id} className="flex items-center gap-2 py-1.5">
                     <span
                       className={cn(

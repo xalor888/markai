@@ -3,7 +3,7 @@
 import { chatCompletion, ChatError, type ApiMessage, type ApiToolCall } from './client';
 import { formatMemoriesForPrompt, getMemories, type MemoryItem } from './memory';
 import { personalInstruction } from '@/lib/pet/personal';
-import { buildTimeContext, PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT, TOOL_DEFINITIONS } from './prompts';
+import { buildTimeContext, organizeStagingInstruction, PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT, TOOL_DEFINITIONS } from './prompts';
 import { executeTool, TOOL_META, type ToolOutput } from './tools';
 import { applyPlan, buildPlan, classifyTool, stepCountOf, type PlannedStep } from './turn-plan';
 // 只读/写/声明/闸门的分类**只有 turn-plan 一份**：历史上同一份名单抄成两份，
@@ -338,7 +338,12 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
    * 时间上下文每次请求都重新生成（不是模块级常量）：
    * 侧边栏可能开着一整天，跨过午夜后"今天"必须跟着变。
    */
-  const systemContent = baseSystem + buildTimeContext() + memoryPrompt + personalInstruction(config);
+  const systemContent =
+    baseSystem +
+    buildTimeContext() +
+    memoryPrompt +
+    personalInstruction(config) +
+    organizeStagingInstruction(config.organizeStaging !== false);
   const apiMessages: ApiMessage[] = [{ role: 'system', content: systemContent }];
   for (const m of apiHistory) {
     /*

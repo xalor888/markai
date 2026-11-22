@@ -619,6 +619,98 @@ async function run() {
     })()`);
   }
 
+  /* ── 7.2 整理暂存区：卡片、任意落点、真把分类搬过去 ──
+   *
+   * 这条走真实 UI：种一个真实暂存批次（书签结构 + 元信息），
+   * 打开整理记录 → 点「其他文件夹」→ 选一个目标 → 验证分类与书签真的落位。
+   */
+  {
+    const seeded = await ev(`(async () => {
+      const bar = (await chrome.bookmarks.getTree())[0].children.find(c => c.id === '1');
+      const target = await chrome.bookmarks.create({ parentId: bar.id, title: 'E2E-暂存目标' });
+      const b1 = await chrome.bookmarks.create({ parentId: target.id, title: 'E2E 暂存A', url: 'https://staging-a.test/' });
+      const b2 = await chrome.bookmarks.create({ parentId: target.id, title: 'E2E 暂存B', url: 'https://staging-b.test/' });
+      const root = await chrome.bookmarks.create({ parentId: bar.id, title: '自动整理' });
+      const batch = await chrome.bookmarks.create({ parentId: root.id, title: 'E2E-暂存目标' });
+      const cat = await chrome.bookmarks.create({ parentId: batch.id, title: 'E2E 分类' });
+      await chrome.bookmarks.move(b1.id, { parentId: cat.id });
+      const dest = await chrome.bookmarks.create({ parentId: bar.id, title: 'E2E-其他落点' });
+      await chrome.storage.local.set({ 'markai.organize.staged': {
+        batches: [{ batchId: batch.id, title: 'E2E-暂存目标', targetParentId: target.id, targetTitle: 'E2E-暂存目标', createdAt: Date.now() }],
+        rootId: root.id,
+      } });
+      return { target: target.id, batch: batch.id, cat: cat.id, dest: dest.id, b1: b1.id, b2: b2.id, root: root.id };
+    })()`);
+
+    // 等书签树监听器的 300ms 防抖走完：选择器读的是 UI store 里的真实树
+    await new Promise((res) => setTimeout(res, 600));
+    const open = await clickMenu('整理记录');
+    const cardReady = await waitFor(
+      () => ev(`!!document.querySelector('[data-testid="staged-batch"]')`),
+      4000,
+    );
+    check('7.2 待确认的整理方案会出现在整理记录里', open.ok && cardReady === true, JSON.stringify({ open, cardReady }));
+
+    const cardText = await ev(`document.querySelector('[data-testid="staged-batch"]')?.innerText || ''`);
+    check('7.2 卡片说清是哪个文件夹、已有多少内容', cardText.includes('E2E-暂存目标') && cardText.includes('1 个分类'), cardText.slice(0, 100));
+
+    await ev(`document.querySelector('[data-testid="staged-apply-picker"]')?.click(), true`);
+    const pickerReady = await waitFor(
+      () => ev(`!!document.querySelector('[data-testid="staged-folder-picker"]')`),
+      4000,
+    );
+    check('7.2 点「其他文件夹」会展开可搜索的落点选择器', pickerReady === true);
+
+    const optionReady = await waitFor(
+      () =>
+        ev(`(() => {
+          const picker = document.querySelector('[data-testid="staged-folder-picker"]');
+          if (!picker) return false;
+          return [...picker.querySelectorAll('[data-testid="staged-folder-option"]')]
+            .some(b => (b.textContent || '').includes('E2E-其他落点'));
+        })()`),
+      5000,
+    );
+    check('7.2 选择器里出现种子目标文件夹', optionReady === true);
+
+    const picked = await ev(`(async () => {
+      const picker = document.querySelector('[data-testid="staged-folder-picker"]');
+      if (!picker) return { ok: false };
+      const options = [...picker.querySelectorAll('[data-testid="staged-folder-option"]')];
+      const hit = options.find(b => (b.textContent || '').includes('E2E-其他落点'));
+      if (!hit) return { ok: false, count: options.length };
+      hit.click();
+      return { ok: true, count: options.length };
+    })()`);
+    check('7.2 落点选择器列出真实文件夹，能选中目标', picked.ok === true, JSON.stringify(picked));
+
+    const landed = await waitFor(
+      () => ev(`(async () => {
+        if (document.querySelector('[data-testid="staged-batch"]')) return false;
+        const cat = (await chrome.bookmarks.getChildren(${JSON.stringify(seeded.dest)})).find(n => !n.url && n.title === 'E2E 分类');
+        if (!cat) return false;
+        const inside = await chrome.bookmarks.getChildren(cat.id);
+        return inside.some(n => n.url === 'https://staging-a.test/');
+      })()`),
+      5000,
+    );
+    check('7.2 应用后分类与书签真的搬到了所选文件夹', landed === true);
+
+    const stored = await ev(`(async () => (await chrome.storage.local.get('markai.organize.staged'))['markai.organize.staged'] || null)()`);
+    check('7.2 应用后待确认元信息被清掉', !stored || (stored.batches || []).length === 0, JSON.stringify(stored));
+
+    // 清理：这次的暂存结构、目标、落点都要删掉，避免污染后续用例
+    await ev(`(async () => {
+      for (const id of [${JSON.stringify(seeded.target)}, ${JSON.stringify(seeded.dest)}, ${JSON.stringify(seeded.root)}]) {
+        await chrome.bookmarks.removeTree(id).catch(() => {});
+      }
+      await chrome.storage.local.remove('markai.organize.staged');
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      await new Promise(r => setTimeout(r, 300));
+      return true;
+    })()`);
+  }
+
   /* ══════════ 8. ⌘K 命令面板 ══════════ */
   console.log('\n[8] ⌘K 命令面板');
   {

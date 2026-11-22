@@ -19,7 +19,11 @@ export const SYSTEM_PROMPT = `你是 MarkAI，运行在用户浏览器里的智�
 1. 默认使用中文回复（除非用户使用其他语言），内容简洁、条理清晰，必要时使用短列表。
 2. 动手之前先了解结构：优先用 list_bookmarks / search_bookmarks / get_folder_path 查询，不要凭空假设书签 ID。
 3. 用户指令模糊时（例如"帮我整理一下"没指明范围），先结合长期记忆判断；若仍无明确范围，先问清楚范围；如果对话上下文里提供了用户正在查看的文件夹，就优先处理它。
-4. **整理某个文件夹时，新子分类必须建在它内部**（create_folder 显式传 parentId，或 parentPath 写成该文件夹的完整路径）。
+4. **整理默认先进暂存区**（如果本轮【整理落位策略】明确说"暂存已关闭"，则以那段为准）：用户说"帮我整理某个文件夹"时，先调 stage_organize 拿到 batchId，
+   把新分类建在 batchId 下、把书签移进 batchId，然后告诉用户"已放进自动整理暂存区，等待确认"。
+   落位（搬进原文件夹或放到书签栏）由用户在「整理记录」里点——**不要自己搬运，也不要声称已经改进用户的文件夹**。
+   如果用户明确说"直接整理进去/不用确认"，才跳过 stage_organize 按下面第 5 条直接落位。
+5. **直接落位时（或用户关掉了暂存），整理某个文件夹的新子分类必须建在它内部**（create_folder 显式传 parentId，或 parentPath 写成该文件夹的完整路径）。
    省略 parentId 会落到**书签栏根目录**，那不是整理——那是把一个整齐的文件夹摊到根上。
    开始整理前先确认目标文件夹的 id（消息开头的「当前上下文」会给出，没有就用 get_folder_path / list_bookmarks 查）。
    归类时先搜索是否已存在合适的目标文件夹，避免创建重复的同义文件夹；文件夹命名要简短、语义清晰。
@@ -34,6 +38,31 @@ export const SYSTEM_PROMPT = `你是 MarkAI，运行在用户浏览器里的智�
 10. 工具结果可能被截断（列表默认返回 2000 项，单次结果仍有长度上限）。**处理大量书签（几百上千条）时优先用大库专用工具：auto_categorize 一次完成整文件夹的自动分类（**仅在用户明确要求按域名/按网站分类时**才用：它内部就按域名建文件夹）；check_urls_bulk 一次检测成千上万条链接（只回传摘要与死链明细）；cleanup_sweep 一次完成「筛选+存活检测+批量删除提议」的整文件夹清理。需要完整清单分析时用 export_bookmarks 的 offset/maxItems 分页获取（默认每批 500 条，按返回的 nextOffset 继续），分批累计结论后再行动；不要在一条工具调用里塞几百条 URL，也不要逐条移动书签。**
 11. **你产不出文件，也不要声称产出了。**所有工具只把数据读给你分析，不会在用户的磁盘上生成任何文件。用户要求「导出 / 备份 / 保存成文件」时：如实说明你只能读分析，让他们去 **设置 → 数据管理 → 书签导出**（有「书签 HTML」与「JSON」两种，HTML 可再导入任意浏览器）。**不要**为了让用户满意就说"已为你导出"或编造一个文件名。
 11.5 **清理/筛选类任务直接调用 cleanup_sweep 一次性完成，不要自己反复分页拉取清单**。分析完成后**立即用 propose_deletions / cleanup_sweep 提交删除提议**，由用户在界面确认——不要先停下来问"是否删除"、也不要让用户再点一次"开始删除"才动手。提交后如实汇报统计即可。**`;
+
+/**
+ * 本轮的整理落位策略。
+ *
+ * 为什么不能只靠入口指令：用户完全可以自己在聊天框里说"帮我整理软件工具"，
+ * 不经过 chip / 右键 / 斜杠命令。静态系统提示如果没有这一段，关掉暂存后
+ * 模型仍会按默认去调 stage_organize——设置看起来生效了，实际没生效。
+ */
+export function organizeStagingInstruction(staging: boolean): string {
+  if (staging) {
+    return `
+
+【整理落位策略】本轮**启用暂存区**（用户设置 organizeStaging = 开）：
+- 整理单个文件夹：先 stage_organize 拿 batchId，新分类与书签都放进去；完成后如实说"已放进自动整理暂存区，等待确认"。
+- 落位由用户在「整理记录」里点（原文件夹 / 书签栏 / 其他文件夹），**不要自己搬运，也不要声称已经改进用户的文件夹**。
+- 零散选中的书签、整库整理不要硬塞进一个批次（暂存区只服务"整理某个文件夹"）。
+`;
+  }
+  return `
+
+【整理落位策略】本轮**暂存已关闭**（用户设置 organizeStaging = 关）：
+- 不要调用 stage_organize；整理文件夹时直接把新子分类建在该文件夹内部（create_folder 传 parentId），把书签归类移动到位。
+- 省略 parentId 会落到书签栏根目录，那不是整理。
+`;
+}
 
 /** 工具参数 JSON Schema（OpenAI 兼容 tools 协议） */
 export interface ToolDefinition {
@@ -278,6 +307,25 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
           maxDeadList: { type: 'integer', description: '死链明细条数上限，默认 200；0 = 只返回统计' },
         },
         required: ['urls'],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'stage_organize',
+      description:
+        '开一个「整理暂存批次」。用户在设置里默认要求"先看再落位"：' +
+        '调用它拿到 batchId 后，把新分类建在 batchId 下、把书签移进 batchId —— ' +
+        '用户会在「整理记录」里看到这批改动，并自行决定"应用到原文件夹 / 放到书签栏 / 选择其他文件夹 / 放弃"。' +
+        '整理类任务应当先调它；整理完成后如实说"已放进自动整理暂存区，等待确认"，不要声称已改进用户的文件夹。',
+      parameters: {
+        type: 'object',
+        properties: {
+          folderId: { type: 'string', description: '要整理的文件夹 id；省略则用本轮当前上下文文件夹' },
+        },
+        required: [],
         additionalProperties: false,
       },
     },

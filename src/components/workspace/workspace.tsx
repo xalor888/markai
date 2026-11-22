@@ -1,4 +1,4 @@
-import { Clock, PanelLeftOpen, Search, Trash2 } from 'lucide-react';
+import { Clock, PanelLeftOpen, Search, Trash2, Wand2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useAIStore } from '@/stores/aiStore';
 import { resolveTitlePath, useBookmarkStore } from '@/stores/bookmarkStore';
@@ -16,6 +16,7 @@ import { BookmarkList } from '@/components/bookmark-list/bookmark-list';
 import { BookmarkDialogs } from '@/components/bookmark-list/bookmark-dialogs';
 import { DeletionsDialog } from '@/components/deletions/deletions-dialog';
 import { OrganizeLogDialog } from '@/components/organize/organize-log-dialog';
+import { listPendingBatches, STAGED_KEY } from '@/lib/ai/organize-staging';
 import { ConfirmHost } from '@/components/common/confirm-host';
 import { OnboardingTip } from '@/components/common/onboarding-tip';
 import { ShortcutsDialog } from '@/components/common/shortcuts-dialog';
@@ -53,6 +54,8 @@ export function Workspace({
   const [commandOpen, setCommandOpen] = useState(false);
   /** 有「需要留意」的整理失败，入口上挂一个小红点（打开记录后清除） */
   const [organizeAlert, setOrganizeAlert] = useState(false);
+  /** 待确认的整理方案数：用户看不到它就会忘了自己还有东西没落位 */
+  const [stagedCount, setStagedCount] = useState(0);
   // 聊天面板宽度（用户可拖拽调整，持久化到 storage）
   const [chatWidth, setChatWidth] = useState(mode === 'full' ? 360 : 320);
   /**
@@ -147,6 +150,42 @@ export function Workspace({
   useEffect(() => {
     if (streaming && mode === 'compact' && !chatOpen) setChatOpen(true);
   }, [streaming, mode, chatOpen]);
+
+  /**
+   * 待确认的整理方案数。
+   *
+   * 暂存区是真实书签结构，但用户在做别的事时很容易忘掉"还有一批没落位"。
+   * 订阅 storage 与书签树：应用/放弃会清元信息，用户手动删批次会让节点消失——
+   * 两条路径都必须是 0，不能留一个对不上的数字。
+   */
+  useEffect(() => {
+    let alive = true;
+    const refresh = () => {
+      void listPendingBatches()
+        .then((batches) => {
+          if (alive) setStagedCount(batches.length);
+        })
+        .catch(() => {
+          if (alive) setStagedCount(0);
+        });
+    };
+    refresh();
+    const onChanged = (
+      changes: { [key: string]: chrome.storage.StorageChange },
+      area: chrome.storage.AreaName,
+    ) => {
+      if (area === 'local' && changes[STAGED_KEY]) refresh();
+    };
+    chrome.storage.onChanged.addListener(onChanged);
+    const unsubscribe = useBookmarkStore.subscribe((state, prev) => {
+      if (state.roots !== prev.roots) refresh();
+    });
+    return () => {
+      alive = false;
+      chrome.storage.onChanged.removeListener(onChanged);
+      unsubscribe();
+    };
+  }, []);
 
   // 新书签自动整理的结果：后台完成后主动告知（成功/失败都可见，静默跳过的不打扰）
   useEffect(() => {
@@ -443,6 +482,22 @@ export function Workspace({
             待处理数量放在顶栏：抽屉与「更多」菜单里都藏着它，
             用户只有主动去找才知道"有 3 条等你确认"。
           */}
+          {stagedCount > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                setOrganizeLogOpen(true);
+                setOrganizeAlert(false);
+              }}
+              className="flex shrink-0 items-center gap-1.5 rounded-lg border border-accent/30 bg-accent-muted px-2.5 py-1.5 text-2xs font-medium text-accent transition-colors hover:bg-accent/15"
+              title="有整理方案等待确认"
+              data-testid="staged-pending-pill"
+            >
+              <Wand2 className="h-3 w-3" />
+              <span className="hidden sm:inline">待确认整理</span>
+              {stagedCount}
+            </button>
+          )}
           {pendingCount > 0 && (
             <button
               type="button"
@@ -459,6 +514,7 @@ export function Workspace({
           <MoreMenu
             pendingCount={pendingCount}
             organizeAlert={organizeAlert}
+            stagedCount={stagedCount}
             chatOpen={chatOpen}
             mode={mode}
             onToggleChat={() => setChatOpen((v) => !v)}

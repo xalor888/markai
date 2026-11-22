@@ -19,9 +19,10 @@ export const SYSTEM_PROMPT = `你是 MarkAI，运行在用户浏览器里的智�
 1. 默认使用中文回复（除非用户使用其他语言），内容简洁、条理清晰，必要时使用短列表。
 2. 动手之前先了解结构：优先用 list_bookmarks / search_bookmarks / get_folder_path 查询，不要凭空假设书签 ID；多个互不依赖的只读查询放在同一轮并发发出，不要一轮只查一个。
    书签库有多个根（书签栏 / 其他书签 / 移动设备），**书签栏 ≠ 全库**。用户说“整理收藏夹 / 整理书签”但没指明文件夹时，先调用 stats 看各根的书签分布，再问清或明确选择范围；不要默认只查书签栏。
-3. 用户指令模糊时（例如"帮我整理一下"没指明范围），先结合长期记忆判断；若仍无明确范围，先问清楚范围；如果对话上下文里提供了用户正在查看的文件夹，就优先处理它。
+3. 用户指令模糊时（例如"帮我整理一下"没指明范围），先结合长期记忆判断；如果上下文提供了用户正在查看的文件夹，就优先处理它。范围仍然不清时，**先看清各根/文件夹结构，能安全形成计划就直接调用 organize_folder（默认暂存）生成可确认批次**，不要只输出一段分析再问“需要我执行吗”；只有跨根搬迁、删除、或范围本身有歧义时才先问一句。
 4. **整理默认先进暂存区，用 organize_folder 一次完成**：先用 list_bookmarks 取目标文件夹直接子书签的 id，把分类计划作为 plan 一次提交；工具会建/复用分类并批量移动，不要逐个 create_folder + move_bookmarks。
    默认暂存开启时它会自动开批次，完成后说"已放进自动整理暂存区，等待确认"；落位由用户在「整理记录」里点——**不要自己搬运，也不要声称已经改进用户的文件夹**。
+   目标文件夹只有子文件夹、书签都在下一层时，先 get_folder_content 看结构；用户明确要整理这一整类时，可显式用 scope:"deep"（只接受该子树内书签，默认仍不递归）。
    如果用户明确说"直接整理进去/不用确认"，才传 staging:false 让工具直接落位；暂存已在设置里关闭时，工具会直接落位，不要调用 stage_organize。
 5. **直接落位时，整理某个文件夹的新子分类必须建在它内部**（organize_folder 已保证；手工分步时 create_folder 要显式传 parentId，或 parentPath 写成该文件夹的完整路径）。
    省略 parentId 会落到**书签栏根目录**，那不是整理——那是把一个整齐的文件夹摊到根上。
@@ -339,16 +340,22 @@ const RAW_TOOL_DEFINITIONS: ToolDefinition[] = [
       name: 'organize_folder',
       description:
         '一次完成一个文件夹的整理：按 plan 在目标文件夹内（暂存开启时在暂存批次内）创建/复用分类文件夹，并批量移动书签。' +
-        '模型只需先 list_bookmarks 取得直接子书签的 id，然后调用本工具，不要为每个分类分别 create_folder + move_bookmarks。' +
+        '默认只整理直接子书签；目标文件夹里书签都在子文件夹时，显式传 scope="deep" 递归整理（只允许该子树内的书签）。' +
+        '模型只需先 list_bookmarks / get_folder_content 取得书签 id，然后调用本工具，不要为每个分类分别 create_folder + move_bookmarks。' +
         '默认开启暂存时，本工具会自动开批次；dryRun=true 只返回将要创建/移动的数量，不改动书签。',
       parameters: {
         type: 'object',
         properties: {
           folderId: { type: 'string', description: '要整理的文件夹 id（与 folderPath 二选一；省略则用当前上下文文件夹）' },
           folderPath: { type: 'string', description: '要整理的文件夹完整路径' },
+          scope: {
+            type: 'string',
+            enum: ['direct', 'deep'],
+            description: '整理范围：direct（默认，只收直接子书签）或 deep（递归目标文件夹子树，书签在子文件夹里时用）',
+          },
           plan: {
             type: 'array',
-            description: '分类计划：每个分类一个 folder + 要移入的 bookmarkIds；bookmark 必须是被整理文件夹的直接子书签，且不能重复',
+            description: '分类计划：每个分类一个 folder + 要移入的 bookmarkIds；direct 模式必须直接子书签，deep 模式可用子树内任意书签；同一条不能重复',
             items: {
               type: 'object',
               properties: {
@@ -828,7 +835,7 @@ const TOOL_SUMMARY: Record<string, string> = {
   remember: '记录一条长期偏好/规则。',
   recall_memories: '查询长期记忆。',
   forget_memory: '删除一条长期记忆。',
-  organize_folder: '一次完成整理：按 plan 在目标文件夹（或暂存批次）内建分类并移动书签，替代多次 create_folder/move_bookmarks。',
+  organize_folder: '一次完成整理：按 plan 在目标文件夹（或暂存批次）内建分类并移动书签；书签都在子文件夹时显式传 scope:"deep" 递归整理。',
 };
 
 /**

@@ -1039,6 +1039,7 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       assert.match(SYSTEM_PROMPT, /其他书签 \/ 移动设备的根级书签是合法存放位置/, '不能把其他根的书签默认当成游离');
       assert.match(SYSTEM_PROMPT, /不必|不要.*搬进书签栏/, '未经用户明确要求，不得跨根搬迁');
       assert.match(SYSTEM_PROMPT, /根层全是分类文件夹.*不要.*硬造同名分类/s, '根层无直接书签时不得硬造分类');
+      assert.match(SYSTEM_PROMPT, /不要只输出一段分析再问“需要我执行吗”/, '能安全形成计划时应直接生成暂存批次');
     });
 
     await okA('executeTool 拒绝未知工具', async () => {
@@ -18382,6 +18383,65 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
       );
       await chrome.bookmarks.removeTree(directTarget.id).catch(() => {});
       await chrome.bookmarks.removeTree(other.id).catch(() => {});
+    });
+
+    await okA('organize_folder scope=deep：递归整理子文件夹，放弃时逐条回原位', async () => {
+      const deepRoot = await chrome.bookmarks.create({ parentId: bar.id, title: '深整理测试' });
+      const deepSub = await chrome.bookmarks.create({ parentId: deepRoot.id, title: '子类' });
+      const x = await chrome.bookmarks.create({ parentId: deepSub.id, title: 'X', url: 'https://deep.test/x' });
+      const y = await chrome.bookmarks.create({ parentId: deepSub.id, title: 'Y', url: 'https://deep.test/y' });
+      const outside = await chrome.bookmarks.create({ parentId: bar.id, title: '外部', url: 'https://outside.test/' });
+
+      // 默认 direct 只认直接子书签：x/y 在子文件夹里，必须明确报错并指到 deep
+      await assert.rejects(
+        () =>
+          executeTool(
+            'organize_folder',
+            JSON.stringify({ folderId: deepRoot.id, staging: false, plan: [{ folder: 'X', bookmarkIds: [x.id] }] }),
+          ),
+        /不是文件夹.*的直接子书签.*deep/s,
+        'direct 模式对子文件夹里的书签应给出可执行的 deep 提示',
+      );
+
+      const res = JSON.parse(
+        (await executeTool(
+          'organize_folder',
+          JSON.stringify({
+            folderId: deepRoot.id,
+            scope: 'deep',
+            staging: true,
+            plan: [{ folder: '新分类', bookmarkIds: [x.id, y.id] }],
+          }),
+        ) ).result,
+      );
+      assert.equal(res.scope, 'deep');
+      assert.ok(res.deepScanned >= 2);
+      assert.equal(res.moved, 2);
+      const saved = storageMap.get(STAGED_KEY) as
+        | { batches: { batchId: string; origins?: Record<string, string> }[] }
+        | undefined;
+      const record = saved?.batches.find((b) => b.batchId === res.batchId);
+      assert.equal(record?.origins?.[x.id], deepSub.id, '必须记住每条书签原来的父文件夹');
+      assert.equal(record?.origins?.[y.id], deepSub.id);
+
+      const discarded = await discardBatch(res.batchId);
+      assert.equal(discarded.returned, 2);
+      const back = await chrome.bookmarks.getChildren(deepSub.id);
+      assert.ok(back.some((n) => n.id === x.id) && back.some((n) => n.id === y.id), '放弃后应逐条回到原子文件夹');
+      assert.equal((await chrome.bookmarks.getChildren(deepRoot.id)).filter((n) => n.url).length, 0, '不能平铺回目标根');
+
+      // 子树外书签仍必须被拒绝，不能借 deep 绕过边界
+      await assert.rejects(
+        () =>
+          executeTool(
+            'organize_folder',
+            JSON.stringify({ folderId: deepRoot.id, scope: 'deep', staging: false, plan: [{ folder: 'X', bookmarkIds: [outside.id] }] }),
+          ),
+        /不在文件夹.*的子结构里/,
+      );
+
+      await chrome.bookmarks.removeTree(deepRoot.id).catch(() => {});
+      await chrome.bookmarks.removeTree(outside.id).catch(() => {});
     });
 
     await okA('设置里关掉暂存后，stage_organize 工具必须拒绝而不是偷偷开批次', async () => {

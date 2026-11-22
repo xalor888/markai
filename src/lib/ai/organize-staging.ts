@@ -37,6 +37,8 @@ export interface StagedBatch {
   targetParentId: string;
   targetTitle: string;
   createdAt: number;
+  /** 深整理时每条书签原来的父文件夹；放弃时按这里回原位，而不是平铺回目标根 */
+  origins?: Record<string, string>;
 }
 
 interface StoredShape {
@@ -107,6 +109,21 @@ export async function ensureStagingRoot(): Promise<string> {
   const stored = await readStored();
   await writeStored({ ...stored, rootId: node.id });
   return node.id;
+}
+
+/**
+ * 记录深整理批次里每条书签的原父文件夹。
+ *
+ * 只在显式 scope:"deep" 时调用；合并而不是覆盖——同一个目标文件夹可能被整理多次，
+ * 后一次不能把前一次的原位置抹掉，否则放弃时会把书签平铺到错误的地方。
+ */
+export async function rememberBatchOrigins(batchId: string, origins: Record<string, string>): Promise<void> {
+  if (Object.keys(origins).length === 0) return;
+  const stored = await readStored();
+  const batch = stored.batches.find((b) => b.batchId === batchId);
+  if (!batch) return;
+  batch.origins = { ...(batch.origins ?? {}), ...origins };
+  await writeStored(stored);
 }
 
 async function readStored(): Promise<StoredShape> {
@@ -355,6 +372,7 @@ export async function applyBatch(
 export async function discardBatch(batchId: string): Promise<{ returned: number }> {
   const { batches } = await readStored();
   const record = batches.find((b) => b.batchId === batchId);
+  const origins = record?.origins ?? {};
   const fallbackHome = record?.targetParentId ?? (await bookmarkBarId());
 
   // 原文件夹可能已经被用户删了：回落到书签栏，绝不把书签留在暂存区里当孤儿
@@ -366,7 +384,18 @@ export async function discardBatch(batchId: string): Promise<{ returned: number 
     const children = await chrome.bookmarks.getChildren(id).catch(() => []);
     for (const c of children) {
       if (c.url) {
-        await jMove(c.id, { parentId: home });
+        /*
+         * 深整理把书签从旧子文件夹里抽走，放弃时必须逐条回到**各自的原文件夹**。
+         * 全部搬回目标根会把十个子类的书单混成一堆——那是又一次打乱，不是“放弃”。
+         * 原文件夹若已被删，回落到 home（批次目标根或书签栏）。
+         */
+        const original = origins[c.id];
+        let destination = home;
+        if (original) {
+          const nodes = await chrome.bookmarks.get(original).catch(() => []);
+          if (nodes[0] && !nodes[0].url) destination = original;
+        }
+        await jMove(c.id, { parentId: destination });
         returned += 1;
       } else {
         await walk(c.id);

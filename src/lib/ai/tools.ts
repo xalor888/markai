@@ -9,7 +9,7 @@ import { buildDuplicateGroups, normalizeUrl, pickDuplicateKeeper, type DupeNode 
 import { ensureOrderCheckpoint } from '@/lib/undo/recorder';
 import { addMemoryItem, deleteMemoryItem, getMemories, searchMemories } from './memory';
 import { registrableDomain } from '@/lib/bookmarks/domain';
-import { stageBatch } from '@/lib/ai/organize-staging';
+import { rememberBatchOrigins, stageBatch } from '@/lib/ai/organize-staging';
 import { resolveConfig } from '@/lib/providers';
 
 /** 工具执行结果 */
@@ -843,6 +843,13 @@ async function organizeStagingEnabled(): Promise<boolean> {
 const organizeFolderSchema = z.object({
   folderId: z.string().optional(),
   folderPath: z.string().optional(),
+  /**
+   * 整理范围。
+   * direct（默认）：只处理目标文件夹的直接子书签，保持既有语义不变；
+   * deep：递归处理目标文件夹内部（任意层子文件夹）的书签。
+   * 必须显式传 deep——默认放宽会把用户没让动的深层书签一起搬走。
+   */
+  scope: z.enum(['direct', 'deep']).optional(),
   plan: z
     .array(
       z.object({
@@ -876,7 +883,7 @@ async function organizeFolder(
 ): Promise<ToolOutput> {
   const throwIfAborted = makeAbortCheck(signal);
   throwIfAborted();
-  const { folderId, folderPath, plan, dryRun = false, staging } = organizeFolderSchema.parse(args);
+  const { folderId, folderPath, scope, plan, dryRun = false, staging } = organizeFolderSchema.parse(args);
 
   let targetId: string;
   if (folderId) {
@@ -894,8 +901,33 @@ async function organizeFolder(
     throw new Error('整理暂存区已在设置中关闭；不能强行开批次。请直接整理，或让用户在设置里重新开启暂存。');
   }
 
+  const targetPath = await resolvePath(targetId);
+  const targetName = targetPath.split(' > ').pop() ?? targetId;
+  const mode = scope ?? 'direct';
   const children = await chrome.bookmarks.getChildren(targetId).catch(() => []);
   const direct = new Map(children.filter((n) => n.url).map((n) => [n.id, n]));
+  /*
+   * deep：把目标文件夹内部（任意层子文件夹）的书签也纳入可整理范围。
+   *
+   * 真实大类通常只有子文件夹、书签都在 1–2 层下面；旧实现只认直接子书签，
+   * 于是「整理 AI 工具（10 个子类、142 条）」永远报错或只能空转。
+   * 范围仍然严格限制在 targetId 子树内：扫描只在这棵树里做，别处的书签仍会被拒绝。
+   */
+  let allowed = direct;
+  let deepScanned = 0;
+  if (mode === 'deep') {
+    const sub = await chrome.bookmarks.getSubTree(targetId).catch(() => []);
+    const deep = new Map<string, chrome.bookmarks.BookmarkTreeNode>();
+    const walk = (nodes: chrome.bookmarks.BookmarkTreeNode[]) => {
+      for (const n of nodes) {
+        if (n.url) deep.set(n.id, n);
+        else walk(n.children ?? []);
+      }
+    };
+    walk(sub[0]?.children ?? []);
+    allowed = deep;
+    deepScanned = deep.size;
+  }
   const groups = new Map<string, string[]>();
   const seen = new Set<string>();
   /*
@@ -914,11 +946,29 @@ async function organizeFolder(
     const title = item.folder.replace(/\s+/g, ' ').trim();
     const ids = groups.get(title) ?? [];
     for (const id of item.bookmarkIds) {
-      const node = direct.get(id);
+      const node = allowed.get(id);
       if (!node) {
+        if (mode === 'deep') {
+          /*
+           * 深整理的失败必须分清三种情况：id 不存在 / 这是文件夹 / 书签在目标子树外。
+           * 混成一句「不在范围内」时，模型无法判断该换 id 还是换范围，只会原样重试。
+           */
+          const existing = (await chrome.bookmarks.get(id).catch(() => []))[0];
+          if (!existing) throw new Error(`书签不存在（id: ${id}）；请先 list_bookmarks / get_folder_content 取真实 id`);
+          if (!existing.url) {
+            throw new Error(
+              `节点 ${id}「${existing.title}」是文件夹，organize_folder 只移动书签；要搬文件夹请用 move_bookmark / merge_folders`,
+            );
+          }
+          throw new Error(
+            `书签 ${id}「${existing.title}」不在文件夹「${targetName}」的子结构里；` +
+              '深整理（scope:"deep"）只接受这个文件夹内部的书签，不能移动别处的书签',
+          );
+        }
         throw new Error(
-          `书签 ${id} 不是文件夹「${(await resolvePath(targetId)).split(' > ').pop() ?? targetId}」的直接子书签；` +
-            '请先 list_bookmarks 重新取当前文件夹的直接子项，不要移动别的文件夹里的书签',
+          `书签 ${id} 不是文件夹「${targetName}」的直接子书签；` +
+            '如果它在这个文件夹的子文件夹里，改用 scope:"deep" 递归整理；' +
+            '否则请先 list_bookmarks 重新取当前文件夹的直接子项，不要移动别的文件夹里的书签',
         );
       }
       seen.add(id);
@@ -929,12 +979,26 @@ async function organizeFolder(
   const total = seen.size;
   throwIfAborted(`已校验 ${total} 条`);
 
+  /*
+   * deep：记住每条书签原本所在的文件夹。
+   * 暂存「放弃」的语义是回到整理前；没有这份记录，142 条来自十个子文件夹的书签
+   * 会被平铺回目标根，用户看到的是一次新的打乱（见 organize-staging 的 discardBatch）。
+   */
+  const origins: Record<string, string> = {};
+  if (mode === 'deep') {
+    for (const id of seen) {
+      const parent = allowed.get(id)?.parentId;
+      if (parent) origins[id] = parent;
+    }
+  }
+
   const useStaging = staging ?? configuredStaging;
   let containerId = targetId;
   let batch: Awaited<ReturnType<typeof stageBatch>> | null = null;
   if (useStaging && !dryRun) {
     batch = await stageBatch(targetId);
     containerId = batch.batchId;
+    if (mode === 'deep') await rememberBatchOrigins(batch.batchId, origins);
   }
   const existingChildren = await chrome.bookmarks.getChildren(containerId).catch(() => []);
   const existingFolders = new Map(
@@ -981,11 +1045,41 @@ async function organizeFolder(
     }
   }
 
-  const targetPath = await resolvePath(targetId);
+  /*
+   * 深整理把书签从旧子文件夹里抽走后，旧文件夹会变空。
+   * 工具**不删**它们（删文件夹走删除通道），但必须把这件事说清楚，
+   * 否则用户会以为「整理完怎么还挂着十来个空壳」。
+   * 暂存模式下不动用户结构，等用户「应用」后才可能变空——那一步在整理记录里，不在这里报。
+   */
+  const emptiedFolders: { id: string; title: string; path: string }[] = [];
+  if (mode === 'deep' && !dryRun && !useStaging) {
+    for (const pid of new Set(Object.values(origins))) {
+      if (pid === targetId) continue; // 目标本身还有新分类，不会空
+      const left = await chrome.bookmarks.getChildren(pid).catch(() => []);
+      if (left.length > 0) continue;
+      const nodes = await chrome.bookmarks.get(pid).catch(() => []);
+      const node = nodes[0];
+      if (node && !node.url) {
+        emptiedFolders.push({ id: node.id, title: node.title || '(未命名)', path: await resolvePath(node.id) });
+      }
+    }
+  }
+
+  const sourceFolderCount = new Set(Object.values(origins)).size;
+  const deepLine = mode === 'deep' ? `深整理：范围内共 ${deepScanned} 条书签。` : '';
+  const emptyLine =
+    emptiedFolders.length > 0
+      ? `其中 ${emptiedFolders.length} 个旧子文件夹已清空（不会自动删除；需要清理请用 propose_deletions 或手动处理）。`
+      : '';
+  const stagingLine =
+    useStaging && mode === 'deep' && !dryRun
+      ? `本批从 ${sourceFolderCount} 个已有子文件夹移出书签；应用后这些子文件夹会变空（不会自动删除），放弃时书签会回到各自原子文件夹。`
+      : '';
   const summary = {
     dryRun: dryRun || undefined,
     ...(useStaging && !dryRun ? { staged: true as const } : {}),
     ...(batch ? { batchId: batch.batchId } : {}),
+    ...(mode === 'deep' ? { scope: 'deep' as const, deepScanned, sourceFolderCount } : {}),
     targetId,
     targetPath,
     total,
@@ -995,16 +1089,19 @@ async function organizeFolder(
     moved,
     failed: failures.length,
     ...(failures.length > 0 ? { failures: failures.slice(0, 10) } : {}),
+    ...(emptiedFolders.length > 0 ? { emptiedFolders: emptiedFolders.slice(0, 20) } : {}),
     actions,
     note: dryRun
-      ? `预览：将创建 ${created} 个分类、复用 ${reused} 个分类，移动 ${total} 条书签；没有改动任何书签。`
+      ? `预览：将创建 ${created} 个分类、复用 ${reused} 个分类，移动 ${total} 条书签；没有改动任何书签。` + deepLine
       : useStaging
         ? `已放进「自动整理」暂存区（批次 ${batch?.batchId}），等待用户在「整理记录」里确认落位；` +
           (failures.length > 0
             ? `其中 ${failures.length} 条移动失败，可在确认前重试或放弃。`
-            : '不要声称已经改进用户的文件夹。')
+            : '不要声称已经改进用户的文件夹。') +
+          stagingLine
         : `已直接整理到「${targetPath}」：新建 ${created} 个、复用 ${reused} 个分类，移动 ${moved} 条书签` +
-          (failures.length > 0 ? `；${failures.length} 条失败，可重试失败项。` : '。'),
+          (failures.length > 0 ? `；${failures.length} 条失败，可重试失败项。` : '。') +
+          emptyLine,
   };
   return { result: JSON.stringify(summary) };
 }
@@ -2743,6 +2840,8 @@ function toolFailureHint(message: string): string | null {
   if (/参数不合法|参数不是合法 JSON/.test(message)) return '按工具 schema 检查必填项与类型后重试';
   if (/父文件夹不存在|找不到文件夹|文件夹不存在/.test(message)) return '先用 list_all_folders / get_folder_path 查真实 folderId';
   if (/书签不存在/.test(message)) return '先用 search_bookmarks / list_bookmarks 查真实书签 id';
+  // 这条必须排在泛化的“不是文件夹”之前，否则会被 parentId 提示吞掉
+  if (/不是文件夹.*的直接子书签/.test(message)) return '书签在子文件夹里时改用 organize_folder 的 scope:"deep"；先 get_folder_content 看结构再提交 plan';
   if (/不是文件夹/.test(message)) return 'parentId 必须是文件夹 id，不是书签 id';
   if (/循环嵌套/.test(message)) return '目标不能是自身或自己的子孙文件夹';
   if (/暂存区已在设置中关闭/.test(message)) return '改为直接整理（不要传 staging:true），或让用户在设置里开启暂存';

@@ -161,6 +161,20 @@ export function HealthPanel() {
                   <p className="mt-0.5 text-2xs leading-4 text-muted-foreground/80">→ {issue.manualHint}</p>
                 )}
               </div>
+              {issue.id === 'config.incomplete' && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-6 shrink-0 gap-1 px-1.5 text-2xs"
+                  onClick={() => {
+                    const el = document.getElementById('api-key');
+                    el?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+                    el?.focus();
+                  }}
+                >
+                  去填写
+                </Button>
+              )}
               {issue.fix && (
                 <Button
                   variant="outline"

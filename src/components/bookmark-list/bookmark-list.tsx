@@ -1298,6 +1298,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
               <BookmarkRow
                 node={node}
                 index={i}
+                compact={compact}
                 active={i === activeIndex}
                 selected={selectedSet.has(node.id)}
                 dropTarget={dropTarget}
@@ -1604,6 +1605,7 @@ const BookmarkRow = memo(function BookmarkRow({
   index,
   active,
   selected,
+  compact,
   dropTarget,
   query,
   searching,
@@ -1627,6 +1629,8 @@ const BookmarkRow = memo(function BookmarkRow({
   index: number;
   active: boolean;
   selected: boolean;
+  /** 紧凑侧栏：多选复选框默认低对比可见，避免“只有 hover 才知道能多选” */
+  compact?: boolean;
   /** 搜索词（高亮匹配；非搜索模式为空） */
   query: string;
   /** 搜索模式（副文本显示来源文件夹路径） */
@@ -1749,7 +1753,11 @@ const BookmarkRow = memo(function BookmarkRow({
       <span
         className={cn(
           'shrink-0 transition-opacity',
-          selected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100',
+          selected
+            ? 'opacity-100'
+            : compact
+              ? 'opacity-30 group-hover:opacity-100 group-focus-within:opacity-100'
+              : 'opacity-0 group-hover:opacity-100 group-focus-within:opacity-100',
         )}
       >
         <Checkbox checked={selected} onCheckedChange={(_c, shift) => onToggle(index, !!shift)} aria-label={`选择 ${node.title}`} />

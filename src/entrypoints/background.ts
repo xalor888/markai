@@ -958,6 +958,7 @@ async function handleChatSend(
       messageId: msg.messageId,
       history: msg.history,
       text,
+      ...(msg.images && msg.images.length > 0 ? { images: msg.images } : {}),
       signal,
       ...(focusFolderId ? { focusFolderId } : {}),
       /*

@@ -26,7 +26,9 @@ import { PetLayer } from '@/components/pet/pet-layer';
 import { PetStudio } from '@/components/pet/pet-studio';
 import { IdeaPanel } from '@/components/ideas/idea-panel';
 import { CleanupSheet } from '@/components/ideas/cleanup-sheet';
-import { TopbarExtras } from '@/components/workspace/topbar-extras';
+import { UpdateCheckDialog, useUpdateAvailable } from '@/components/update/update-check-dialog';
+import { useIdeasStore } from '@/stores/ideasStore';
+import { openPetStudio } from '@/stores/petStudioStore';
 import { CHAT_WIDTH_MAX, CHAT_WIDTH_MAX_COMPACT, clampChatWidth } from '@/lib/chat-width';
 import {
   clearSearchHistory,
@@ -61,6 +63,10 @@ export function Workspace({
   const [organizeLogOpen, setOrganizeLogOpen] = useState(initialOrganizeOpen);
   /** 简单清理面板：由更多菜单打开（入口在 MoreMenu 里） */
   const [cleanupOpen, setCleanupOpen] = useState(false);
+  /** 检查更新对话框：低频操作，从「更多」菜单进 */
+  const [updateOpen, setUpdateOpen] = useState(false);
+  const updateAvailable = useUpdateAvailable();
+  const openIdeas = useIdeasStore((s) => s.openPanel);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   /** ⌘K 命令面板：一个入口做三件事（搜书签 / 跳文件夹 / 执行动作） */
   const [commandOpen, setCommandOpen] = useState(false);
@@ -623,17 +629,20 @@ export function Workspace({
               {pendingCount}
             </button>
           )}
-          <TopbarExtras />
           {/* 其余入口全收进「更多」：有待删/整理异常时触发按钮上带红点，收起来不等于藏起来 */}
           <MoreMenu
             pendingCount={pendingCount}
             organizeAlert={organizeAlert}
             stagedCount={stagedCount}
             chatOpen={chatOpen}
+            updateAvailable={updateAvailable}
             mode={mode}
             onToggleChat={() => setChatOpen((v) => !v)}
             onDeletions={() => setDeletionsOpen(true)}
             onCleanup={() => setCleanupOpen(true)}
+            onIdeas={openIdeas}
+            onPetStudio={openPetStudio}
+            onCheckUpdate={() => setUpdateOpen(true)}
             onOrganize={() => {
               setOrganizeLogOpen(true);
               setOrganizeAlert(false);
@@ -834,6 +843,7 @@ export function Workspace({
       <PetStudio />
       <IdeaPanel />
       <CleanupSheet open={cleanupOpen} onOpenChange={setCleanupOpen} />
+      <UpdateCheckDialog open={updateOpen} onOpenChange={setUpdateOpen} />
       <OrganizeLogDialog open={organizeLogOpen} onOpenChange={setOrganizeLogOpen} />
       <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
       <ConfirmHost />

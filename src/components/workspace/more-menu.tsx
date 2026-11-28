@@ -1,4 +1,4 @@
-import { Activity, BookmarkPlus, BrushCleaning, Check, Keyboard, LayoutPanelLeft, Maximize, MessageSquare, Monitor, Moon, MoreHorizontal, Settings, Sparkles, Sun, Trash2, Wand2 } from 'lucide-react';
+import { Activity, BookmarkPlus, BrushCleaning, Check, Keyboard, LayoutPanelLeft, Lightbulb, Maximize, MessageSquare, Monitor, Moon, MoreHorizontal, PawPrint, RefreshCw, Settings, Sparkles, Sun, Trash2, Wand2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useThemeStore, type Theme } from '@/stores/themeStore';
 import { useConfigStore } from '@/stores/configStore';
@@ -22,11 +22,15 @@ export function MoreMenu({
   organizeAlert,
   stagedCount,
   chatOpen,
+  updateAvailable,
   mode,
   onToggleChat,
   onDeletions,
   onCleanup,
   onOrganize,
+  onIdeas,
+  onPetStudio,
+  onCheckUpdate,
   onSettings,
   onShortcuts,
   onHealth,
@@ -39,12 +43,20 @@ export function MoreMenu({
   /** 整理记录里有待确认的暂存方案 */
   stagedCount: number;
   chatOpen: boolean;
+  /** 有新鲜缓存证明存在新版本：在「检查更新」右侧点一个小圆点 */
+  updateAvailable: boolean;
   mode: 'compact' | 'full';
   onToggleChat: () => void;
   onDeletions: () => void;
   /** 打开「简单清理」：勾选重复 / 空文件夹 / 老旧 / 断链，只生成方案不删除 */
   onCleanup: () => void;
   onOrganize: () => void;
+  /** 打开「点子」面板 */
+  onIdeas: () => void;
+  /** 打开宠物工作室 */
+  onPetStudio: () => void;
+  /** 打开检查更新对话框 */
+  onCheckUpdate: () => void;
   onSettings: () => void;
   onShortcuts: () => void;
   /** 打开设置页的「健康检查」分节 */
@@ -115,11 +127,12 @@ export function MoreMenu({
     icon: React.ComponentType<{ className?: string }>,
     label: string,
     onClick: () => void,
-    opts: { badge?: number; danger?: boolean; active?: boolean } = {},
+    opts: { badge?: number; danger?: boolean; active?: boolean; testId?: string; dot?: boolean } = {},
   ) => (
     <button
       type="button"
       role="menuitem"
+      {...(opts.testId ? { 'data-testid': opts.testId } : {})}
       onClick={() => {
         setOpen(false);
         onClick();
@@ -135,6 +148,13 @@ export function MoreMenu({
         return <Icon className="h-3.5 w-3.5 shrink-0" />;
       })()}
       <span className="min-w-0 flex-1 truncate">{label}</span>
+      {opts.dot && (
+        <span
+          data-testid="update-dot"
+          aria-hidden="true"
+          className="h-1.5 w-1.5 shrink-0 rounded-full bg-accent"
+        />
+      )}
       {opts.badge !== undefined && opts.badge > 0 && (
         <span className="flex h-4 min-w-4 items-center justify-center rounded-full bg-destructive/10 px-1.5 text-2xs font-semibold text-destructive">
           {opts.badge}
@@ -178,6 +198,8 @@ export function MoreMenu({
           className="markai-glass markai-glass-liquid mk-glass-2 mk-panel absolute right-0 z-50 mt-1 w-52 overflow-hidden rounded-md py-1"
         >
           {item(BookmarkPlus, '收藏当前页面', onSaveCurrentTab)}
+          {item(Lightbulb, '点子', onIdeas, { testId: 'idea-entry' })}
+          {item(PawPrint, '制作宠物', onPetStudio, { testId: 'pet-studio-entry' })}
           {item(BrushCleaning, '简单清理', onCleanup)}
           {item(Trash2, '待删除清单', onDeletions, { badge: pendingCount, danger: pendingCount > 0 })}
           {item(Wand2, '整理记录', onOrganize, { badge: stagedCount, active: organizeAlert || stagedCount > 0 })}
@@ -206,6 +228,10 @@ export function MoreMenu({
             ? item(LayoutPanelLeft, '在侧边栏打开', onSwitchContainer)
             : item(Maximize, '在完整页面打开', onSwitchContainer)}
           {item(Activity, '健康检查', onHealth)}
+          {item(RefreshCw, '检查更新', onCheckUpdate, {
+            testId: 'update-check',
+            ...(updateAvailable ? { dot: true } : {}),
+          })}
           {item(Keyboard, '快捷键与操作', onShortcuts)}
           <div className="my-1 h-px bg-border" />
           <p className="px-3 pt-1 pb-1 text-2xs text-muted-foreground">主题</p>

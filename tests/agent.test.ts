@@ -16855,7 +16855,16 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
     const src = readFileSync(resolve(srcDir, 'lib/ai/agent.ts'), 'utf8');
     // 预算与发送必须用同一份文本，否则"估算"和"实际发出去"会对不上（超窗 400 的老路子）
     assert.match(src, /const full = extractHistoryText\(m\);/, '历史预算必须按含工具摘要的文本估算');
-    assert.match(src, /const content = extractHistoryText\(m\);/, '实际发送也必须用同一份文本');
+    /*
+     * 实际发送 = 同一份 `extractHistoryText(m)` + 一行「[附图：…]」占位。
+     * 图片本身不重发（否则视觉 token 随轮数叠加），但"当时附过图"这个事实要保留，
+     * 所以这里断言的是「仍以 extractHistoryText 为主干」，而不是逐字相等。
+     */
+    assert.match(
+      src,
+      /const content = \[extractHistoryText\(m\), imageNote\]\.filter\(Boolean\)\.join\('\\n'\);/,
+      '实际发送也必须以同一份文本为主干（图片只留占位）',
+    );
     assert.match(src, /b\.kind === 'tool' \? \[b\.record\] : \[\]/, 'extractHistoryText 必须读 tool 块');
     assert.doesNotMatch(src, /const content = extractText\(m\);/, '不许再有只发正文的历史组装');
   });

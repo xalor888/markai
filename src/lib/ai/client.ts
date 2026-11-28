@@ -6,6 +6,7 @@ import { lookupActiveModel } from '@/lib/models/runtime';
 import { buildRequestHeaders, getStableSessionId } from './request-headers';
 import type { AIConfig } from './types';
 import { reasoningPayload } from '@/lib/models/request';
+import type { ContentPart } from './image-input';
 
 /** AI 请求错误（携带用户可读的中文信息） */
 export class ChatError extends Error {
@@ -24,7 +25,13 @@ export class ChatError extends Error {
 /** 发送给 API 的消息（OpenAI 协议） */
 export interface ApiMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
-  content: string | null;
+  /**
+   * 纯文本消息用字符串；带图片的 user 消息用多模态片段数组。
+   *
+   * 数组只在 `image-input.ts` 里拼装，且**只在 user 消息上出现**——
+   * assistant/tool 消息发数组会被 OpenAI 兼容网关直接 400。
+   */
+  content: string | null | ContentPart[];
   tool_calls?: ApiToolCall[];
   tool_call_id?: string;
 }

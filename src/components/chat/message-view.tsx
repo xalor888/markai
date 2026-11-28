@@ -264,6 +264,7 @@ export const MessageView = memo(function MessageView({
       .filter((b): b is { kind: 'text'; text: string } => b.kind === 'text')
       .map((b) => b.text)
       .join('');
+    const images = Array.isArray(message.images) ? message.images : [];
     return (
       <div className="flex justify-end">
         <div className="max-w-[85%]">
@@ -278,9 +279,25 @@ export const MessageView = memo(function MessageView({
               <span className="truncate">{contextPath}</span>
             </button>
           )}
-          <div className="select-text rounded-lg rounded-br-sm border border-accent/25 bg-accent-muted px-3 py-2 text-md whitespace-pre-wrap text-foreground">
-            {text}
-          </div>
+          {images.length > 0 && (
+            <div data-testid="user-images" className="mb-1 flex flex-wrap justify-end gap-1.5">
+              {images.map((image) => (
+                <img
+                  key={image.id}
+                  src={image.dataUrl}
+                  alt={image.name}
+                  title={image.name}
+                  data-testid="user-image"
+                  className="max-h-40 max-w-[180px] rounded-lg border border-accent/25 object-cover"
+                />
+              ))}
+            </div>
+          )}
+          {text && (
+            <div className="select-text rounded-lg rounded-br-sm border border-accent/25 bg-accent-muted px-3 py-2 text-md whitespace-pre-wrap text-foreground">
+              {text}
+            </div>
+          )}
         </div>
       </div>
     );

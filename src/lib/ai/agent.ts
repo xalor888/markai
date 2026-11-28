@@ -1,6 +1,7 @@
 /** ── Agent 主循环：流式对话 + 工具调用循环 ── */
 
 import { chatCompletion, ChatError, type ApiMessage, type ApiToolCall } from './client';
+import { buildUserContent, imagePlaceholder, imagesOf, type ChatImage } from './image-input';
 import { formatMemoriesForPrompt, getMemories, type MemoryItem } from './memory';
 import { personalInstruction } from '@/lib/pet/personal';
 import { API_TOOL_DEFINITIONS, buildTimeContext, organizeStagingInstruction, PLAN_MODE_INSTRUCTION, SYSTEM_PROMPT } from './prompts';
@@ -52,6 +53,13 @@ export interface AgentTurnParams {
   messageId: string;
   history: ChatMessage[];
   text: string;
+  /**
+   * 本次随消息发送的图片（已压缩的 data URL）。
+   *
+   * 只随**当前这条** user 消息发一次；历史里的图片不再重发
+   * （见下方历史组装处的说明），否则一张图会在每轮请求里被计一次视觉 token。
+   */
+  images?: ChatImage[];
   signal: AbortSignal;
   onEvent: (event: ChatOutbound) => void;
   /**
@@ -215,11 +223,31 @@ export function estimateRequestTokens(apiMessages: ApiMessage[]): number {
   return (
     estimateTokens(JSON.stringify(API_TOOL_DEFINITIONS)) +
     apiMessages.reduce((acc, m) => {
-      let n = estimateTokens(m.content ?? '') + PER_MESSAGE_OVERHEAD;
+      let n = estimateTokens(contentText(m.content)) + PER_MESSAGE_OVERHEAD;
+      /*
+       * 图片按固定值计入：data URL 的 base64 长度与模型实际消耗的视觉 token
+       * 没有关系（1024px 的截图约 1k token），用字符串长度估算会把预算高估几百倍，
+       * 导致刚发一张图就触发上下文护栏。
+       */
+      if (Array.isArray(m.content)) {
+        n += m.content.filter((part) => part.type === 'image_url').length * IMAGE_TOKEN_ESTIMATE;
+      }
       if (m.tool_calls) n += estimateTokens(JSON.stringify(m.tool_calls));
       return acc + n;
     }, 0)
   );
+}
+
+/** 单张 1024px 图片的保守 token 估值（OpenAI high detail 上限约 1105） */
+export const IMAGE_TOKEN_ESTIMATE = 1200;
+
+/** 多模态内容的文本部分（图片按固定估值计入，见 IMAGE_TOKEN_ESTIMATE） */
+function contentText(content: ApiMessage['content']): string {
+  if (typeof content === 'string') return content;
+  if (!content) return '';
+  return content
+    .map((part) => (part.type === 'text' ? part.text : ''))
+    .join('');
 }
 
 /**
@@ -394,7 +422,18 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
      * 「内容被截断」标记切掉（标记接在 6000 字符之后），让模型重新看不到"被切过"。
      * 0.2.125 修的就是这个：加了标记却被下一行悄悄抹掉。
      */
-    const content = extractHistoryText(m);
+    /*
+     * 历史图片**不重发**，只留一行「[附图：xxx]」。
+     *
+     * 两个理由：
+     *  1. 每轮请求都把旧图重发一遍，视觉 token 会随对话轮数线性叠加，
+     *     小窗口模型几轮之后就被图片挤爆；
+     *  2. 用户当时的提问与图片内容已被转写成文字（模型回复里通常会复述），
+     *     保留"附过图"这个事实比重新附一张更省也更不容易误导。
+     */
+    const historyImages = imagesOf(m);
+    const imageNote = historyImages.length > 0 ? imagePlaceholder(historyImages) : '';
+    const content = [extractHistoryText(m), imageNote].filter(Boolean).join('\n');
     apiMessages.push({ role: m.role, content: content || null });
   }
   /*
@@ -410,7 +449,12 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
     text.length > MAX_TEXT_CHARS
       ? `${text.slice(0, MAX_TEXT_CHARS)}\n[…你发送的这条消息原有 ${text.length} 字符，此处因长度限制只发送了前 ${MAX_TEXT_CHARS} 字符，内容被截断。如你的问题依赖被截掉的部分，请把相关内容缩短后重新发送。]`
       : text;
-  apiMessages.push({ role: 'user', content: userText });
+  /*
+   * 当前消息：有图片时发多模态数组（文本在前），没有图片时保持字符串。
+   * 只在这里拼数组——assistant/tool 消息永远不带数组。
+   */
+  const currentImages = params.images ?? [];
+  apiMessages.push({ role: 'user', content: buildUserContent(userText, currentImages) });
 
   /** 估算当前全部发送给模型的 token 用量（系统提示已含在 apiMessages 内，不重复计入固定开销） */
   const usedTokens = () => estimateRequestTokens(apiMessages);
@@ -436,7 +480,7 @@ async function runAgentTurnInner(params: AgentTurnParams): Promise<void> {
     const body = apiMessages.slice(1, cut);
     if (body.length > 0) {
       const summaryText = `【早期对话摘要】\n${body
-        .map((m) => (m.content ?? '').slice(0, 200))
+        .map((m) => contentText(m.content).slice(0, 200))
         .join('\n')
         .slice(0, 2500)}`;
       apiMessages.splice(1, body.length, { role: 'user', content: summaryText });

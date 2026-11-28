@@ -2,6 +2,7 @@
 
 import type { UndoApplyResult, UndoPoint } from '@/lib/undo/types';
 import type { CatalogIssue, ModelCatalog } from '@/lib/models/types';
+import type { ChatImage } from './image-input';
 
 /** 工具执行状态 */
 /**
@@ -65,6 +66,13 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   blocks: ChatBlock[];
   createdAt: number;
+  /**
+   * 这条用户消息附带的图片（已压缩的 data URL）。
+   *
+   * 单独存字段而不是塞进 `blocks`：图片不是"一段文字"，渲染、复制、
+   * 历史转写、重试都要按不同规则处理；混进文本块会让每一处都得再判断一次。
+   */
+  images?: ChatImage[];
   /**
    * 这条回复还在生成中。
    *
@@ -195,6 +203,8 @@ export type ChatInbound =
       text: string;
       history: ChatMessage[]; // 历史消息快照（不含本次）
       contextFolderId?: string; // 用户当前查看的文件夹
+      /** 本次随消息发送的图片（data URL，已压缩） */
+      images?: ChatImage[];
     }
   | { type: 'chat:cancel' }
   /** 计划模式：用户对 chat:plan 的决定（必须带 messageId，只结算对应轮次） */

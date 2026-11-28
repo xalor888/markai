@@ -19,6 +19,7 @@ import { undoReadiness } from '@/lib/undo/journal';
 import { UNDO_STORAGE_KEY } from '@/lib/undo/recorder';
 import { describeChatTrim, trimConversationsToBudget } from '@/lib/ai/chat-budget';
 import { mergeDraft, mergeDraftReasoning, readDraft } from '@/lib/ai/stream-draft';
+import { imagesOf, type ChatImage } from '@/lib/ai/image-input';
 import { useBookmarkStore } from './bookmarkStore';
 
 /** storage key（popup 通过该 key 只读展示待删数） */
@@ -117,7 +118,10 @@ interface AIState {
   /** 确保聊天 Port 已连接（懒连接 + 断线自动重连） */
   ensurePort: () => chrome.runtime.Port;
   /** 发送一条用户消息给 Agent（自动连接 Port） */
-  send: (text: string, opts?: { folderId?: string; replaceLastUser?: boolean }) => Promise<void>;
+  send: (
+    text: string,
+    opts?: { folderId?: string; replaceLastUser?: boolean; images?: ChatImage[] },
+  ) => Promise<void>;
   /** 取消当前流式回复 */
   cancel: () => void;
   /** 重试最后一条用户消息（移除其后所有消息并重新发送） */
@@ -472,13 +476,16 @@ export const useAIStore = create<AIState>((set, get) => ({
       if (!get().activeId) return; // load 失败兜底仍无会话
     }
     const trimmed = text.trim();
-    if (!trimmed) return;
+    const images = opts?.images ?? [];
+    // 只有图片没有文字也允许发送（"这张截图里的书签帮我归类"是很自然的用法）
+    if (!trimmed && images.length === 0) return;
 
     const userMsg: ChatMessage = {
       id: uid(),
       role: 'user',
-      blocks: [{ kind: 'text', text: trimmed }],
+      blocks: trimmed ? [{ kind: 'text', text: trimmed }] : [],
       createdAt: Date.now(),
+      ...(images.length > 0 ? { images } : {}),
       // 记录上下文文件夹，消息内展示 Agent 视野
       ...(opts?.folderId ? { contextFolderId: opts.folderId } : {}),
     };
@@ -509,7 +516,10 @@ export const useAIStore = create<AIState>((set, get) => ({
     updateActiveMessages(set, (msgs) =>
       (opts?.replaceLastUser ? [...msgs, assistantMsg] : [...msgs, userMsg, assistantMsg]).slice(-MAX_MESSAGES),
     );
-    if (needsTitle) get().renameConversation(get().activeId!, autoTitle(trimmed));
+    if (needsTitle) {
+      const title = trimmed ? autoTitle(trimmed) : images.length > 0 ? `图片 · ${images[0]!.name}` : '新会话';
+      get().renameConversation(get().activeId!, title);
+    }
     set({ streaming: true, streamingMessageId: assistantMsg.id });
     void get()._persist();
 
@@ -518,6 +528,7 @@ export const useAIStore = create<AIState>((set, get) => ({
       messageId: assistantMsg.id,
       text: trimmed,
       history,
+      ...(images.length > 0 ? { images } : {}),
       ...(opts?.folderId ? { contextFolderId: opts.folderId } : {}),
     };
     // 死端口保护：MV3 下 SW 可能已被回收（port 失效但 onDisconnect 未触发），
@@ -590,13 +601,18 @@ export const useAIStore = create<AIState>((set, get) => ({
       .filter((b): b is { kind: 'text'; text: string } => b.kind === 'text')
       .map((b) => b.text)
       .join('');
-    if (!text.trim()) return;
+    const images = imagesOf(lastUser);
+    if (!text.trim() && images.length === 0) return;
     // 移除该 user 消息之后的所有消息（含失败的回复），replaceLastUser 复用原指令
     updateActiveMessages(set, (msgs) => msgs.slice(0, lastUserIdx + 1));
     void get()._persist();
     // 重试沿用原消息的上下文文件夹（而非当前选中的文件夹，保持 Agent 视野一致）
     const folderId = lastUser.contextFolderId ?? useBookmarkStore.getState().selectedFolderId ?? undefined;
-    void get().send(text, { ...(folderId ? { folderId } : {}), replaceLastUser: true });
+    void get().send(text, {
+      ...(folderId ? { folderId } : {}),
+      ...(images.length > 0 ? { images } : {}),
+      replaceLastUser: true,
+    });
   },
 
   async clearMessages() {
@@ -1396,6 +1412,14 @@ function messageWeight(m: ChatMessage): number {
     else if (b.kind === 'reasoning') w += b.text.length;
     else w += (b.record.result?.length ?? 0) + (b.record.error?.length ?? 0) + 1;
   }
+  /*
+   * 图片必须计入权重。
+   *
+   * 合并逻辑用「权重更大的一方胜出」判断哪份更新；不计图片时，一条刚发出、
+   * 只带图片的消息权重为 0，会被 storage 里同 id 的空占位反过来覆盖——
+   * 重开侧边栏图片就没了。
+   */
+  for (const img of imagesOf(m)) w += img.dataUrl.length;
   return w;
 }
 

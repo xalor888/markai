@@ -59,7 +59,8 @@ import { Switch } from '@/components/ui/switch';
 import { filterSlashCommands } from '@/lib/chat/slash';
 import { ActivityStatus, StallBanner } from './activity-status';
 import { MessageView } from './message-view';
-import { ComposerImageButton } from './composer-extras';
+import { ComposerImageButton, ComposerImageStrip, acceptFiles, imageFilesFrom } from './composer-extras';
+import type { ChatImage } from '@/lib/ai/image-input';
 
 /** 快捷指令 chip */
 interface QuickChip {
@@ -196,6 +197,8 @@ export function ChatPanel({
   }, [config]);
 
   const [input, setInput] = useState('');
+  /** 待发送图片：随下一条消息发出，发完清空 */
+  const [pendingImages, setPendingImages] = useState<ChatImage[]>([]);
   const [stickToBottom, setStickToBottom] = useState(true);
   const [confirmClear, setConfirmClear] = useState(false);
   const [confirmDeleteSession, setConfirmDeleteSession] = useState<string | null>(null);
@@ -278,12 +281,34 @@ export function ChatPanel({
 
   const submit = () => {
     const text = input.trim();
-    if (!text || streaming) return;
+    if ((!text && pendingImages.length === 0) || streaming) return;
+    const images = pendingImages;
     setInput('');
+    setPendingImages([]);
     if (inputRef.current) inputRef.current.style.height = 'auto';
     // 自动附带当前查看的文件夹作为上下文，让「把这里的书签整理一下」这类自然指令可被 Agent 理解
     const folderId = useBookmarkStore.getState().selectedFolderId ?? undefined;
-    void send(text, folderId ? { folderId } : undefined);
+    void send(text, {
+      ...(folderId ? { folderId } : {}),
+      ...(images.length > 0 ? { images } : {}),
+    });
+  };
+
+  /**
+   * 粘贴/拖拽进来的图片：复用按钮里的同一套压缩与上限逻辑。
+   * 这里单独抽出来是因为 `ComposerImageButton` 的 `add` 在组件内部，
+   * 而输入框需要直接接收 `clipboardData` / `dataTransfer`。
+   */
+  const addImageFiles = async (files: readonly File[]) => {
+    if (files.length === 0) return;
+    const { next, rejected } = await acceptFiles(files, pendingImages);
+    if (next.length > 0) setPendingImages((prev) => [...prev, ...next]);
+    if (rejected > 0) {
+      pushToast('有图片没有加上', {
+        variant: 'destructive',
+        description: '最多 3 张、每张压缩后不超过 300KB。请换一张更小的图片。',
+      });
+    }
   };
 
   /** 斜杠命令：只填入 prompt，不自动发送 */
@@ -794,7 +819,22 @@ export function ChatPanel({
           </div>
         )}
         <StallBanner activity={activity} onCancel={cancel} />
-        <div className="rounded-xl border border-border bg-background p-1.5 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/15">
+        <div
+          data-testid="composer"
+          onDragOver={(e) => {
+            // 只有拖图片时才拦（拖文本进来应保持浏览器默认行为）
+            if (imageFilesFrom(e.dataTransfer).length === 0) return;
+            e.preventDefault();
+            e.dataTransfer.dropEffect = 'copy';
+          }}
+          onDrop={(e) => {
+            const files = imageFilesFrom(e.dataTransfer);
+            if (files.length === 0) return;
+            e.preventDefault();
+            void addImageFiles(files);
+          }}
+          className="rounded-xl border border-border bg-background p-1.5 transition-colors focus-within:border-ring focus-within:ring-2 focus-within:ring-ring/15"
+        >
           <Textarea
             data-testid="chat-input"
             ref={inputRef}
@@ -802,10 +842,18 @@ export function ChatPanel({
             onChange={(e) => setInput(e.target.value)}
             onInput={(e) => autoGrow(e.currentTarget)}
             onKeyDown={onKeyDown}
+            onPaste={(e) => {
+              // 粘贴截图：只拦截"带图片"的粘贴，普通文本照常落进输入框
+              const files = imageFilesFrom(e.clipboardData);
+              if (files.length === 0) return;
+              e.preventDefault();
+              void addImageFiles(files);
+            }}
             placeholder={streaming ? 'Agent 正在处理，可点右侧停止…' : '问点什么，或让我整理书签…'}
             rows={1}
             className="max-h-24 min-h-9 w-full resize-none border-0 bg-transparent px-2 py-1.5 text-md focus-visible:border-0 focus-visible:ring-0"
           />
+          <ComposerImageStrip images={pendingImages} onChange={setPendingImages} />
           <div className="flex items-center gap-1 px-1 pt-0.5 pb-0.5">
             {selectedFolderId && folderTitle && (
               <button
@@ -831,7 +879,7 @@ export function ChatPanel({
             <span className="ml-auto hidden shrink-0 text-2xs text-muted-foreground/50 sm:inline">
               {streaming ? '' : 'Enter 发送'}
             </span>
-            <ComposerImageButton disabled={streaming} />
+            <ComposerImageButton disabled={streaming} images={pendingImages} onChange={setPendingImages} />
             {!streaming && input && (
               <Button
                 variant="ghost"
@@ -860,7 +908,7 @@ export function ChatPanel({
             ) : (
               <Button
                 size="icon"
-                disabled={!input.trim()}
+                disabled={!input.trim() && pendingImages.length === 0}
                 onClick={submit}
                 title="发送"
                 aria-label="发送"

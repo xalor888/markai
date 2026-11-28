@@ -94,7 +94,9 @@ const sampleTurn: ApiMessage[] = [
 ];
 const turnTokens = estimateRequestTokens(sampleTurn) - toolTokens;
 console.log('\n【一次工具往返的成本】用户消息 + 工具调用 + 12 条结果');
-console.log(`  合计 ${fmt(turnTokens)} tok（其中工具结果本身 ${fmt(estimateTokens(sampleTurn[2]!.content ?? ''))} tok）`);
+const toolContent = sampleTurn[2]!.content;
+const toolText = typeof toolContent === 'string' ? toolContent : '';
+console.log(`  合计 ${fmt(turnTokens)} tok（其中工具结果本身 ${fmt(estimateTokens(toolText))} tok）`);
 
 const window = getModelContextWindow('deepseek-v4-pro');
 const usable = Math.round(window * 0.8) - fixed;

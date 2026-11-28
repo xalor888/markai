@@ -59,6 +59,7 @@ import { Switch } from '@/components/ui/switch';
 import { filterSlashCommands } from '@/lib/chat/slash';
 import { ActivityStatus, StallBanner } from './activity-status';
 import { MessageView } from './message-view';
+import { ComposerImageButton } from './composer-extras';
 
 /** 快捷指令 chip */
 interface QuickChip {
@@ -830,6 +831,7 @@ export function ChatPanel({
             <span className="ml-auto hidden shrink-0 text-2xs text-muted-foreground/50 sm:inline">
               {streaming ? '' : 'Enter 发送'}
             </span>
+            <ComposerImageButton disabled={streaming} />
             {!streaming && input && (
               <Button
                 variant="ghost"

@@ -1,0 +1,132 @@
+/* ── 外观层：强调色 / 背景 / 动效强度 ──
+   与 main.css 分离，避免两条工作线同时改同一个文件的同一段。
+   变量前缀 --mk-*，由 stores/appearanceStore.ts 写到 <html> 上。 */
+
+/* 强调色预设：只覆盖"品牌色"三件套，语义色（成功/危险）不随主题变 */
+:root[data-accent='ocean'] {
+  --color-accent: #0e7490;
+  --color-accent-muted: #e6f6f9;
+  --color-ring: #0e7490;
+}
+:root[data-accent='forest'] {
+  --color-accent: #15803d;
+  --color-accent-muted: #eaf6ee;
+  --color-ring: #15803d;
+}
+:root[data-accent='amber'] {
+  --color-accent: #b45309;
+  --color-accent-muted: #fdf3e3;
+  --color-ring: #b45309;
+}
+:root[data-accent='rose'] {
+  --color-accent: #be123c;
+  --color-accent-muted: #fdeef2;
+  --color-ring: #be123c;
+}
+:root[data-accent='graphite'] {
+  --color-accent: #475569;
+  --color-accent-muted: #eef1f5;
+  --color-ring: #475569;
+}
+
+.dark[data-accent='ocean'] {
+  --color-accent: #67e8f9;
+  --color-accent-muted: #10343c;
+  --color-ring: #67e8f9;
+  --color-accent-foreground: #06232a;
+}
+.dark[data-accent='forest'] {
+  --color-accent: #6ee7a0;
+  --color-accent-muted: #12301f;
+  --color-ring: #6ee7a0;
+  --color-accent-foreground: #08210f;
+}
+.dark[data-accent='amber'] {
+  --color-accent: #fcd34d;
+  --color-accent-muted: #3a2a0e;
+  --color-ring: #fcd34d;
+  --color-accent-foreground: #2a1c05;
+}
+.dark[data-accent='rose'] {
+  --color-accent: #fda4af;
+  --color-accent-muted: #3b1620;
+  --color-ring: #fda4af;
+  --color-accent-foreground: #2c0a12;
+}
+.dark[data-accent='graphite'] {
+  --color-accent: #cbd5e1;
+  --color-accent-muted: #26303d;
+  --color-ring: #cbd5e1;
+  --color-accent-foreground: #10151c;
+}
+
+/* ── 背景 ──
+   极光用两层大半径径向渐变 + 极慢位移；关掉动效时停在第一帧。
+   色相跟着 accent 走（用 color-mix 吃 --color-accent），所以换强调色时背景也换气质。 */
+.mk-bg-aurora {
+  background-color: var(--color-background);
+  background-image:
+    radial-gradient(60% 50% at 18% 12%, color-mix(in srgb, var(--color-accent) 26%, transparent), transparent 70%),
+    radial-gradient(55% 45% at 82% 8%, color-mix(in srgb, var(--tag-violet) 18%, transparent), transparent 72%),
+    radial-gradient(70% 55% at 70% 92%, color-mix(in srgb, var(--tag-blue) 14%, transparent), transparent 70%);
+  background-size: 160% 160%;
+  animation: mk-aurora-drift 46s ease-in-out infinite alternate;
+}
+
+@keyframes mk-aurora-drift {
+  0% {
+    background-position: 0% 0%;
+  }
+  100% {
+    background-position: 100% 60%;
+  }
+}
+
+.mk-bg-mesh {
+  background-color: var(--color-background);
+  background-image:
+    linear-gradient(to right, color-mix(in srgb, var(--color-border) 70%, transparent) 1px, transparent 1px),
+    linear-gradient(to bottom, color-mix(in srgb, var(--color-border) 70%, transparent) 1px, transparent 1px);
+  background-size: 22px 22px;
+}
+
+.mk-bg-image {
+  background-color: var(--color-background);
+  filter: saturate(1.05);
+}
+
+/* ── 动效强度 ──
+   calm：只留 120–180ms 的颜色/位移过渡，去掉入场与循环动画；
+   off：全部 animation 归零（仍保留焦点环，可访问性不受影响）。 */
+:root[data-motion='calm'] * {
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
+}
+:root[data-motion='calm'] *,
+:root[data-motion='calm'] *::before,
+:root[data-motion='calm'] *::after {
+  transition-duration: 120ms !important;
+}
+
+:root[data-motion='off'] *,
+:root[data-motion='off'] *::before,
+:root[data-motion='off'] *::after {
+  animation: none !important;
+  transition: none !important;
+}
+
+/* 系统级"减少动态效果"优先级最高：用户系统的选择不该被应用覆盖 */
+@media (prefers-reduced-motion: reduce) {
+  :root * {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
+
+/* ── 密度 ── */
+:root[data-density='cozy'] {
+  --mk-row-gap: 0.5rem;
+}
+:root[data-density='compact'] {
+  --mk-row-gap: 0.25rem;
+}

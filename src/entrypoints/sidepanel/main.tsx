@@ -2,7 +2,10 @@ import { useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import { ErrorBoundary } from '@/components/common/error-boundary';
 import '@/assets/main.css';
+import '@/assets/appearance.css';
 import { ThemeProvider } from '@/components/theme/theme-provider';
+import { AppearanceLayer } from '@/components/theme/appearance-layer';
+import { installFeatures } from '@/lib/features/loader';
 import { installLiquidGlass } from '@/lib/ui/liquid-glass-global';
 import { ToastViewport } from '@/components/toast/toast';
 import { Workspace } from '@/components/workspace/workspace';
@@ -56,6 +59,7 @@ function SidePanelApp() {
   return (
     <>
       <ThemeProvider />
+      <AppearanceLayer />
       <Workspace mode="compact" />
       <ToastViewport />
     </>
@@ -63,6 +67,7 @@ function SidePanelApp() {
 }
 
 installLiquidGlass();
+installFeatures();
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <ErrorBoundary area="MarkAI 侧边栏">

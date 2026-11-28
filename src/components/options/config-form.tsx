@@ -29,6 +29,9 @@ import { CATEGORY_LABELS, type MemoryCategory } from '@/lib/ai/memory';
 import { clearUndoPoints } from '@/lib/undo/recorder';
 import { countTree, toJsonExport, toNetscapeHtml } from '@/lib/bookmarks/export-file';
 import { PetSettingsSection } from '@/components/options/pet-settings';
+import { AppearanceSettingsSection } from '@/components/options/appearance-settings';
+import { IdeasSettingsSection } from '@/components/options/ideas-settings';
+import { ExternalSettingsSection } from '@/components/options/external-settings';
 import { useThemeStore, type Theme } from '@/stores/themeStore';
 import {
   PROVIDERS,
@@ -106,7 +109,7 @@ function ThemePreview({ value }: { value: Theme }) {
 }
 
 /** 主题卡片：比一行三个按钮更像"选择"，也能一眼看出当前用的是哪套 */
-function ThemeCards() {
+export function ThemeCards() {
   const theme = useThemeStore((s) => s.theme);
   const setTheme = useThemeStore((s) => s.setTheme);
   const options: Array<{ value: Theme; label: string; icon: React.ComponentType<{ className?: string }> }> = [
@@ -1343,17 +1346,17 @@ export function ConfigForm() {
 
       {/* ── 外观 ── */}
       <ErrorBoundary area="外观">
-        <SettingsSection
-          id="appearance"
-          icon={Palette}
-          title="外观"
-          description="设置页、侧边栏与弹窗共用同一套主题；切换立即生效并记住。"
-          keywords="外观 主题 浅色 深色 系统 theme dark light"
-        >
-          <SettingRow label="界面主题" keywords="主题 外观 theme dark light 系统" wide hint="跟随系统会随 macOS / Windows 的深浅模式自动切换。">
-            <ThemeCards />
-          </SettingRow>
-        </SettingsSection>
+        <AppearanceSettingsSection />
+      </ErrorBoundary>
+
+      {/* ── 点子 ── */}
+      <ErrorBoundary area="点子">
+        <IdeasSettingsSection />
+      </ErrorBoundary>
+
+      {/* ── 对外接口 ── */}
+      <ErrorBoundary area="对外接口">
+        <ExternalSettingsSection />
       </ErrorBoundary>
 
       {/* ── 数据管理 ── */}

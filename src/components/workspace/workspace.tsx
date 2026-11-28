@@ -23,6 +23,7 @@ import { ShortcutsDialog } from '@/components/common/shortcuts-dialog';
 import { ErrorBoundary } from '@/components/common/error-boundary';
 import { useUIStore } from '@/stores/uiStore';
 import { PetLayer } from '@/components/pet/pet-layer';
+import { TopbarExtras } from '@/components/workspace/topbar-extras';
 import { CHAT_WIDTH_MAX, CHAT_WIDTH_MAX_COMPACT, clampChatWidth } from '@/lib/chat-width';
 import {
   clearSearchHistory,
@@ -510,6 +511,7 @@ export function Workspace({
               {pendingCount}
             </button>
           )}
+          <TopbarExtras />
           {/* 其余入口全收进「更多」：有待删/整理异常时触发按钮上带红点，收起来不等于藏起来 */}
           <MoreMenu
             pendingCount={pendingCount}

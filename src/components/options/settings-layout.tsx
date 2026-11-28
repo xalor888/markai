@@ -58,6 +58,8 @@ export const SETTINGS_SECTIONS: SettingsSectionMeta[] = [
   { id: 'personalize', label: '个性化', icon: Sparkles, group: 'agent' },
   { id: 'appearance', label: '外观', icon: Palette, group: 'personal' },
   { id: 'pet', label: '宠物', icon: Cat, group: 'personal' },
+  { id: 'ideas', label: '点子', icon: Sparkles, group: 'agent' },
+  { id: 'external', label: '对外接口', icon: Plug, group: 'agent' },
   { id: 'data', label: '数据管理', icon: Database, group: 'personal' },
 ];
 

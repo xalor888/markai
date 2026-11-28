@@ -4,6 +4,7 @@ import { useThemeStore, type Theme } from '@/stores/themeStore';
 import { useConfigStore } from '@/stores/configStore';
 import { pushToast } from '@/lib/toast';
 import { cn } from '@/lib/utils';
+import { usePresence } from '@/lib/ui/use-presence';
 
 /**
  * 顶栏「更多」菜单。
@@ -53,6 +54,7 @@ export function MoreMenu({
   onSaveCurrentTab: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const presence = usePresence(open);
   const wrapRef = useRef<HTMLDivElement>(null);
   const theme = useThemeStore((s) => s.theme);
   const setTheme = useThemeStore((s) => s.setTheme);
@@ -168,11 +170,12 @@ export function MoreMenu({
         )}
       </button>
 
-      {open && (
+      {presence.mounted && (
         <div
           role="menu"
           data-testid="more-menu"
-          className="markai-glass markai-glass-liquid animate-fade-in absolute right-0 z-50 mt-1 w-52 overflow-hidden rounded-md py-1"
+          data-state={presence.state}
+          className="markai-glass markai-glass-liquid mk-glass-2 mk-panel absolute right-0 z-50 mt-1 w-52 overflow-hidden rounded-md py-1"
         >
           {item(BookmarkPlus, '收藏当前页面', onSaveCurrentTab)}
           {item(BrushCleaning, '简单清理', onCleanup)}

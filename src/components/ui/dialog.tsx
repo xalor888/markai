@@ -2,6 +2,7 @@ import { X } from 'lucide-react';
 import { useEffect, useRef, type KeyboardEvent, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { cn } from '@/lib/utils';
+import { usePresence } from '@/lib/ui/use-presence';
 
 /**
  * 模态对话框：无阴影，靠 1px 边框 + 遮罩分层。
@@ -29,6 +30,7 @@ export function Dialog({
   testId?: string;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const presence = usePresence(open);
 
   // Esc 关闭 + 锁定背景滚动 + 打开聚焦面板 + 关闭还原焦点（原生对话框行为）
   useEffect(() => {
@@ -55,7 +57,7 @@ export function Dialog({
     };
   }, [open, onOpenChange]);
 
-  if (!open) return null;
+  if (!presence.mounted) return null;
 
   /** 焦点陷阱：Tab / Shift+Tab 在对话框内循环 */
   const onPanelKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -76,7 +78,12 @@ export function Dialog({
   };
 
   return createPortal(
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div
+      className={cn(
+        'fixed inset-0 z-50 flex items-center justify-center p-4',
+        presence.state === 'closed' && 'pointer-events-none',
+      )}
+    >
       <div className="animate-fade-in absolute inset-0 bg-black/30" onClick={() => onOpenChange(false)} />
       <div
         ref={panelRef}
@@ -88,11 +95,12 @@ export function Dialog({
         onKeyDown={onPanelKeyDown}
         className={cn(
           // 对话框是浮层：用玻璃层（下面压着书签列表，能糊出层次）。
-          // 液态版额外做边缘折射；淡入而不是缩放——缩放会让背景滤镜每帧重采样。
+          // v2 用 0.98 的轻微缩放入场（180ms，只动 transform/opacity）。
           // 面板本身不滚：滚动放在内层，液态玻璃的 ::before 高光边才不会跟着内容滚走。
-          'markai-glass markai-glass-liquid animate-fade-in relative max-w-[calc(100vw-32px)] overflow-hidden rounded-lg outline-none',
+          'markai-glass markai-glass-liquid mk-glass-2 mk-panel relative max-w-[calc(100vw-32px)] overflow-hidden rounded-lg outline-none',
           width,
         )}
+        data-state={presence.state}
       >
         <div className="max-h-[calc(100vh-32px)] overflow-y-auto p-4">
           <div className="mb-3.5 flex items-start justify-between gap-3">

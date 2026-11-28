@@ -128,6 +128,8 @@ export function ThemeCards() {
             type="button"
             role="radio"
             aria-checked={selected}
+            aria-label={`主题：${opt.label}`}
+            data-testid={`theme-${opt.value}`}
             onClick={() => void setTheme(opt.value)}
             className={cn(
               'flex h-[72px] flex-col items-center justify-center gap-1.5 rounded-lg border text-2xs transition-colors',

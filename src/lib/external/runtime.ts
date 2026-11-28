@@ -166,7 +166,9 @@ async function runOne(config: ExternalApiConfig, req: ExternalRequest): Promise<
   const startedAt = Date.now();
   try {
     const out = await withTimeout(
-      executeTool(req.tool, JSON.stringify(req.args)),
+      // 第四个参数是 ctx：external 标记让删除类工具强制走"只提议"，
+      // 不受用户给聊天 Agent 开的「无需确认」影响。
+      executeTool(req.tool, JSON.stringify(req.args), undefined, undefined, { external: true }),
       EXEC_TIMEOUT_MS,
       `工具「${req.tool}」执行超时`,
     );

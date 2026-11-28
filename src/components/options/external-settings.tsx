@@ -40,7 +40,7 @@ function fmtTime(at: number): string {
 export function ExternalSettingsSection() {
   const [config, setConfig] = useState<ExternalApiConfig>(EXTERNAL_API_DEFAULT);
   const [audit, setAudit] = useState<ExternalAuditEntry[]>([]);
-  const [copied, setCopied] = useState<'token' | 'config' | null>(null);
+  const [copied, setCopied] = useState<'token' | 'config' | 'mcp' | 'cli' | 'skill' | null>(null);
   const [loaded, setLoaded] = useState(false);
 
   const refresh = useCallback(async () => {
@@ -101,6 +101,27 @@ export function ExternalSettingsSection() {
       kind === 'token'
         ? config.token
         : `node tools/markai-bridge.mjs --token ${config.token || '<TOKEN>'} --port ${config.port}`;
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(kind);
+      window.setTimeout(() => setCopied(null), 1_600);
+    } catch {
+      pushToast('复制失败', { description: '浏览器拒绝了剪贴板访问，请手动选中复制。', variant: 'destructive' });
+    }
+  };
+
+  /*
+   * 三种接入方式的命令各复制各的：MCP 客户端要 JSON 配置，CLI 用户要一条 export，
+   * Skill 要的是安装脚本。合成一条"万能命令"只会让每种人都要自己再删一半。
+   */
+  const copyCommand = async (kind: 'mcp' | 'cli' | 'skill') => {
+    const token = config.token || '<TOKEN>';
+    const text =
+      kind === 'mcp'
+        ? `node tools/markai-bridge.mjs --print-mcp-config --token ${token} --port ${config.port}`
+        : kind === 'cli'
+          ? `export MARKAI_TOKEN=${token}`
+          : 'node tools/install-skill.mjs';
     try {
       await navigator.clipboard.writeText(text);
       setCopied(kind);
@@ -253,8 +274,34 @@ export function ExternalSettingsSection() {
               {copied === 'config' ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
             </Button>
           </div>
+          <div className="grid gap-1 sm:grid-cols-3">
+            {(
+              [
+                ['mcp', 'MCP', 'node tools/markai-bridge.mjs --print-mcp-config'],
+                ['cli', 'CLI', 'export MARKAI_TOKEN=…'],
+                ['skill', 'Skills', 'node tools/install-skill.mjs'],
+              ] as const
+            ).map(([kind, label, preview]) => (
+              <button
+                key={kind}
+                type="button"
+                onClick={() => void copyCommand(kind)}
+                aria-label={`复制 ${label} 接入命令`}
+                data-testid={`external-copy-${kind}`}
+                className="flex min-w-0 items-center gap-1.5 rounded-sm border border-border bg-muted/30 px-2 py-1.5 text-left transition-colors hover:bg-muted"
+              >
+                <span className="shrink-0 text-2xs font-medium">{label}</span>
+                <code className="min-w-0 flex-1 truncate font-mono text-2xs text-muted-foreground">{preview}</code>
+                {copied === kind ? (
+                  <Check className="h-3 w-3 shrink-0 text-accent" />
+                ) : (
+                  <Copy className="h-3 w-3 shrink-0 text-muted-foreground" />
+                )}
+              </button>
+            ))}
+          </div>
           <p className="text-2xs leading-4 text-muted-foreground">
-            MCP 配置：<code className="font-mono">node tools/markai-bridge.mjs --print-mcp-config --token &lt;TOKEN&gt;</code>
+            Skill 安装后，外部 Agent 会通过 <code className="font-mono">tools/markai.mjs</code> 操作书签；删除仍需你确认。
           </p>
         </div>
       </SettingRow>

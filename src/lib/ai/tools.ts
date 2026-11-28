@@ -121,6 +121,14 @@ async function resolvePaths(ids: string[]): Promise<Map<string, string>> {
 export interface ToolContext {
   /** 本轮对话聚焦的文件夹 id（用户选中/正在查看的那个） */
   focusFolderId?: string;
+  /**
+   * 调用方是否来自外部接口（MCP / CLI / Skills）。
+   *
+   * 为什么要单列：`deleteMode: 'auto'` 是用户对自己在聊天里的 Agent 授权的，
+   * 不等于授权任何本机进程。外部调用必须**永远**只提议、不执行删除，
+   * 否则"删除永远需要你确认"就成了一句空话——而它正是这套接口的安全前提。
+   */
+  external?: boolean;
 }
 
 /** 未指定父级时的兜底顺序：本轮聚焦文件夹 → 书签栏根 */
@@ -2416,13 +2424,23 @@ export async function getDeleteMode(): Promise<'confirm' | 'auto'> {
 }
 
 /** 删除安全机制：默认只生成提议；"无需确认"模式下自动执行 */
-async function proposeDeletions(args: unknown, onProgress?: (text: string) => void, signal?: AbortSignal): Promise<ToolOutput> {
+async function proposeDeletions(
+  args: unknown,
+  onProgress?: (text: string) => void,
+  signal?: AbortSignal,
+  ctx?: ToolContext,
+): Promise<ToolOutput> {
   const throwIfAborted = makeAbortCheck(signal);
   // 入口先检查一次：早退分支都在主循环之前，不在这里查就等于那些分支里取消无效。
   throwIfAborted();
   const { items } = proposeSchema.parse(args);
   await ensureRoots();
-  const mode = await getDeleteMode();
+  /*
+   * 外部调用（MCP/CLI/Skills）一律按 confirm 处理，忽略用户的「无需确认」设置：
+   * 那个设置授权的是聊天里的 Agent，不是本机上任何一个拿到 token 的进程。
+   * 忽略而不是报错——提议本身仍然有价值，用户照常在界面里一键确认。
+   */
+  const mode = ctx?.external ? 'confirm' : await getDeleteMode();
   const deletions: DeletionProposal[] = [];
   let executed = 0;
   let failed = 0;

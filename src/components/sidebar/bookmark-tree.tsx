@@ -17,16 +17,29 @@ import {
   Link2,
   Loader2,
   LocateFixed,
+  ArrowUpDown,
   Route,
   Pencil,
   Tag,
   ScanSearch,
   Search,
   Sparkles,
+  Smartphone,
+  Star,
   Trash2,
   X,
 } from 'lucide-react';
 import { useBookmarkStore, copyNodeDeep, resolveTitlePath, type TreeContextMenu } from '@/stores/bookmarkStore';
+import {
+  SIDEBAR_SORT_OPTIONS,
+  countBookmarks,
+  readSidebarPrefs,
+  sortTree,
+  writeSidebarPrefs,
+  type SidebarPrefs,
+  type SidebarSort,
+} from '@/lib/sidebar/prefs';
+import { rootKindOf, type RootKind } from '@/lib/sidebar/roots';
 
 /**
  * 树一次最多渲染多少行。
@@ -100,6 +113,39 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
   const setFilter = useBookmarkStore((s) => s.setSearchQuery);
   const listRef = useRef<HTMLDivElement>(null);
 
+  /*
+   * 排序/密度偏好：初值用默认，挂载后再从 storage 读。
+   *
+   * 为什么不在 render 前同步读：chrome.storage 是异步的，同步等会阻塞首帧；
+   * 而排序是"锦上添花"——先按默认显示，读到偏好再重排，用户几乎察觉不到。
+   */
+  const [prefs, setPrefs] = useState<SidebarPrefs | null>(null);
+  useEffect(() => {
+    let alive = true;
+    void readSidebarPrefs().then((p) => {
+      if (alive) setPrefs(p);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const sort = prefs?.sort ?? 'manual';
+  const compactRows = prefs?.density === 'compact';
+  const updatePrefs = useCallback((patch: Partial<SidebarPrefs>) => {
+    setPrefs((prev) => {
+      const next = { ...(prev ?? { sort: 'manual', density: 'comfortable', showCounts: true }), ...patch };
+      void writeSidebarPrefs(next);
+      return next;
+    });
+  }, []);
+
+  /*
+   * 排序后的根树。`manual` 直接复用原引用，避免无谓重建整棵树。
+   * 注意：排序只影响**显示顺序**，拖拽仍按真实 index 落位——两者不冲突，
+   * 但排序模式下拖动后顺序会被重新排回去，这是预期（要自由排序就选"手动顺序"）。
+   */
+  const displayRoots = useMemo(() => sortTree(roots, sort), [roots, sort]);
+
   // 「在树中显示」：滚动到目标节点、同步键盘高亮并聚焦容器，随后清空标记
   useEffect(() => {
     if (!revealId) return;
@@ -127,9 +173,9 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
         }
       }
     };
-    walk(roots, 0, false);
+    walk(displayRoots, 0, false);
     return out;
-  }, [roots, expandedIds, filter]);
+  }, [displayRoots, expandedIds, filter]);
 
   /*
    * 渲染上限：树不是虚拟列表，`visible` 有多少行就挂多少个 DOM 节点。
@@ -307,10 +353,32 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
         {/* 过滤模式下展开/折叠无可见反馈，隐藏避免困惑 */}
         {!filter && (
           <>
+            {/*
+             * 排序：用一个原生 select 而不是自绘菜单。
+             * 侧边栏只有 208px 宽，弹出菜单会盖住树本身；原生 select 在 macOS 上是系统弹层，
+             * 不占树的空间，也不需要处理"点外面关闭"那套逻辑。
+             */}
+            <label className="relative ml-auto flex items-center" title="排序方式">
+              <ArrowUpDown className="pointer-events-none absolute left-1 h-3 w-3 text-muted-foreground" aria-hidden="true" />
+              <span className="sr-only">排序方式</span>
+              <select
+                value={sort}
+                onChange={(e) => updatePrefs({ sort: e.target.value as SidebarSort })}
+                data-testid="tree-sort"
+                aria-label="排序方式"
+                className="h-6 cursor-pointer appearance-none rounded-sm border border-transparent bg-transparent py-0 pr-1 pl-5 text-2xs text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground focus:border-ring focus:outline-none"
+              >
+                {SIDEBAR_SORT_OPTIONS.map((opt) => (
+                  <option key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button
               type="button"
               onClick={() => useBookmarkStore.getState().expandAll()}
-              className="ml-auto rounded-sm p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              className="rounded-sm p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               title="全部展开"
               aria-label="全部展开"
             >
@@ -324,6 +392,25 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
               aria-label="全部折叠"
             >
               <ChevronsDownUp className="h-3 w-3" />
+            </button>
+            {/*
+             * 密度切换：舒适/紧凑只改行高，不改字号。
+             * 侧边栏里"一屏能看到多少个文件夹"直接决定要不要滚动，而字号变小会伤可读性，
+             * 所以只压垂直留白。
+             */}
+            <button
+              type="button"
+              onClick={() => updatePrefs({ density: compactRows ? 'comfortable' : 'compact' })}
+              className={cn(
+                'rounded-sm px-1 py-0.5 text-2xs transition-colors hover:bg-muted hover:text-foreground',
+                compactRows ? 'text-accent' : 'text-muted-foreground',
+              )}
+              title={compactRows ? '切换为舒适密度' : '切换为紧凑密度'}
+              aria-label={compactRows ? '切换为舒适密度' : '切换为紧凑密度'}
+              aria-pressed={compactRows}
+              data-testid="tree-density"
+            >
+              {compactRows ? '紧凑' : '舒适'}
             </button>
           </>
         )}
@@ -374,6 +461,7 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
             setDropTarget={setDropTarget}
             filter={filter}
             onActivate={handleActivate}
+            compact={compactRows}
           />
         ))}
         {/*
@@ -441,6 +529,7 @@ const TreeRow = memo(function TreeRow({
   setDropTarget,
   filter,
   onActivate,
+  compact,
 }: {
   node: BNode;
   depth: number;
@@ -451,6 +540,8 @@ const TreeRow = memo(function TreeRow({
   /** 树过滤词（匹配部分高亮） */
   filter: string;
   onActivate: (id: string) => void;
+  /** 紧凑密度：行高从 32px 收到 26px，只压留白不动字号 */
+  compact?: boolean;
 }) {
   const isFolder = !node.url;
   const expanded = useBookmarkStore((s) => s.expandedIds.includes(node.id));
@@ -608,6 +699,7 @@ const TreeRow = memo(function TreeRow({
     <div
       data-testid="tree-node"
       data-node-id={node.id}
+      data-selected={selected}
       role="treeitem"
       aria-expanded={isFolder ? expanded : undefined}
       aria-selected={selected}
@@ -673,7 +765,8 @@ const TreeRow = memo(function TreeRow({
         setContextMenu(menu);
       }}
       className={cn(
-        'relative flex h-8 cursor-pointer items-center gap-1.5 rounded-md pr-2 text-xs transition-colors',
+        'mk-tree-row relative flex cursor-pointer items-center gap-1.5 rounded-md pr-2 text-xs transition-colors',
+        compact ? 'h-[26px]' : 'h-8',
         selected ? 'bg-accent-muted font-medium text-accent' : 'text-foreground hover:bg-muted',
         active && 'ring-1 ring-inset ring-ring/40',
         dragOver && 'bg-accent-muted/50 ring-1 ring-inset ring-accent/50',
@@ -699,7 +792,7 @@ const TreeRow = memo(function TreeRow({
         <span className="w-3.5 shrink-0" />
       )}
       {isFolder ? (
-        <Folder className="h-3.5 w-3.5 shrink-0 text-accent/70" />
+        <FolderGlyph node={node} depth={depth} />
       ) : (
         <Favicon url={node.url} size={14} />
       )}
@@ -718,9 +811,10 @@ const TreeRow = memo(function TreeRow({
             'ml-auto shrink-0 rounded-md px-1.5 py-px text-2xs tabular-nums',
             selected ? 'bg-card/70 text-accent' : 'bg-muted text-muted-foreground/70',
           )}
-          aria-label={`${node.children!.length} 项`}
+          aria-label={depth === 0 ? `共 ${countBookmarks(node.children)} 条书签` : `${node.children!.length} 项`}
+          title={depth === 0 ? '该根下的全部书签（含子文件夹）' : `${node.children!.length} 个直接子项`}
         >
-          {node.children!.length}
+          {depth === 0 ? countBookmarks(node.children) : node.children!.length}
         </span>
       )}
     </div>
@@ -728,6 +822,21 @@ const TreeRow = memo(function TreeRow({
 });
 
 /** 树过滤高亮：匹配词以 accent 标记（全部匹配，忽略大小写） */
+/**
+ * 文件夹图标：三个根各用自己的符号，子文件夹统一用 Folder。
+ *
+ * 为什么值得区分：用户扫一眼就能知道"这条属于书签栏还是移动设备"，
+ * 而不用展开或看标题——移动设备同步来的书签经常和本地书签同名。
+ */
+function FolderGlyph({ node, depth }: { node: BNode; depth: number }) {
+  const kind: RootKind = depth === 0 ? rootKindOf(node) : 'unknown';
+  const cls = 'h-3.5 w-3.5 shrink-0';
+  if (kind === 'bookmarks-bar') return <Star className={cn(cls, 'text-accent/70')} aria-hidden="true" />;
+  if (kind === 'other') return <FolderOpen className={cn(cls, 'text-accent/50')} aria-hidden="true" />;
+  if (kind === 'mobile') return <Smartphone className={cn(cls, 'text-accent/60')} aria-hidden="true" />;
+  return <Folder className={cn(cls, 'text-accent/70')} aria-hidden="true" />;
+}
+
 function highlightTitle(text: string, filter: string): ReactNode {
   const q = filter.trim().toLowerCase();
   if (!q) return text;

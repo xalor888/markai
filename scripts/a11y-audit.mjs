@@ -31,6 +31,7 @@ const child = spawn(
     `--disable-extensions-except=${OUT}`,
     `--load-extension=${OUT}`,
     `--remote-debugging-port=${PORT}`,
+    '--use-mock-keychain',
     '--headless=new',
     '--window-size=1440,900',
     'about:blank',

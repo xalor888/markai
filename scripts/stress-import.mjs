@@ -74,6 +74,7 @@ async function main() {
       '--disable-extensions-except=' + OUT_DIR,
       '--load-extension=' + OUT_DIR,
       `--remote-debugging-port=${CDP_PORT}`,
+      '--use-mock-keychain',
       '--window-size=1280,900',
       '--headless=new',
       'about:blank',

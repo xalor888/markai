@@ -43,6 +43,16 @@ export async function clearSeenIdeas(): Promise<void> {
 }
 
 /**
+ * 冷却表里还剩多少条（设置页显示用）。
+ *
+ * 读失败返回 0 而不是抛错：设置页不该因为一个统计数字打不开，
+ * 0 在这个语境下等价于"没有可清的东西"。
+ */
+export async function readSeenCount(now: number = Date.now()): Promise<number> {
+  return (await readSeen(now)).length;
+}
+
+/**
  * 生成点子：规则立刻返回，模型增强再追加。
  *
  * 返回的是**最终合并结果**（规则 + 通过过滤的模型点子），

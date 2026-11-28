@@ -335,9 +335,15 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
      * 库里一条超长标题就能把树撑到 5000px+，中栏被挤成 0、Agent 面板被顶出可视区。
      */
     <div className={cn('flex h-full min-h-0 w-full min-w-0 flex-col overflow-hidden bg-card', className)}>
-      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-3">
-        <BookMarked className="h-3.5 w-3.5 text-accent" />
-        <span className="text-2xs font-semibold tracking-wider text-muted-foreground uppercase">书签</span>
+      <div className="flex h-12 shrink-0 items-center gap-2 border-b border-border px-2.5">
+        <BookMarked className="h-3.5 w-3.5 shrink-0 text-accent" />
+        {/*
+         * 这里刻意不放「书签」文字标题。
+         *
+         * 完整页左栏 224px、侧栏浮层 208px，标题 + 排序下拉 + 展开/折叠 + 密度
+         * 四组控件一起放必然超宽；flex 允许收缩，文字就被压成「书 / 签」两行竖排
+         * （两处都实测复现）。图标已经说明这块是什么，树本身还有 aria-label="书签树"。
+         */}
         {/* 紧凑模式：把树收成图标条，给中栏让出宽度（侧边栏只有四百来像素） */}
         {collapsible && (
           <button
@@ -358,7 +364,7 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
              * 侧边栏只有 208px 宽，弹出菜单会盖住树本身；原生 select 在 macOS 上是系统弹层，
              * 不占树的空间，也不需要处理"点外面关闭"那套逻辑。
              */}
-            <label className="relative ml-auto flex items-center" title="排序方式">
+            <label className="relative ml-auto flex min-w-0 items-center" title="排序方式">
               <ArrowUpDown className="pointer-events-none absolute left-1 h-3 w-3 text-muted-foreground" aria-hidden="true" />
               <span className="sr-only">排序方式</span>
               <select
@@ -366,7 +372,7 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
                 onChange={(e) => updatePrefs({ sort: e.target.value as SidebarSort })}
                 data-testid="tree-sort"
                 aria-label="排序方式"
-                className="h-6 cursor-pointer appearance-none rounded-sm border border-transparent bg-transparent py-0 pr-1 pl-5 text-2xs text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground focus:border-ring focus:outline-none"
+                className="h-6 w-[5.5rem] shrink-0 cursor-pointer appearance-none truncate rounded-sm border border-transparent bg-transparent py-0 pr-1 pl-5 text-2xs whitespace-nowrap text-muted-foreground transition-colors hover:border-border hover:bg-muted hover:text-foreground focus:border-ring focus:outline-none"
               >
                 {SIDEBAR_SORT_OPTIONS.map((opt) => (
                   <option key={opt.value} value={opt.value}>
@@ -375,24 +381,36 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
                 ))}
               </select>
             </label>
-            <button
-              type="button"
-              onClick={() => useBookmarkStore.getState().expandAll()}
-              className="rounded-sm p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              title="全部展开"
-              aria-label="全部展开"
-            >
-              <ChevronsUpDown className="h-3 w-3" />
-            </button>
-            <button
-              type="button"
-              onClick={() => useBookmarkStore.getState().collapseAll()}
-              className="rounded-sm p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-              title="全部折叠"
-              aria-label="全部折叠"
-            >
-              <ChevronsDownUp className="h-3 w-3" />
-            </button>
+            {/*
+             * 展开/折叠全部只在**完整页**的左栏出现。
+             *
+             * 侧栏浮层只有 208px：排序下拉 + 密度 + 收起 + 这两颗按钮一起放，
+             * 头部会挤到文字换行（实测「手动顺序」被压成两行）。而浮层本身就是
+             * 「临时找一下」的场景，逐级点开比一键全展开更可控；
+             * 完整页 224px 也只留得下这三组，所以两边保持一致。
+             */}
+            {!collapsible && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => useBookmarkStore.getState().expandAll()}
+                  className="shrink-0 rounded-sm p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  title="全部展开"
+                  aria-label="全部展开"
+                >
+                  <ChevronsUpDown className="h-3 w-3" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => useBookmarkStore.getState().collapseAll()}
+                  className="shrink-0 rounded-sm p-0.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  title="全部折叠"
+                  aria-label="全部折叠"
+                >
+                  <ChevronsDownUp className="h-3 w-3" />
+                </button>
+              </>
+            )}
             {/*
              * 密度切换：舒适/紧凑只改行高，不改字号。
              * 侧边栏里"一屏能看到多少个文件夹"直接决定要不要滚动，而字号变小会伤可读性，
@@ -402,7 +420,7 @@ export function BookmarkTree({ className, collapsible = false }: { className?: s
               type="button"
               onClick={() => updatePrefs({ density: compactRows ? 'comfortable' : 'compact' })}
               className={cn(
-                'rounded-sm px-1 py-0.5 text-2xs transition-colors hover:bg-muted hover:text-foreground',
+                'shrink-0 rounded-sm px-1 py-0.5 text-2xs whitespace-nowrap transition-colors hover:bg-muted hover:text-foreground',
                 compactRows ? 'text-accent' : 'text-muted-foreground',
               )}
               title={compactRows ? '切换为舒适密度' : '切换为紧凑密度'}

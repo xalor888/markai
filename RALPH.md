@@ -3,16 +3,18 @@
 > 用户原话：把整个项目修到完美无瑕，主要是性能和 UI 以及这个 Agent；这个 Agent 落后太多了，超级难用。
 > 本文件是 Ralph 每轮新 Agent 的唯一上下文入口。**先读本文件，再读代码和测试，不要凭记忆假设。**
 
-## 1. 当前基线（2026-11-23）
+## 1. 当前基线（2026-11-29）
 
-- 版本：`0.2.174`（已发布，GitHub Release：markai-0.2.174-chrome.zip）
+- 版本：`0.2.175`（GitHub Release：markai-0.2.175-chrome.zip）
 - 仓库：`/Users/xalor/Documents/markai`，分支 `main`，工作区只有未跟踪的 `promo/`，**不要提交 promo/**。
 - 技术栈：WXT + React 19 + TypeScript + Tailwind v4 + Zustand + Chrome MV3。
-- 上次验证（0.2.174）：`npm run compile` 通过；`npm test` **1,112 项全过**；真实 Chrome e2e **214/214**；视觉审计 16/16。
-- 已知测试稳定性问题：e2e 的书签精灵说话用例偶发首轮 `firstLine=null`，复跑即过；这是 flaky，不是功能回归，下一轮应消除随机/冷却依赖。
+- 上次验证（0.2.175）：`npm run compile` 通过；`npm test` **1,289 项全过**（10 个文件）；真实 Chrome e2e **214/214**；视觉审计 17/17。
+- **e2e 挂起根因已定位并修复**：Chrome 158 起书签改走加密存储，临时 profile 拿不到 macOS Keychain 授权时 `chrome.bookmarks.getTree()` 回调永不触发、Promise 永不 resolve、`lastError` 为空。6 个真机脚本统一加 `--use-mock-keychain`（每处都有中文注释说明原因）。这与版本无关，135/155/158/正式 Chrome 全部可复现。
+- 宠物可访问名称断言已改为结构断言（`名字：状态`），不再钉死「书签精灵」四个字——宠物已支持自定义名字。
 - 固定 Agent 开销已从 7,243 降到 4,877 token/轮；工具定义 3,502 token（36 个）。
 - 多根修复已完成：`list_all_folders` 返回 `roots` + 递归书签数；`list_bookmarks` 列根层返回 `roots`；系统提示明确「书签栏 ≠ 全库」「其他书签根级书签不是游离」。
-- 但这只是第一层修复。用户仍认为 Agent 落后、难用。**不要因为测试全绿就宣布完成。**
+- 0.2.175 已合并四条并行工作线（glass-ui / ideas-agent / semantic-search / external-api），对应 worktree 在 `/Users/xalor/orca/workspaces/markai/`，分支均已合并进 `main`。
+- 用户仍可能觉得 Agent 落后。**不要因为测试全绿就宣布完成。**
 
 ## 2. 目标（DoD）
 
@@ -75,21 +77,17 @@ CHROME_BIN='/Users/xalor/Library/Caches/ms-playwright/chromium-1255/chrome-mac-a
 ```
 
 - 全量测试只许增加，不许为了通过而删断言。
-- 最终发版：补丁版本（从 0.2.174 起）、release notes、README、提交、tag、push、GitHub Release；只在 DoD 全部满足后做。
+- 最终发版：补丁版本（从 0.2.175 起）、release notes、README、提交、tag、push、GitHub Release；只在 DoD 全部满足后做。
 - 不要提交 `promo/`；不要改用户真实书签；不要依赖本地未提交文件。
 
 ## 3. 当前已知缺口（按优先级）
 
-1. ~~`organize_folder` 只接受目标文件夹的直接子书签。~~ 已新增显式 `scope:"deep"`：可递归目标子树，暂存放弃会按原父文件夹逐条回原位；默认仍是 direct，避免误伤。仍需真实任务验证 Agent 是否会在“整理整个大类”时正确选择 deep。
-2. 弹窗仍有三张状态卡占首屏；整理记录底部操作区在窄高视口可能被截；健康检查已有「去填写」但仍需真机确认。
-3. e2e 书签精灵说话用例偶发首轮 `firstLine=null`，复跑即过；需要消除随机/冷却依赖。
-2. `list_all_folders` 已有递归书签数，但 Agent 仍可能只读一个根；需要用真实任务验证提示词是否真的改变行为。
-3. 深整理已实现但尚未在真实 1000+ 书签库跑完整任务；需要测轮数、耗时、放弃后结构还原。
-3. Agent 仍然偏“问答式”：分析完停在“需要我执行吗”，用户要再回一句。需要更主动地给出**可确认的计划**（计划卡/暂存），而不是纯文本建议。
-4. 多选入口在 compact 下不够明显。
-5. 整理记录长内容/底部操作区在窄高视口仍有截断风险。
-6. 健康检查的配置问题没有直接跳转。
-7. 需要真实基准：3000 条列表、1000+ 树展开、Agent 整理任务的轮数与耗时。
+1. `organize_folder` 的 `scope:"deep"` 已实现；仍需真实任务验证 Agent 在“整理整个大类”时是否稳定选择 deep，并记录轮数/耗时。
+2. 深整理尚未在真实 1000+ 书签库跑完整任务；需要测放弃后结构是否逐条还原。
+3. Agent 仍可能偏“问答式”：需要更主动地给出**可确认的计划**（计划卡/暂存），而不是纯文本建议。
+4. 弹窗三张状态卡占首屏；整理记录底部操作区在窄高视口可能被截；健康检查已有「去填写」但仍需真机确认。
+5. 需要真实基准：3000 条列表、1000+ 树展开、语义检索在 5000+ 书签下的首屏与命中率。
+6. 三个并行 worktree 已合并，可在确认 `git branch --merged main` 后清理；清理前先确认没有未提交改动。
 
 ## 4. 工作方式
 

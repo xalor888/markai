@@ -76,6 +76,13 @@ function launchChrome() {
       '--disk-cache-size=1048576',
       '--disable-application-cache',
       '--disable-background-networking',
+      /*
+       * Chrome 158 起书签改走加密存储（EncryptedBookmarks），密钥由 macOS Keychain 提供。
+       * 自动化 profile 在无人值守时弹不出 Keychain 授权，`chrome.bookmarks.*` 会**永久挂起**
+       * （回调不触发、Promise 不 resolve、lastError 为空）——表现为 e2e 卡在造数据那一步。
+       * mock keychain 让加密层用进程内密钥，书签 API 才能正常返回。
+       */
+      '--use-mock-keychain',
       // 默认 headless：不弹窗、不抢焦点（Chrome 112+ 的 new headless 支持扩展）
       ...(HEADED ? [] : ['--headless=new']),
       'about:blank',
@@ -4735,7 +4742,11 @@ async function run() {
     );
     check(
       '它有可访问名称（读屏能知道它是什么、什么心情）',
-      Boolean(pet && pet.label.includes('书签精灵') && pet.label.length > 8),
+      /*
+       * 名字可自定义（宠物工作室），所以不能钉死「书签精灵」四个字：
+       * 真正要守的是「名字 + 冒号 + 当前心情」这个结构，读屏才既有身份也有状态。
+       */
+      Boolean(pet && /^[^：]{1,24}：.+/.test(pet.label)),
       pet ? pet.label : '',
     );
 

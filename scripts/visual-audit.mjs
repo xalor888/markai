@@ -47,6 +47,12 @@ function launchChrome() {
       '--window-size=1440,960',
       '--force-device-scale-factor=2',
       /*
+       * Chrome 158 起书签改走加密存储，密钥来自 macOS Keychain。
+       * 无头/无人值守的临时 profile 拿不到 Keychain 授权时，`chrome.bookmarks.*` 会永久挂起，
+       * 注入样本那一步就会超时。mock keychain 让加密层改用进程内密钥。
+       */
+      '--use-mock-keychain',
+      /*
        * 默认 headless。
        *
        * 早先这里没有这个参数：每跑一次就在前台弹一个 1440×960 的窗口抢焦点，
@@ -531,6 +537,37 @@ async function main() {
       await opt.waitReady(`!!document.body && document.body.innerText.length > 10`);
       await sleep(700);
       await opt.shot('06-options');
+    }
+
+    // 6.1) 设置页 · 点子分区
+    /*
+     * 单独截一张：这一节之前是「正在接入」的占位，真机上滚到锚点才能确认
+     * 来源徽标、冷却表条数与「清空」按钮真的渲染出来（且没被搜索过滤掉）。
+     */
+    if (want('options-ideas')) {
+      const ideas = await openPage(`chrome-extension://${EXT_ID}/options.html#ideas`, { width: 1180, height: 940 });
+      await ideas.waitReady(`!!document.querySelector('#ideas')`, 100);
+      await ideas.ev(`(() => {
+        const s = document.querySelector('#ideas');
+        if (!s) return false;
+        s.scrollIntoView({ block: 'start' });
+        return true;
+      })()`);
+      await sleep(600);
+      const ideasOk = await ideas.ev(`(() => {
+        const s = document.querySelector('#ideas');
+        if (!s) return false;
+        return {
+          hidden: s.hasAttribute('hidden'),
+          source: !!s.querySelector('[data-testid="ideas-source"]'),
+          count: !!s.querySelector('[data-testid="ideas-seen-count"]'),
+          reset: !!s.querySelector('[data-testid="ideas-reset-cooldown"]'),
+        };
+      })()`);
+      if (!ideasOk || ideasOk.hidden || !ideasOk.source || !ideasOk.count || !ideasOk.reset) {
+        throw new Error(`点子分区没有完整渲染：${JSON.stringify(ideasOk)}`);
+      }
+      await ideas.shot('16-options-ideas');
     }
   } catch (e) {
     console.error('视觉审查失败：', e instanceof Error ? e.message : e);

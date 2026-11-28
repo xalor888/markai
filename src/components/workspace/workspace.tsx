@@ -1,4 +1,4 @@
-import { Clock, PanelLeftOpen, Search, Trash2, Wand2 } from 'lucide-react';
+import { Clock, PanelLeftOpen, Search, Sparkles, Trash2, Wand2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useAIStore } from '@/stores/aiStore';
 import { resolveTitlePath, useBookmarkStore } from '@/stores/bookmarkStore';
@@ -32,6 +32,12 @@ import {
   clearSearchHistory,
   readSearchHistory,
 } from '@/lib/search/history';
+import { keywordHits, searchBookmarks } from '@/lib/features/semantic';
+import { reasonLabel } from '@/lib/search/semantic/search';
+import { useSemanticOverlay } from '@/lib/search/semantic/overlay';
+
+/** 稳定的空数组：避免每次渲染产生新引用，把无关组件重渲染一遍 */
+const EMPTY_SEMANTIC_EXTRAS: [] = [];
 
 /**
  * 工作区根组件（侧边栏 / 完整页共用）：
@@ -117,15 +123,57 @@ export function Workspace({
   // 顶栏唯一搜索框：树与列表都读它
   const searchQuery = useBookmarkStore((s) => s.searchQuery);
   const setSearchQuery = useBookmarkStore((s) => s.setSearchQuery);
+  const roots = useBookmarkStore((s) => s.roots);
   /** 搜索框聚焦态 + 最近搜索（仅本地，展示 5 条） */
   const [searchFocused, setSearchFocused] = useState(false);
   const [recentSearches, setRecentSearches] = useState<string[]>([]);
+  /**
+   * 顶栏的语义补充结果（与列表共享同一份，见 `semantic/overlay.ts`）。
+   *
+   * 列表继续走原有的即时关键词过滤（1000 条时每次按键都同步、不抖）；
+   * 这里只在输入停顿 250ms 后补几条"字面没命中、但含义相近"的书签，
+   * 与关键词结果按 id 去重。它们是补充，不替换列表。
+   */
+  const overlayQuery = useSemanticOverlay((s) => s.overlay.query);
+  const overlayExtras = useSemanticOverlay((s) => s.overlay.extras);
+  const semanticExtras = overlayQuery === searchQuery.trim() ? overlayExtras : EMPTY_SEMANTIC_EXTRAS;
 
   // 查询被清空而输入框仍聚焦时，也要刷新最近搜索（只靠 onFocus 会漏掉"清空后继续看"）
   useEffect(() => {
     if (!searchFocused || searchQuery.trim()) return;
     setRecentSearches(readSearchHistory());
   }, [searchFocused, searchQuery]);
+
+  // 语义补充：输入停顿 250ms 后再查，避免每个按键都跑一遍混合检索
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (!q || q.startsWith('#')) {
+      useSemanticOverlay.getState().clear();
+      return;
+    }
+    // 失焦后保留上一批结果：列表还在展示它们，不能因为鼠标点了别处就让标记消失
+    if (!searchFocused) return;
+    let cancelled = false;
+    const timer = setTimeout(() => {
+      void searchBookmarks(roots, q, { limit: 40 })
+        .then((result) => {
+          if (cancelled) return;
+          // 只保留关键词没找到的条目：列表里已有的不重复展示，也不改变它的顺序
+          const literal = new Set(keywordHits(roots, q, { limit: 200 }).map((hit) => hit.id));
+          const extras = result.hits
+            .filter((hit) => hit.reason === 'semantic' && !literal.has(hit.id))
+            .slice(0, 20);
+          useSemanticOverlay.getState().setOverlay({ query: q, extras });
+        })
+        .catch(() => {
+          if (!cancelled) useSemanticOverlay.getState().clear();
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [searchFocused, searchQuery, roots]);
   const streaming = useAIStore((s) => s.streaming);
   const messages = useAIStore((s) => s.messages);
   const activeId = useAIStore((s) => s.activeId);
@@ -496,6 +544,47 @@ export function Workspace({
                 >
                   <Search className="h-3 w-3 shrink-0 text-muted-foreground" />
                   <span className="truncate">{q}</span>
+                </button>
+              ))}
+            </div>
+          )}
+          {/*
+            语义补充：关键词搜不到、但向量相近的条目。
+            只列列表里没有的（去重），每条带「语义」标记，点开即跳转。
+          */}
+          {searchFocused && searchQuery.trim() && semanticExtras.length > 0 && (
+            <div
+              data-testid="semantic-extras"
+              className="markai-glass markai-glass-liquid animate-fade-in absolute top-full right-0 left-0 z-30 mt-1 rounded-lg p-1"
+            >
+              <p className="flex items-center gap-1 px-2 py-1 text-2xs text-muted-foreground">
+                <Sparkles className="h-3 w-3" />
+                语义补充
+                <span className="text-muted-foreground/60">按含义找到，字面未命中</span>
+              </p>
+              {semanticExtras.slice(0, 5).map((hit) => (
+                <button
+                  key={hit.id}
+                  type="button"
+                  data-testid="semantic-extra"
+                  aria-label={`打开语义结果：${hit.title}`}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => void openUrl(hit.url)}
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors hover:bg-muted"
+                >
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-xs bg-accent-muted text-accent">
+                    <Sparkles className="h-3 w-3" aria-hidden="true" />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-xs text-foreground">{hit.title}</span>
+                    <span className="block truncate text-2xs text-muted-foreground">
+                      {reasonLabel(hit.reason)}
+                      {hit.path ? ` · ${hit.path}` : ''}
+                    </span>
+                  </span>
+                  <span className="shrink-0 rounded-xs bg-accent-muted px-1 py-0.5 text-2xs leading-none text-accent">
+                    语义
+                  </span>
                 </button>
               ))}
             </div>

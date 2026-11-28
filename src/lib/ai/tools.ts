@@ -11,6 +11,8 @@ import { addMemoryItem, deleteMemoryItem, getMemories, searchMemories } from './
 import { registrableDomain } from '@/lib/bookmarks/domain';
 import { rememberBatchOrigins, stageBatch } from '@/lib/ai/organize-staging';
 import { resolveConfig } from '@/lib/providers';
+import { buildEntriesFromRoots } from '@/lib/search/semantic/index';
+import { fuseSearch } from '@/lib/search/semantic/search';
 
 /** 工具执行结果 */
 export interface ToolOutput {
@@ -331,10 +333,47 @@ const searchBookmarksSchema = z.object({
   // 变成几万 token 的超大回填，模型反而更难找到目标。需要更多时显式传 limit/offset。
   limit: z.number().int().min(1).max(2000).optional(),
   offset: z.number().int().min(0).optional(),
+  /** true = 混合检索（语义 + 关键词），默认仅关键词 */
+  semantic: z.boolean().optional(),
 });
 
 async function searchBookmarks(args: unknown): Promise<ToolOutput> {
-  const { query, limit = 50, offset = 0 } = searchBookmarksSchema.parse(args);
+  const { query, limit = 50, offset = 0, semantic = false } = searchBookmarksSchema.parse(args);
+  /*
+   * 语义分支：复用 UI 的同一套融合排序（精确置顶 + 关键词/向量加权）。
+   * 这里在内存里现场建索引，不读 storage——Service Worker 与 UI 各自持有一份，
+   * 避免两个写入方同时改同一个 manifest。语义结果上限 200（与 keywordHits 一致）。
+   */
+  if (semantic) {
+    const tree = await chrome.bookmarks.getTree();
+    const roots = tree[0]?.children ?? [];
+    const all = fuseSearch(buildEntriesFromRoots(roots), query, { limit: 200 });
+    const page = all.slice(offset, offset + limit);
+    const items = page.map((hit) => ({
+      id: hit.id,
+      title: hit.title,
+      url: hit.url,
+      folder: false,
+      path: hit.path,
+      match: hit.reason,
+      score: hit.score,
+    }));
+    const nextOffset = offset + items.length < all.length ? offset + items.length : undefined;
+    return {
+      result: JSON.stringify({
+        query,
+        semantic: true,
+        total: all.length,
+        shown: items.length,
+        offset,
+        nextOffset,
+        hasMore: nextOffset !== undefined,
+        truncated: all.length >= 200 || nextOffset !== undefined,
+        ...(all.length >= 200 ? { note: '语义检索最多返回 200 条；需要更多请收窄关键词或改用关键词检索。' } : {}),
+        items,
+      }),
+    };
+  }
   const nodes = await chrome.bookmarks.search(query);
   const items = nodes.slice(offset, offset + limit);
   const paths = await resolvePaths(items.map((n) => n.id));

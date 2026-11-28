@@ -52,6 +52,7 @@ export interface SettingsSectionMeta {
 export const SETTINGS_SECTIONS: SettingsSectionMeta[] = [
   { id: 'health', label: '健康检查', icon: ShieldCheck, group: 'connection' },
   { id: 'ai', label: 'AI 服务', icon: Plug, group: 'connection' },
+  { id: 'search', label: '搜索', icon: Search, group: 'connection' },
   { id: 'context', label: '上下文与预算', icon: SlidersHorizontal, group: 'connection' },
   { id: 'agent', label: 'Agent 行为', icon: Zap, group: 'agent' },
   { id: 'memory', label: '长期记忆', icon: Brain, group: 'agent' },

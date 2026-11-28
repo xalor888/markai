@@ -197,6 +197,8 @@ export interface ToggleRowProps {
   disabled?: boolean;
   /** 子开关：缩进一层，表明它挂在上一个开关下面 */
   nested?: boolean;
+  /** 稳定的测试锚点（可选，不传则不影响既有用法） */
+  testId?: string;
 }
 
 export function ToggleRow({
@@ -207,6 +209,7 @@ export function ToggleRow({
   onCheckedChange,
   disabled,
   nested = false,
+  testId,
 }: ToggleRowProps) {
   const { query, match } = useSettingsSearch();
   const inMatchedSection = useSectionMatched();
@@ -232,6 +235,7 @@ export function ToggleRow({
         onCheckedChange={onCheckedChange}
         disabled={disabled}
         aria-label={label}
+        data-testid={testId}
         className="mt-0.5"
       />
     </div>

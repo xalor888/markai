@@ -17,10 +17,14 @@ import { useUIStore } from '@/stores/uiStore';
 import { useThemeStore } from '@/stores/themeStore';
 import { flattenBookmarks } from '@/lib/bookmarks/timeline';
 import { searchCommands, type CommandItem } from '@/lib/command/search';
-import { buildPaletteGroups } from '@/lib/command/palette';
+import { buildPaletteGroups, type PaletteGroup } from '@/lib/command/palette';
 import { readRecent, recordRecent, type RecentEntry } from '@/lib/command/recent';
+import { keywordHits, searchBookmarks, type SemanticHit } from '@/lib/features/semantic';
+import { reasonLabel } from '@/lib/search/semantic/search';
 import { openUrl } from '@/lib/open-url';
 import { cn } from '@/lib/utils';
+
+type BNode = chrome.bookmarks.BookmarkTreeNode;
 
 /** 动作图标的轻量映射：CommandItem 是纯数据，不把 React 组件塞进 lib */
 const ACTION_ICONS: Record<string, typeof Sparkles> = {
@@ -36,6 +40,73 @@ function iconFor(item: CommandItem) {
   if (item.kind === 'folder') return Folder;
   if (item.kind === 'bookmark') return BookmarkIcon;
   return ACTION_ICONS[item.iconKey ?? ''] ?? Sparkles;
+}
+
+/**
+ * ⌘K 的书签结果走异步混合检索。
+ *
+ * 先同步塞入关键词结果，再在 100ms 抖动后换成 `searchBookmarks` 的结果——
+ * 索引尚未建好或远端很慢时，面板不会先闪一下空白。`asOf` 用来判断
+ * "这批结果是不是当前查询的"，避免旧结果盖在新输入上。
+ */
+function useSemanticBookmarks(
+  open: boolean,
+  roots: BNode[],
+  query: string,
+): { hits: SemanticHit[]; asOf: string } {
+  const [state, setState] = useState<{ hits: SemanticHit[]; asOf: string }>({ hits: [], asOf: '' });
+  useEffect(() => {
+    const q = query.trim();
+    if (!open || !q) {
+      setState({ hits: [], asOf: '' });
+      return;
+    }
+    let cancelled = false;
+    setState({ hits: keywordHits(roots, q, { limit: 20 }), asOf: q });
+    const timer = setTimeout(() => {
+      void searchBookmarks(roots, q, { limit: 20 })
+        .then((result) => {
+          if (!cancelled) setState({ hits: result.hits, asOf: q });
+        })
+        .catch(() => {});
+    }, 100);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [open, roots, query]);
+  return state;
+}
+
+/** 书签组由混合检索结果替换；其余分组（动作/文件夹）保持同步关键词排序 */
+function useSemanticPaletteGroups(
+  all: CommandItem[],
+  query: string,
+  recent: readonly RecentEntry[],
+  hits: SemanticHit[],
+  asOf: string,
+): PaletteGroup[] {
+  return useMemo(() => {
+    const q = query.trim();
+    const syncGroups = buildPaletteGroups(all, q, recent, 40);
+    if (!q || asOf !== q || hits.length === 0) return syncGroups;
+
+    const bookmarkGroup: PaletteGroup = {
+      kind: 'bookmark',
+      label: '书签',
+      items: hits.map((hit) => ({
+        id: `bm:${hit.id}`,
+        kind: 'bookmark' as const,
+        title: hit.title,
+        subtitle: `${reasonLabel(hit.reason)} · ${hit.path}`,
+        url: hit.url,
+      })),
+    };
+    const others = syncGroups.filter((group) => group.kind !== 'bookmark');
+    // 精确/前缀命中要显眼：放到动作与文件夹之前
+    const pinned = hits.some((hit) => hit.reason === 'exact' || hit.reason === 'prefix');
+    return pinned ? [bookmarkGroup, ...others] : [...others, bookmarkGroup];
+  }, [all, query, recent, hits, asOf]);
 }
 
 /**
@@ -204,13 +275,22 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     return [...actions, ...folders, ...bookmarks];
   }, [roots, setSearchQuery, setTreeCollapsed]);
 
-  const groups = useMemo(() => buildPaletteGroups(all, query, recent, 40), [all, query, recent]);
-  const flat = useMemo(() => groups.flatMap((g) => g.items), [groups]);
+  const semanticBookmarks = useSemanticBookmarks(open, roots, query);
+  const paletteGroups = useSemanticPaletteGroups(all, query, recent, semanticBookmarks.hits, semanticBookmarks.asOf);
+  const flat = useMemo(() => paletteGroups.flatMap((g) => g.items), [paletteGroups]);
+  /** 命中原因只用于副标题与小标记；排序已经由 searchBookmarks 决定 */
+  const reasonById = useMemo(
+    () =>
+      new Map<string, SemanticHit['reason']>(
+        semanticBookmarks.hits.map((hit) => [`bm:${hit.id}`, hit.reason]),
+      ),
+    [semanticBookmarks.hits],
+  );
 
   // 查询/数据变化后高亮回到第一条
   useEffect(() => {
     setActive(0);
-  }, [query, groups.length]);
+  }, [query, paletteGroups.length]);
 
   // 高亮项滚动进视野
   useEffect(() => {
@@ -302,7 +382,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
               </p>
             </div>
           ) : (
-            groups.map((group) => (
+            paletteGroups.map((group) => (
               <div key={group.kind} className="mb-1">
                 <p className="flex items-center gap-2 px-2.5 pt-2 pb-1 text-2xs font-medium text-muted-foreground/80">
                   {group.label}
@@ -318,6 +398,7 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
                       data-testid="command-item"
                       data-kind={item.kind}
                       data-idx={idx}
+                      data-reason={reasonById.get(item.id)}
                       onMouseEnter={() => setActive(idx)}
                       onClick={() => runItem(item)}
                       className={cn(
@@ -334,7 +415,19 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
                         <Icon className="h-3.5 w-3.5" />
                       </span>
                       <span className="min-w-0 flex-1">
-                        <span className="block truncate text-xs font-medium text-foreground">{item.title}</span>
+                        <span className="flex items-center gap-1.5">
+                          <span className="block min-w-0 truncate text-xs font-medium text-foreground">{item.title}</span>
+                          {reasonById.get(item.id) === 'semantic' && (
+                            <span
+                              className="flex shrink-0 items-center gap-0.5 rounded-xs bg-accent-muted px-1 py-0.5 text-2xs leading-none text-accent"
+                              aria-label="语义命中"
+                              data-testid="semantic-badge"
+                            >
+                              <Sparkles className="h-3 w-3" />
+                              语义
+                            </span>
+                          )}
+                        </span>
                         {item.subtitle && (
                           <span className="block truncate text-2xs text-muted-foreground">{item.subtitle}</span>
                         )}

@@ -117,13 +117,18 @@ const RAW_TOOL_DEFINITIONS: ToolDefinition[] = [
     type: 'function',
     function: {
       name: 'search_bookmarks',
-      description: '按关键字搜索书签（匹配标题与 URL），默认返回 50 条，支持 offset 翻页，带所在路径。',
+      description:
+        '搜索书签（匹配标题与 URL），默认返回 50 条，支持 offset 翻页，带所在路径。semantic=true 时用本地语义+关键词混合检索（同义改写与相关主题也能命中），语义结果最多 200 条。',
       parameters: {
         type: 'object',
         properties: {
           query: { type: 'string', description: '搜索关键字' },
           limit: { type: 'integer', description: '返回条数上限，默认 50，最大 2000' },
           offset: { type: 'integer', description: '跳过前 N 条（分页用，取上一批返回的 nextOffset）' },
+          semantic: {
+            type: 'boolean',
+            description: '为 true 时使用语义+关键词混合检索；省略则只按字面关键词搜索',
+          },
         },
         required: ['query'],
         additionalProperties: false,
@@ -801,7 +806,7 @@ const RAW_TOOL_DEFINITIONS: ToolDefinition[] = [
  */
 const TOOL_SUMMARY: Record<string, string> = {
   list_bookmarks: '列出文件夹的直接子项（id/标题/URL/文件夹），支持路径与 offset 分页；省略 parentId 时用当前文件夹。',
-  search_bookmarks: '按标题/URL 搜索书签；默认 50 条，支持 offset 分页。',
+  search_bookmarks: '按标题/URL 搜索书签；默认 50 条，支持 offset 分页；semantic=true 走语义混合检索。',
   get_recent_bookmarks: '最近添加的书签，可按天数筛选。',
   get_folder_path: '把书签/文件夹 id 解析成完整路径。',
   create_folder: '新建文件夹；整理某个文件夹时必须显式传 parentId。',

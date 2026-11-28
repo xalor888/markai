@@ -22,6 +22,7 @@ import { Input } from '@/components/ui/input';
 import { ORGANIZE_LABEL } from '@/lib/ui/labels';
 import { recordSearch } from '@/lib/search/history';
 import { flattenBookmarks } from '@/lib/bookmarks/timeline';
+import { useSemanticOverlay } from '@/lib/search/semantic/overlay';
 import { TagsManagerDialog } from './tags-manager-dialog';
 import { colorForTag, colorVarOf, readTagColors, type TagColorMap } from '@/lib/bookmarks/tag-colors';
 import {
@@ -305,7 +306,37 @@ export function BookmarkList({ className, compact = false }: { className?: strin
   }, [effectiveTag, tagMap, roots]);
 
   const browsing = !query.trim();
-  const rawItems = effectiveTag ? taggedNodes : browsing ? children : searchResults;
+  /*
+   * 顶栏的语义补充（只追加关键词没找到的条目，按 id 去重）。
+   *
+   * 结果由顶栏在 250ms 停顿后查一次并放进共享 store；列表只负责展示，
+   * 不自己再查一遍——否则远端向量模式下每次停顿会发两次请求。
+   */
+  const overlayQuery = useSemanticOverlay((s) => s.overlay.query);
+  const overlayExtras = useSemanticOverlay((s) => s.overlay.extras);
+  const semanticNodes = useMemo<BNode[]>(() => {
+    if (browsing || hashTag || overlayQuery !== query.trim() || overlayExtras.length === 0) return [];
+    const known = new Set((searchResults ?? []).map((node) => node.id));
+    return overlayExtras
+      .filter((hit) => !known.has(hit.id))
+      .map((hit) => {
+        const found = findNode(roots, hit.id);
+        return {
+          id: hit.id,
+          title: hit.title,
+          url: hit.url,
+          ...(found?.parentId ? { parentId: found.parentId } : {}),
+        } as BNode;
+      });
+  }, [browsing, hashTag, overlayQuery, overlayExtras, query, searchResults, roots]);
+  const semanticIdSet = useMemo(() => new Set(semanticNodes.map((node) => node.id)), [semanticNodes]);
+  const rawItems = effectiveTag
+    ? taggedNodes
+    : browsing
+      ? children
+      : searchResults
+        ? [...searchResults, ...semanticNodes]
+        : null;
   // 排序（搜索模式下保持原生相关度顺序；文件夹始终置顶）
   const items = useMemo(() => {
     if (!rawItems) return null;
@@ -1304,6 +1335,7 @@ export function BookmarkList({ className, compact = false }: { className?: strin
                 dropTarget={dropTarget}
                 query={query}
                 searching={!browsing}
+                semantic={semanticIdSet.has(node.id)}
                 folderCount={folderCounts[node.id]}
                 {...(tagMap[node.id]?.length
                   ? {
@@ -1609,6 +1641,7 @@ const BookmarkRow = memo(function BookmarkRow({
   dropTarget,
   query,
   searching,
+  semantic,
   folderCount,
   tagCount,
   tagSummary,
@@ -1635,6 +1668,8 @@ const BookmarkRow = memo(function BookmarkRow({
   query: string;
   /** 搜索模式（副文本显示来源文件夹路径） */
   searching: boolean;
+  /** 搜索模式下由语义检索补充进来的条目（行内带一个小标记） */
+  semantic: boolean;
   /** 该文件夹的真实子项数（由树 store 推导；未取到时不显示，绝不显示假的 0） */
   folderCount?: number;
   /** 标签数 / 标签名 / 首个标签颜色（只在 hover / 聚焦时展示，避免常态噪音） */
@@ -1784,18 +1819,29 @@ const BookmarkRow = memo(function BookmarkRow({
           <p className="mt-0.5 truncate text-2xs text-muted-foreground">
             {searching ? (
               // 搜索模式：显示来源文件夹路径（可点击定位），浏览模式显示域名与时间
-              node.parentId ? (
-                <button
-                  type="button"
-                  onClick={() => useBookmarkStore.getState().revealInTree(node.parentId!)}
-                  className="text-muted-foreground transition-colors hover:text-accent"
-                  title="在树中显示该文件夹"
-                >
-                  {folderPath(node.parentId)}
-                </button>
-              ) : (
-                '(根目录)'
-              )
+              <>
+                {semantic && (
+                  <span
+                    className="mr-1 inline-flex items-center rounded-xs bg-accent-muted px-1 py-px text-2xs leading-none text-accent"
+                    aria-label="语义命中"
+                    data-testid="semantic-row-badge"
+                  >
+                    语义
+                  </span>
+                )}
+                {node.parentId ? (
+                  <button
+                    type="button"
+                    onClick={() => useBookmarkStore.getState().revealInTree(node.parentId!)}
+                    className="text-muted-foreground transition-colors hover:text-accent"
+                    title="在树中显示该文件夹"
+                  >
+                    {folderPath(node.parentId)}
+                  </button>
+                ) : (
+                  '(根目录)'
+                )}
+              </>
             ) : (
               <>
                 {highlightText(getHost(node.url), query)}

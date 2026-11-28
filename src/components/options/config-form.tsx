@@ -32,6 +32,7 @@ import { PetSettingsSection } from '@/components/options/pet-settings';
 import { AppearanceSettingsSection } from '@/components/options/appearance-settings';
 import { IdeasSettingsSection } from '@/components/options/ideas-settings';
 import { ExternalSettingsSection } from '@/components/options/external-settings';
+import { SearchSettingsSection } from '@/components/options/search-settings';
 import { useThemeStore, type Theme } from '@/stores/themeStore';
 import {
   PROVIDERS,
@@ -992,6 +993,11 @@ export function ConfigForm() {
             }
           />
         </SettingsSection>
+      </ErrorBoundary>
+
+      {/* ── 搜索 ── */}
+      <ErrorBoundary area="搜索">
+        <SearchSettingsSection />
       </ErrorBoundary>
 
       {/* ── 上下文与预算 ── */}

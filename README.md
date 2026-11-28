@@ -254,9 +254,31 @@ src/
 ├── stores/ # Zustand：bookmarkStore / aiStore / configStore / themeStore / uiStore
 ├── lib/
 │ ├── ai/ # client（SSE+降级）/ agent（工具循环）/ tools（书签工具执行器）/ prompts / types
+│ ├── external/ # 对外接口：鉴权、长轮询领活、审计（实现见 tools/markai-bridge.mjs）
+│ ├── pet/ # 宠物造型：轮廓 / 配色 / 配件
+│ ├── sidebar/ # 侧边栏偏好（排序/密度）与根识别
 │ ├── providers.ts # OpenAI / DeepSeek / Moonshot / Ollama 预设
 │ └── ...
-└── assets/main.css # Tailwind v4 设计 token（Slate + Indigo；常规界面禁阴影，仅浮层用光学玻璃）
+├── assets/main.css # Tailwind v4 设计 token（Slate + Indigo；常规界面禁阴影，仅浮层用光学玻璃）
+skills/markai-bookmarks/ # 给外部 Agent 的 Skill（安装：node tools/install-skill.mjs）
+tools/ # 本机桥（MCP/HTTP）、CLI 封装、Skill 安装脚本
+```
+
+## 对外接口（MCP / CLI / Skills）
+
+让 Claude Code、Codex、Cursor 等外部 Agent 在授权后读取与整理书签。
+只监听 `127.0.0.1`，删除永远只提议、不执行。完整说明见
+[docs/external-api.md](docs/external-api.md)。
+
+```bash
+# 1. 设置 → 对外接口 → 生成 token
+# 2. 启动桥（与扩展同时运行）
+node tools/markai-bridge.mjs --token <TOKEN>
+
+# 3. 任选其一
+node tools/markai-bridge.mjs --print-mcp-config --token <TOKEN>   # MCP
+MARKAI_TOKEN=<TOKEN> node tools/markai.mjs search "react"          # CLI
+node tools/install-skill.mjs                                       # Skills
 ```
 
 ## 许可

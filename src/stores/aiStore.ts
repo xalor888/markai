@@ -155,6 +155,13 @@ interface AIState {
   undoLast: (id?: string, opts?: { silent?: boolean }) => Promise<boolean>;
   /** 持久化；force=true 时跳过远端合并（清空等用户明确意图的操作） */
   _persist: (force?: boolean) => Promise<void>;
+  /**
+   * 外部 Agent（MCP/CLI）提交的删除提议。
+   *
+   * 与聊天里 `propose_deletions` 的结果走同一条队列：用户看到的仍是同一张确认卡，
+   * 确认后才由 background 执行。外部接口**没有**直接删除的路径。
+   */
+  addExternalDeletions: (proposals: DeletionProposal[]) => Promise<number>;
 }
 
 /**
@@ -898,6 +905,20 @@ export const useAIStore = create<AIState>((set, get) => ({
 
   resolveDeletion(proposalId, status: DeletionStatus) {
     get().resolveDeletions([[proposalId, status]]);
+  },
+
+  async addExternalDeletions(proposals) {
+    if (proposals.length === 0) return 0;
+    let added = 0;
+    set((s) => {
+      const before = new Set(s.pendingDeletions.map((p) => p.bookmarkId));
+      const merged = dedupeProposals([...s.pendingDeletions, ...proposals]);
+      const kept = merged.slice(-PENDING_DELETIONS_LIMIT);
+      added = proposals.filter((p) => !before.has(p.bookmarkId)).length;
+      return { pendingDeletions: kept };
+    });
+    await get()._persist();
+    return added;
   },
 
   resolveDeletions(entries: [string, DeletionStatus][]) {

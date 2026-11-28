@@ -23,6 +23,7 @@ import { ShortcutsDialog } from '@/components/common/shortcuts-dialog';
 import { ErrorBoundary } from '@/components/common/error-boundary';
 import { useUIStore } from '@/stores/uiStore';
 import { PetLayer } from '@/components/pet/pet-layer';
+import { PetStudio } from '@/components/pet/pet-studio';
 import { TopbarExtras } from '@/components/workspace/topbar-extras';
 import { CHAT_WIDTH_MAX, CHAT_WIDTH_MAX_COMPACT, clampChatWidth } from '@/lib/chat-width';
 import {
@@ -718,6 +719,7 @@ export function Workspace({
       <BookmarkDialogs />
       <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} />
       <DeletionsDialog open={deletionsOpen} onOpenChange={setDeletionsOpen} />
+      <PetStudio />
       <OrganizeLogDialog open={organizeLogOpen} onOpenChange={setOrganizeLogOpen} />
       <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
       <ConfirmHost />

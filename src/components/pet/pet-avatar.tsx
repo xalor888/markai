@@ -25,8 +25,15 @@ import { Spring, createTicker, prefersReducedMotion, stepAll } from '@/lib/pet/m
 import { expressionOf, type PetFx, type PetState } from '@/lib/pet/mood';
 import { cn } from '@/lib/utils';
 import {
+  PET_ACCESSORY_PATHS,
+  PET_ACCESSORY_STYLE,
+  PET_BODY_PATHS,
+  PET_DEFAULT_DESIGN,
+  paletteById,
+  type PetDesign,
+} from '@/lib/pet/design';
+import {
   PET_BLUSH,
-  PET_BODY_PATH,
   PET_BROWS,
   PET_EYES,
   PET_FX,
@@ -121,11 +128,24 @@ export interface PetAvatarProps {
   /** 纯装饰（外层已有可访问名称与交互）：此时 SVG 不再自称 img */
   decorative?: boolean;
   className?: string;
+  /** 外观（名字/轮廓/配色/配件）；不传用默认造型，便于旧调用点无痛过渡 */
+  design?: PetDesign;
 }
 
-export function PetAvatar({ state, size, follow, decorative, className }: PetAvatarProps) {
+export function PetAvatar({
+  state,
+  size,
+  follow,
+  decorative,
+  className,
+  design = PET_DEFAULT_DESIGN,
+}: PetAvatarProps) {
   const expr = expressionOf(state);
   const uid = useRef(`p${++uidSeed}`).current;
+  const palette = paletteById(design.palette);
+  const bodyPath = PET_BODY_PATHS[design.species] ?? PET_BODY_PATHS.ink;
+  const accessoryPaths = design.accessory === 'none' ? [] : PET_ACCESSORY_PATHS[design.accessory];
+  const accessoryStyle = design.accessory === 'none' ? 'fill' : PET_ACCESSORY_STYLE[design.accessory];
 
   const rootRef = useRef<SVGGElement>(null);
   const bodyRef = useRef<SVGGElement>(null);
@@ -341,10 +361,21 @@ export function PetAvatar({ state, size, follow, decorative, className }: PetAva
       height={size}
       role={decorative ? 'presentation' : 'img'}
       aria-hidden={decorative || undefined}
-      aria-label={decorative ? undefined : `书签精灵：${expr.aria}`}
+      aria-label={decorative ? undefined : `${design.name}：${expr.aria}`}
       data-pet-state={state}
+      data-pet-species={design.species}
+      data-pet-accessory={design.accessory}
       data-testid="pet-avatar"
       onPointerDown={bounce}
+      style={{
+        // 配色板只覆盖身体/眼睛/腮红；其余（嘴、眉、特效）仍走主题 token，
+        // 这样浅色身体也不会出现"白嘴白眉看不见"的问题——palette.eye 只给眼睛
+        ['--pet-body-top' as string]: palette.top,
+        ['--pet-body-bottom' as string]: palette.bottom,
+        ...(palette.blush ? { ['--pet-blush' as string]: palette.blush } : {}),
+        ...(palette.eye ? { ['--pet-eye' as string]: palette.eye } : {}),
+        ...(palette.pupil ? { ['--pet-pupil' as string]: palette.pupil } : {}),
+      }}
     >
       <defs>
         <linearGradient id={gradientId} gradientUnits="userSpaceOnUse" x1="30" y1="8" x2="62" y2="88">
@@ -365,8 +396,8 @@ export function PetAvatar({ state, size, follow, decorative, className }: PetAva
         {/* 生命层：呼吸 / 摇摆 / 跳 —— 只走 CSS（合成器），JS 不碰这一层 */}
         <g className={`pet-breath pet-breath-${expr.breath} pet-life pet-life-${state}`}>
           <g ref={bodyRef}>
-            <path className="pet-body" d={PET_BODY_PATH} fill={bodyGradient} />
-            <path className="pet-rim" d={PET_BODY_PATH} />
+            <path className="pet-body" d={bodyPath} fill={bodyGradient} />
+            <path className="pet-rim" d={bodyPath} />
             {/* 左上掠射高光：不是一块贴上去的白斑，而是随身体一起压扁的椭圆 */}
             <ellipse
               className="pet-sheen"
@@ -488,6 +519,20 @@ export function PetAvatar({ state, size, follow, decorative, className }: PetAva
               d={PET_MOUTHS[expr.mouth]}
               fill={mouthFilled ? 'currentColor' : 'none'}
             />
+
+            {/* 配件最后画：它必须压在身体与五官之上，否则眼镜会被眼皮盖住 */}
+            {accessoryPaths.length > 0 && (
+              <g
+                className={cn('pet-accessory', `pet-accessory-${design.accessory}`)}
+                data-testid="pet-accessory"
+                fill={accessoryStyle === 'fill' ? 'currentColor' : 'none'}
+                stroke={accessoryStyle === 'stroke' ? 'currentColor' : 'none'}
+              >
+                {accessoryPaths.map((d, i) => (
+                  <path key={i} d={d} strokeWidth={accessoryStyle === 'stroke' ? 2 : 0} />
+                ))}
+              </g>
+            )}
           </g>
           <Fx fx={expr.fx} />
         </g>

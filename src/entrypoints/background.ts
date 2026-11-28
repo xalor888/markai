@@ -11,6 +11,7 @@ import { folderContextNote } from '@/lib/ai/context-note';
 import { ChatError, testConnection } from '@/lib/ai/client';
 import { ensureRoots } from '@/lib/ai/tools';
 import { recoverInterruptedTransaction } from '@/lib/undo/recorder';
+import { installExternalApi } from '@/lib/external/register';
 import { toolbarClear, toolbarError } from '@/lib/ai/toolbar-hint';
 import { createPlanApprovalRegistry, requestPlanApprovalWithAbort } from '@/lib/ai/plan-approval';
 import {
@@ -56,6 +57,16 @@ import type {
 } from '@/lib/ai/types';
 
 export default defineBackground(() => {
+  /*
+   * 对外接口（MCP/CLI）必须在 Service Worker 里启动：它是唯一该持有轮询循环的上下文。
+   * 放在最前面是因为它不依赖书签树/模型目录，早启动早接活。
+   */
+  try {
+    installExternalApi();
+  } catch {
+    // 接口没起来不影响其它功能；设置页会显示"未启用"
+  }
+
   // ── 0. 收尾上一轮被中断的事务 ──
   // 只有在**启动**时机才能安全地做这件事：此刻能看到的 pending 快照必然来自已经死掉的
   // 进程（当前进程还没开始任何轮次），因此不会误提升正在进行中的事务——这也是本方案

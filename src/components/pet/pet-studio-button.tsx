@@ -2,17 +2,15 @@
  * 「制作宠物」入口（顶栏）。
  *
  * 打开宠物工作室：选造型、调色、命名、改口头禅。
- * 占位阶段直接跳到设置页的宠物分区，保证入口可用、不会点出空弹窗。
  */
 import { PawPrint } from 'lucide-react';
+import { openPetStudio } from '@/stores/petStudioStore';
 
 export function PetStudioButton() {
   return (
     <button
       type="button"
-      onClick={() => void chrome.tabs.create({ url: chrome.runtime.getURL('options.html#pet') }).catch(() => {
-        void chrome.runtime.openOptionsPage();
-      })}
+      onClick={openPetStudio}
       data-testid="pet-studio-entry"
       title="制作宠物"
       aria-label="制作宠物"

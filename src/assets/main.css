@@ -458,6 +458,31 @@
   transform-origin: center;
   animation: pet-mouth-in 180ms cubic-bezier(0.34, 1.4, 0.64, 1);
 }
+
+/*
+ * 配件：与嘴/眉同一套"亮色前景"，因为它是戴在深色身体上的。
+ * 眼镜/耳机是描边，领结/围巾/皇冠是填充——两者的着色都走 currentColor，
+ * 于是切换配色板时配件自动跟着对比度走，不需要为每种身体再写一份颜色。
+ */
+.pet-accessory {
+  color: var(--pet-mouth);
+  stroke-linejoin: round;
+  stroke-linecap: round;
+  /* 刚戴上时弹一下：这是"换装"这件事唯一的反馈 */
+  animation: pet-accessory-in 260ms cubic-bezier(0.34, 1.4, 0.64, 1);
+  transform-box: fill-box;
+  transform-origin: center;
+}
+@keyframes pet-accessory-in {
+  from {
+    opacity: 0;
+    transform: scale(0.82);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
 @keyframes pet-mouth-in {
   from {
     transform: scale(0.6);

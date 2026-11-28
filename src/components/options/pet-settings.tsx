@@ -9,11 +9,13 @@
  * 用户调大小、切主题时看到的就是页面里那一只，不存在"设置页好看、实际不一样"。
  */
 import { useEffect, useState } from 'react';
-import { Cat } from 'lucide-react';
+import { Cat, Wand2 } from 'lucide-react';
 import { SettingsSection, SettingRow, ToggleRow } from '@/components/options/setting-primitives';
 import { PetAvatar } from '@/components/pet/pet-avatar';
 import { PET_SIZES, usePetStore, type PetSize } from '@/stores/petStore';
+import { openPetStudio } from '@/stores/petStudioStore';
 import type { PetState } from '@/lib/pet/mood';
+import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
 /** 预览用的心情轮播：让用户一眼看到"它会变脸"，而不是一个静止图标 */
@@ -25,6 +27,7 @@ export function PetSettingsSection() {
   const size = usePetStore((s) => s.size);
   const chatter = usePetStore((s) => s.chatter);
   const follow = usePetStore((s) => s.follow);
+  const design = usePetStore((s) => s.design);
   const update = usePetStore((s) => s.update);
 
   const [previewIdx, setPreviewIdx] = useState(0);
@@ -78,26 +81,44 @@ export function PetSettingsSection() {
               size={64}
               follow={false}
               decorative
+              design={design}
             />
           </div>
-          <div className="flex flex-wrap gap-1.5">
-            {PET_SIZES.map((candidate) => (
-              <button
-                key={candidate}
-                type="button"
-                onClick={() => void update({ size: candidate as PetSize })}
-                className={cn(
-                  'rounded-md border px-2.5 py-1 text-2xs transition-colors',
-                  size === candidate
-                    ? 'border-accent/40 bg-accent-muted text-accent'
-                    : 'border-border bg-card text-muted-foreground hover:border-input hover:text-foreground',
-                )}
-                aria-pressed={size === candidate}
+          <div className="space-y-2">
+            <div className="flex flex-wrap gap-1.5">
+              {PET_SIZES.map((candidate) => (
+                <button
+                  key={candidate}
+                  type="button"
+                  onClick={() => void update({ size: candidate as PetSize })}
+                  className={cn(
+                    'rounded-md border px-2.5 py-1 text-2xs transition-colors',
+                    size === candidate
+                      ? 'border-accent/40 bg-accent-muted text-accent'
+                      : 'border-border bg-card text-muted-foreground hover:border-input hover:text-foreground',
+                  )}
+                  aria-pressed={size === candidate}
+                >
+                  {candidate === 48 ? '小' : candidate === 56 ? '中' : '大'}
+                  <span className="ml-1 tabular-nums opacity-70">{candidate}</span>
+                </button>
+              ))}
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-2xs text-muted-foreground">
+                {design.name} · {design.catchphrase ? `「${design.catchphrase}」` : '默认台词'}
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={openPetStudio}
+                aria-label="打开宠物工作室"
+                data-testid="pet-settings-studio"
               >
-                {candidate === 48 ? '小' : candidate === 56 ? '中' : '大'}
-                <span className="ml-1 tabular-nums opacity-70">{candidate}</span>
-              </button>
-            ))}
+                <Wand2 className="h-3.5 w-3.5" />
+                制作宠物
+              </Button>
+            </div>
           </div>
         </div>
       </SettingRow>

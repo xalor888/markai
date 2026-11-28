@@ -2795,7 +2795,12 @@ async function okA(name: string, fn: () => Promise<void> | void) {
       );
     const offenders = walk(srcDir)
       .filter((f) => /\.tsx?$/.test(f))
-      .filter((f) => /\bv?\d+\.\d+\.\d+\b/.test(stripComments(readFileSync(f, 'utf8'))))
+      /*
+       * 排除 IPv4 字面量：`127.0.0.1` 会被 `\d+\.\d+\.\d+` 误判成版本号。
+       * 负向后顾挡掉「前面还是数字/点」的起点，负向前瞻挡掉「后面还有 .数字」的终点，
+       * 于是 `127.0.0.1` 里的 `127.0.0` 与 `0.0.1` 都不再命中，而 `0.2.174` 照常命中。
+       */
+      .filter((f) => /(?<![\d.])v?\d+\.\d+\.\d+\b(?!\.\d)/.test(stripComments(readFileSync(f, 'utf8'))))
       .map((f) => f.slice(srcDir.length + 1));
     ok('src 下没有硬编码的三段式版本号（防再次漂移）', () =>
       assert.deepEqual(offenders, [], `以下文件硬编码了版本号，请改用 appVersion()：${offenders.join('、')}`),
@@ -17863,7 +17868,13 @@ await okA('每个已实现的工具都有中文标签（不让裸工具名漏到
       const srcDir = resolve(dirname(fileURLToPath(import.meta.url)), '../src');
       const layer = readFileSync(resolve(srcDir, 'components/pet/pet-layer.tsx'), 'utf8');
       assert.ok(layer.includes('queueMicrotask'), '必须合并 notify，否则每个 token 都重算一次');
-      assert.ok(layer.includes('aria-label={`书签精灵'), '按钮必须有可访问名称');
+      /*
+       * 可访问名称现在由用户起的名字构成（`${design.name}：${expr.aria}`），
+       * 所以不能钉死「书签精灵」四个字——那会把"允许改名"这件事测成回归。
+       * 真正要守的是：aria-label 必须是一个**带变量的模板串**（名字与心情都要进去），
+       * 而不是写死的一句，也不能没有。
+       */
+      assert.match(layer, /aria-label=\{`\$\{design\.name\}：\$\{expr\.aria\}/, '按钮必须有含名字与心情的可访问名称');
       assert.ok(layer.includes('aria-live="polite"'), '气泡要用 aria-live，读屏用户也要能听到');
       assert.ok(layer.includes('const heartbeat = window.setInterval(schedule, DIRECTOR_TICK_MS)'), '闲置推进必须有心跳');
     });

@@ -13,7 +13,8 @@
     "zip": "wxt zip",
     "zip:firefox": "wxt zip -b firefox",
     "compile": "tsc --noEmit",
-    "test": "tsx tests/agent.test.ts",
+    "test": "node scripts/run-tests.mjs",
+    "test:one": "node scripts/run-tests.mjs",
     "postinstall": "wxt prepare",
     "test:e2e": "node scripts/e2e-smoke.mjs"
   },

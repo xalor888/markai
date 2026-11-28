@@ -55,6 +55,7 @@ export function PetLayer({ className }: PetLayerProps) {
   const size = usePetStore((s) => s.size);
   const follow = usePetStore((s) => s.follow);
   const chatterEnabled = usePetStore((s) => s.chatter);
+  const design = usePetStore((s) => s.design);
 
   const [state, setState] = useState<PetState>('idle');
   const [bubble, setBubble] = useState<{ key: string; text: string } | null>(null);
@@ -210,7 +211,8 @@ export function PetLayer({ className }: PetLayerProps) {
       pet.touch();
       if (kind === 'double') {
         pet.markPride();
-        showBubble(pickPokeLine('proud', pokeSeed.current++));
+        // 用户写了自己的口头禅：双击就是"说那句话"的入口，比内置台词更有归属感
+        showBubble(pet.design.catchphrase || pickPokeLine('proud', pokeSeed.current++));
         return;
       }
       showBubble(pickPokeLine(state, pokeSeed.current++));
@@ -263,11 +265,11 @@ export function PetLayer({ className }: PetLayerProps) {
         type="button"
         onClick={handleClick}
         className="pointer-events-auto block cursor-pointer rounded-full p-0 transition-transform duration-150 active:scale-95 focus-visible:ring-2 focus-visible:ring-ring/40 focus-visible:outline-none"
-        aria-label={`书签精灵：${expr.aria}（点一下听它说话）`}
-        title={`书签精灵：${expr.aria}`}
+        aria-label={`${design.name}：${expr.aria}（点一下听它说话）`}
+        title={`${design.name}：${expr.aria}`}
         data-pet-state={state}
       >
-        <PetAvatar state={state} size={size} follow={follow} decorative />
+        <PetAvatar state={state} size={size} follow={follow} decorative design={design} />
       </button>
     </div>
   );

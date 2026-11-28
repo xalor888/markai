@@ -12,6 +12,7 @@ export function Slider({
   onChange,
   id,
   'aria-label': ariaLabel,
+  'data-testid': testId,
   className,
 }: {
   value: number;
@@ -21,6 +22,7 @@ export function Slider({
   onChange: (value: number) => void;
   id?: string;
   'aria-label'?: string;
+  'data-testid'?: string;
   className?: string;
 }) {
   // 填充比例：驱动轨道左侧的强调色宽度
@@ -34,6 +36,7 @@ export function Slider({
       step={step}
       value={value}
       aria-label={ariaLabel}
+      data-testid={testId}
       onChange={(e) => onChange(Number(e.target.value))}
       className={['markai-slider', className].filter(Boolean).join(' ')}
       style={{ '--markai-slider-pct': `${pct}%` } as React.CSSProperties}

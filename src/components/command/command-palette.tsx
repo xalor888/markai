@@ -20,6 +20,7 @@ import { searchCommands, type CommandItem } from '@/lib/command/search';
 import { buildPaletteGroups } from '@/lib/command/palette';
 import { readRecent, recordRecent, type RecentEntry } from '@/lib/command/recent';
 import { openUrl } from '@/lib/open-url';
+import { usePresence } from '@/lib/ui/use-presence';
 import { cn } from '@/lib/utils';
 
 /** 动作图标的轻量映射：CommandItem 是纯数据，不把 React 组件塞进 lib */
@@ -49,6 +50,7 @@ function iconFor(item: CommandItem) {
  * 键盘：↑↓ / Home / End 选择，Enter 执行，Esc 关闭；鼠标同样可用。
  */
 export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+  const presence = usePresence(open);
   const [query, setQuery] = useState('');
   const [active, setActive] = useState(0);
   const [recent, setRecent] = useState<RecentEntry[]>([]);
@@ -240,11 +242,14 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
     item.run?.();
   };
 
-  if (!open) return null;
+  if (!presence.mounted) return null;
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-start justify-center bg-foreground/25 px-4 pt-[12vh] backdrop-blur-[2px]"
+      className={cn(
+        'fixed inset-0 z-[60] flex items-start justify-center bg-foreground/25 px-4 pt-[12vh] backdrop-blur-[2px]',
+        presence.state === 'closed' && 'pointer-events-none',
+      )}
       onClick={() => onOpenChange(false)}
     >
       <div
@@ -252,7 +257,8 @@ export function CommandPalette({ open, onOpenChange }: { open: boolean; onOpenCh
         data-testid="command-palette"
         aria-modal="true"
         aria-label="命令面板"
-        className="markai-glass markai-glass-liquid relative animate-fade-in w-full max-w-xl overflow-hidden rounded-xl"
+        data-state={presence.state}
+        className="markai-glass markai-glass-liquid mk-glass-2 mk-panel relative w-full max-w-xl overflow-hidden rounded-xl"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center gap-2.5 border-b border-border px-4">

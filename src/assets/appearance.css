@@ -130,3 +130,14 @@
 :root[data-density='compact'] {
   --mk-row-gap: 0.25rem;
 }
+
+/* 密度不能只是一个 data 属性：设置行本身跟着变松/变紧。
+   compact 保持原来的 14px（默认值不改变既有版面），cozy 加到 18px。 */
+:root[data-density='compact'] [data-setting-row] {
+  padding-top: 0.875rem;
+  padding-bottom: 0.875rem;
+}
+:root[data-density='cozy'] [data-setting-row] {
+  padding-top: 1.125rem;
+  padding-bottom: 1.125rem;
+}

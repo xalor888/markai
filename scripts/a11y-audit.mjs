@@ -14,8 +14,14 @@
 import { spawn } from 'node:child_process';
 import { rmSync } from 'node:fs';
 
+/*
+ * 允许用 CHROME_BIN 覆盖：Playwright 缓存目录会随版本号变化
+ * （本机现在装的是 chromium-1255，写死 1248 会直接 ENOENT）。
+ * 默认值只是"本机常见位置"，找不到时下面的 existsSync 检查会给出可读的提示。
+ */
 const CHROME =
-  '/Users/xalor/Library/Caches/ms-playwright/chromium-1248/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing';
+  process.env.CHROME_BIN ||
+  '/Users/xalor/Library/Caches/ms-playwright/chromium-1255/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing';
 const OUT = '/Users/xalor/Documents/markai/.output/chrome-mv3';
 const EXT = 'ojlfhclcoecgjbgklbjcbcfbjjjlhjhd';
 const PORT = 9352;

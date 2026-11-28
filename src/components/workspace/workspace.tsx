@@ -24,6 +24,8 @@ import { ErrorBoundary } from '@/components/common/error-boundary';
 import { useUIStore } from '@/stores/uiStore';
 import { PetLayer } from '@/components/pet/pet-layer';
 import { PetStudio } from '@/components/pet/pet-studio';
+import { IdeaPanel } from '@/components/ideas/idea-panel';
+import { CleanupSheet } from '@/components/ideas/cleanup-sheet';
 import { TopbarExtras } from '@/components/workspace/topbar-extras';
 import { CHAT_WIDTH_MAX, CHAT_WIDTH_MAX_COMPACT, clampChatWidth } from '@/lib/chat-width';
 import {
@@ -51,6 +53,8 @@ export function Workspace({
   const [deletionsOpen, setDeletionsOpen] = useState(initialDeletionsOpen);
   // 整理记录：自动整理是后台行为，用户需要一个随时能翻账的地方
   const [organizeLogOpen, setOrganizeLogOpen] = useState(initialOrganizeOpen);
+  /** 简单清理面板：由更多菜单打开（入口在 MoreMenu 里） */
+  const [cleanupOpen, setCleanupOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   /** ⌘K 命令面板：一个入口做三件事（搜书签 / 跳文件夹 / 执行动作） */
   const [commandOpen, setCommandOpen] = useState(false);
@@ -152,6 +156,24 @@ export function Workspace({
   useEffect(() => {
     if (streaming && mode === 'compact' && !chatOpen) setChatOpen(true);
   }, [streaming, mode, chatOpen]);
+
+  /**
+   * 点子面板 / 清理面板的「开始」：把指令填进 Agent 并让它接着做。
+   *
+   * 为什么走自定义事件而不是让面板直接调 send：
+   * 面板可能挂在侧边栏与完整页两种容器里，只有这里知道"当前容器的聊天抽屉是否打开"。
+   * 统一在这里接住，才能保证"点开始 → 抽屉展开 → 指令发出"这三件事顺序正确。
+   */
+  useEffect(() => {
+    const onPrompt = (event: Event) => {
+      const prompt = (event as CustomEvent<string>).detail;
+      if (typeof prompt !== 'string' || !prompt.trim()) return;
+      if (!chatOpen) setChatOpen(true);
+      void useAIStore.getState().send(prompt);
+    };
+    document.addEventListener('markai:agent-prompt', onPrompt);
+    return () => document.removeEventListener('markai:agent-prompt', onPrompt);
+  }, [chatOpen]);
 
   /**
    * 待确认的整理方案数。
@@ -522,6 +544,7 @@ export function Workspace({
             mode={mode}
             onToggleChat={() => setChatOpen((v) => !v)}
             onDeletions={() => setDeletionsOpen(true)}
+            onCleanup={() => setCleanupOpen(true)}
             onOrganize={() => {
               setOrganizeLogOpen(true);
               setOrganizeAlert(false);
@@ -720,6 +743,8 @@ export function Workspace({
       <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} />
       <DeletionsDialog open={deletionsOpen} onOpenChange={setDeletionsOpen} />
       <PetStudio />
+      <IdeaPanel />
+      <CleanupSheet open={cleanupOpen} onOpenChange={setCleanupOpen} />
       <OrganizeLogDialog open={organizeLogOpen} onOpenChange={setOrganizeLogOpen} />
       <ShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />
       <ConfirmHost />

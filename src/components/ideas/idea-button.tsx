@@ -1,19 +1,17 @@
 /**
  * 「点子」入口（顶栏）。
  *
- * 占位版只负责"打开点子面板"这个动作本身；面板内容由 `components/ideas/*` 提供。
- * 没装生成器时面板显示规则建议，所以这个入口在任何阶段都不会点出空白。
+ * 只负责打开面板；生成逻辑在 `lib/ideas/*`，面板内容在 `idea-panel.tsx`。
  */
 import { Lightbulb } from 'lucide-react';
-import { pushToast } from '@/lib/toast';
+import { useIdeasStore } from '@/stores/ideasStore';
 
 export function IdeaButton() {
+  const openPanel = useIdeasStore((s) => s.openPanel);
   return (
     <button
       type="button"
-      onClick={() =>
-        pushToast('点子', { description: '点子面板正在接入：当前可在 Agent 面板看到规则建议。' })
-      }
+      onClick={openPanel}
       data-testid="idea-entry"
       title="点子"
       aria-label="点子"

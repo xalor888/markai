@@ -1,4 +1,4 @@
-import { Activity, BookmarkPlus, Check, Keyboard, LayoutPanelLeft, Maximize, MessageSquare, Monitor, Moon, MoreHorizontal, Settings, Sparkles, Sun, Trash2, Wand2 } from 'lucide-react';
+import { Activity, BookmarkPlus, BrushCleaning, Check, Keyboard, LayoutPanelLeft, Maximize, MessageSquare, Monitor, Moon, MoreHorizontal, Settings, Sparkles, Sun, Trash2, Wand2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useThemeStore, type Theme } from '@/stores/themeStore';
 import { useConfigStore } from '@/stores/configStore';
@@ -24,6 +24,7 @@ export function MoreMenu({
   mode,
   onToggleChat,
   onDeletions,
+  onCleanup,
   onOrganize,
   onSettings,
   onShortcuts,
@@ -40,6 +41,8 @@ export function MoreMenu({
   mode: 'compact' | 'full';
   onToggleChat: () => void;
   onDeletions: () => void;
+  /** 打开「简单清理」：勾选重复 / 空文件夹 / 老旧 / 断链，只生成方案不删除 */
+  onCleanup: () => void;
   onOrganize: () => void;
   onSettings: () => void;
   onShortcuts: () => void;
@@ -172,6 +175,7 @@ export function MoreMenu({
           className="markai-glass markai-glass-liquid animate-fade-in absolute right-0 z-50 mt-1 w-52 overflow-hidden rounded-md py-1"
         >
           {item(BookmarkPlus, '收藏当前页面', onSaveCurrentTab)}
+          {item(BrushCleaning, '简单清理', onCleanup)}
           {item(Trash2, '待删除清单', onDeletions, { badge: pendingCount, danger: pendingCount > 0 })}
           {item(Wand2, '整理记录', onOrganize, { badge: stagedCount, active: organizeAlert || stagedCount > 0 })}
           {/* 自动整理的状态与开关：它一直在跑，得让人看得见 */}
